@@ -1,0 +1,263 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Board {
+  id          String   @id @default(uuid())
+  name        String
+  isArchived  Boolean  @default(false)
+  settings    Json     @default("{}")
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  kanbanAgent   KanbanAgent?
+  agentInstances AgentInstance[]
+  workflows     Workflow[]
+  tasks         Task[]
+  messages      Message[]
+  usage         UsageRecord[]
+  auditEvents   AuditEvent[]
+
+  @@index([isArchived])
+}
+
+model KanbanAgent {
+  id            String   @id @default(uuid())
+  board         Board    @relation(fields: [boardId], references: [id], onDelete: Cascade)
+  boardId       String   @unique
+  agentConfig   AgentConfig @relation(fields: [agentConfigId], references: [id])
+  agentConfigId String
+  state         Json     @default("{}")
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+}
+
+model Conversation {
+  id                 String   @id @default(uuid())
+  title              String?
+  isArchived         Boolean  @default(false)
+  defaultModelProfile String?
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  messages  Message[]
+  workflows Workflow[]
+}
+
+model Workflow {
+  id                   String   @id @default(uuid())
+  board                Board    @relation(fields: [boardId], references: [id], onDelete: Cascade)
+  boardId              String
+  sourceConversation   Conversation? @relation(fields: [sourceConversationId], references: [id])
+  sourceConversationId String?
+  title                String
+  brief                Json
+  status               String
+  budgetPolicy         Json     @default("{}")
+  createdAt            DateTime @default(now())
+  updatedAt            DateTime @updatedAt
+
+  tasks       Task[]
+  usage       UsageRecord[]
+  auditEvents AuditEvent[]
+
+  @@index([boardId])
+  @@index([status])
+}
+
+model AgentConfig {
+  id              String   @id @default(uuid())
+  name            String
+  role            String
+  type            String
+  systemPrompt    String
+  modelProfile    String
+  allowedTools    Json     @default("[]")
+  defaultLimits   Json     @default("{}")
+  outputSchema    Json     @default("{}")
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  kanbanAgents   KanbanAgent[]
+  agentInstances AgentInstance[]
+}
+
+model AgentInstance {
+  id           String      @id @default(uuid())
+  config       AgentConfig @relation(fields: [configId], references: [id])
+  configId     String
+  board        Board?      @relation(fields: [boardId], references: [id])
+  boardId      String?     @unique
+  task         Task?       @relation("TaskAgentInstance")
+  taskId       String?      @unique
+  scope        String
+  runtimeState Json        @default("{}")
+  createdAt    DateTime    @default(now())
+  updatedAt    DateTime    @updatedAt
+}
+
+model Task {
+  id                 String   @id @default(uuid())
+  board              Board    @relation(fields: [boardId], references: [id], onDelete: Cascade)
+  boardId            String
+  workflow           Workflow @relation(fields: [workflowId], references: [id], onDelete: Cascade)
+  workflowId         String
+  parent             Task?    @relation("TaskChildren", fields: [parentTaskId], references: [id])
+  parentTaskId       String?
+  children           Task[]   @relation("TaskChildren")
+  agentInstance      AgentInstance @relation("TaskAgentInstance", fields: [agentInstanceId], references: [id])
+  agentInstanceId    String   @unique
+  title              String
+  description        String
+  type               String
+  status             String
+  priority           String?
+  dependencies       Json     @default("[]")
+  workspacePath      String
+  permissionPolicy   Json     @default("{}")
+  limits             Json     @default("{}")
+  metadata           Json     @default("{}")
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  messages           Message[]
+  artifacts          Artifact[]
+  executions         Execution[]
+  permissionRequests PermissionRequest[]
+  permissionGrants   PermissionGrant[]
+  usage              UsageRecord[]
+  auditEvents        AuditEvent[]
+
+  @@index([boardId])
+  @@index([workflowId])
+  @@index([parentTaskId])
+  @@index([status])
+}
+
+model Message {
+  id             String        @id @default(uuid())
+  conversation   Conversation? @relation(fields: [conversationId], references: [id])
+  conversationId String?
+  board          Board?        @relation(fields: [boardId], references: [id])
+  boardId        String?
+  task           Task?         @relation(fields: [taskId], references: [id])
+  taskId         String?
+  role           String
+  content        String
+  meta           Json          @default("{}")
+  createdAt      DateTime      @default(now())
+
+  @@index([conversationId])
+  @@index([boardId])
+  @@index([taskId])
+  @@index([createdAt])
+}
+
+model Artifact {
+  id        String   @id @default(uuid())
+  task      Task     @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  taskId    String
+  name      String
+  type      String
+  path      String
+  version   Int      @default(1)
+  sizeBytes BigInt   @default(0)
+  mimeType  String?
+  meta      Json     @default("{}")
+  createdAt DateTime @default(now())
+
+  @@index([taskId])
+  @@index([type])
+}
+
+model PermissionRequest {
+  id            String   @id @default(uuid())
+  task          Task     @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  taskId        String
+  requestedPath String
+  mode          String
+  reason        String
+  status        String
+  requestedAt   DateTime @default(now())
+  decidedAt     DateTime?
+}
+
+model PermissionGrant {
+  id               String   @id @default(uuid())
+  task             Task     @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  taskId           String
+  path             String
+  mode             String
+  scopeDescription String
+  isActive         Boolean  @default(true)
+  createdAt        DateTime @default(now())
+  revokedAt        DateTime?
+
+  @@index([taskId])
+  @@index([isActive])
+}
+
+model Execution {
+  id          String   @id @default(uuid())
+  task        Task     @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  taskId      String
+  command     String
+  image       String
+  config      Json     @default("{}")
+  status      String
+  exitCode    Int?
+  stdoutPath  String?
+  stderrPath  String?
+  startedAt   DateTime?
+  finishedAt  DateTime?
+  createdAt   DateTime @default(now())
+
+  @@index([taskId])
+  @@index([status])
+}
+
+model UsageRecord {
+  id               String    @id @default(uuid())
+  board            Board?    @relation(fields: [boardId], references: [id])
+  boardId          String?
+  workflow         Workflow? @relation(fields: [workflowId], references: [id])
+  workflowId       String?
+  task             Task?     @relation(fields: [taskId], references: [id])
+  taskId           String?
+  modelProfile     String?
+  tokensIn         BigInt    @default(0)
+  tokensOut        BigInt    @default(0)
+  durationMs       BigInt    @default(0)
+  dockerDurationMs BigInt    @default(0)
+  storageBytes     BigInt    @default(0)
+  createdAt        DateTime  @default(now())
+
+  @@index([boardId])
+  @@index([workflowId])
+  @@index([taskId])
+}
+
+model AuditEvent {
+  id         String    @id @default(uuid())
+  board      Board?    @relation(fields: [boardId], references: [id])
+  boardId    String?
+  workflow   Workflow? @relation(fields: [workflowId], references: [id])
+  workflowId String?
+  task       Task?     @relation(fields: [taskId], references: [id])
+  taskId     String?
+  actor      String
+  eventType  String
+  payload    Json      @default("{}")
+  createdAt  DateTime  @default(now())
+
+  @@index([boardId])
+  @@index([workflowId])
+  @@index([taskId])
+  @@index([eventType])
+  @@index([createdAt])
+}
