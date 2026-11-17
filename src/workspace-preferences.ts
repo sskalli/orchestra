@@ -1,0 +1,60 @@
+export type Camera = { x: number; y: number; scale: number };
+export type PanelSizes = { left?: number; right?: number; mobileLeft?: number };
+export type ComposerSizes = { project?: number; agent?: number };
+
+type View = { leftOpen: boolean; selectedId: string | null; drafts: Record<string, string> };
+
+export function workspacePreferences(projectPath: string, demo: boolean) {
+  const key = `orchestra:workspace:v1:${demo ? "demo" : "codex"}:${projectPath}`;
+
+  const legacyKey = `swarmer:workspace:v1:${demo ? "demo" : "codex"}:${projectPath}`;
+
+  function read(name: string): unknown {
+    try {
+      return JSON.parse(localStorage.getItem(`${key}:${name}`) ?? localStorage.getItem(`${legacyKey}:${name}`) ?? "null");
+    } catch {
+      return null;
+    }
+  }
+
+  function write(name: string, value: unknown) {
+    try {
+      localStorage.setItem(`${key}:${name}`, JSON.stringify(value));
+    } catch {
+      window.dispatchEvent(new Event("orchestra-storage-unavailable"));
+    }
+  }
+
+  return {
+    readView(): View {
+      const value = read("view") as Partial<View> | null;
+      const drafts = value?.drafts;
+      return {
+        leftOpen: value?.leftOpen !== false,
+        selectedId: typeof value?.selectedId === "string" ? value.selectedId : null,
+        drafts: drafts && typeof drafts === "object" && !Array.isArray(drafts)
+          ? Object.fromEntries(Object.entries(drafts).filter(([, draft]) => typeof draft === "string"))
+          : {},
+      };
+    },
+    writeView: (view: View) => write("view", view),
+    readPanels(): PanelSizes {
+      const value = read("panels") as PanelSizes | null;
+      const size = (entry: unknown) => typeof entry === "number" && Number.isFinite(entry) && entry > 0 ? entry : undefined;
+      return { left: size(value?.left), right: size(value?.right), mobileLeft: size(value?.mobileLeft) };
+    },
+    writePanels: (panels: PanelSizes) => write("panels", panels),
+    readComposers(): ComposerSizes {
+      const value = read("composers") as ComposerSizes | null;
+      const size = (entry: unknown) => typeof entry === "number" && Number.isFinite(entry) && entry > 0 ? entry : undefined;
+      return { project: size(value?.project), agent: size(value?.agent) };
+    },
+    writeComposers: (sizes: ComposerSizes) => write("composers", sizes),
+    readCamera(): Camera | undefined {
+      const value = read("camera") as Camera | null;
+      if (value && Number.isFinite(value.x) && Number.isFinite(value.y) &&
+          Number.isFinite(value.scale) && value.scale >= 0.3 && value.scale <= 2.5) return value;
+    },
+    writeCamera: (camera: Camera) => write("camera", camera),
+  };
+}

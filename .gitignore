@@ -1,0 +1,19 @@
+node_modules/
+dist/
+
+# Local credentials, agent configuration, and environment overrides
+.env
+.env.*
+!.env.example
+.aws/
+.codex/
+.agents/
+*.pem
+*.key
+
+# Runtime state, transcripts, and temporary outputs
+*.log
+*.sqlite
+*.sqlite-*
+coverage/
+.DS_Store
