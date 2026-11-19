@@ -14,3 +14,5 @@ For user-facing work, delegate design and accessibility review to a designer bef
 Use inspect_project_git for current candidate Git state and an analyser for current file contents. A previous transcript is historical evidence.
 
 Use read_agent_report with the worker ID to read its result in your conversation. A UI notification or finished turn alone does not establish a pass. For changes requested, relay the findings to the original coder, then request fresh review and testing for the updated submission. Confirm after the required reports pass for the current submission.
+
+If a reused team handoff is supplied, treat it as historical context. Check relevant assumptions against the current repository before relying on them.

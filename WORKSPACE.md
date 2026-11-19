@@ -118,6 +118,14 @@ The checks above are a manual checklist, not a claim that the current workspace 
 
 The candidate remains on disk for inspection, and merging is manual. Tests that generate files or require missing dependencies may be blocked in the read-only tester session. Orchestra limits the workspace to 30 sessions and prevents conflicting coder and checker activity on the same candidate. In-memory prerequisites that were waiting when the server restarted are shown as interrupted so they can be scheduled again. The older `--feature` flag is accepted for compatibility with existing launch commands.
 
+## Reusing an archived team
+
+In **Archived**, choose **Use team** beside the saved team's name. Enter the new goal in the pilot chat and send it with that team selected. You can also ask the pilot directly, for example `Use team "Contact Form" to add a confirmation dialog`. Duplicate names require selecting the intended team from **Archived**.
+
+Reuse attaches fresh assignments to the stable team ID and keeps its repository assignment. The pilot chooses the roster for the new goal. A small change can use just one coder, while coordinated work can start a new lead. **Restore** remains available for reopening an earlier conversation. Reuse leaves those conversations and queues archived and gives new sessions a bounded handoff from accepted work. Coders start from the current committed baseline, so previous changes should be merged before assigning dependent work.
+
+Orchestra derives team IDs for saved legacy leads and keeps those IDs across restart and reuse. Legacy teams can have a shorter handoff. The saved team handoff lasts while at least one of its conversations exists. Deleting the final conversation removes the team from **Archived** as well.
+
 ## Role instructions and project guidance
 
 Orchestra loads the Markdown files in `roles/` into Codex as developer instructions. They define the pilot, lead, coder, reviewer, tester, analyser, designer, and product adviser. Designers review user experience and visual design in a read-only session; coders implement their recommendations. A project's `AGENTS.md` remains the place for repo-specific conventions and commands. Orchestra's runtime assigns worktrees and permissions independently of the Markdown.

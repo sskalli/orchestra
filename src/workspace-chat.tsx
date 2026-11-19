@@ -42,6 +42,8 @@ type ChatProps = {
   projectLabel?: string;
   modelLabel?: string;
   usageLabel?: string;
+  reuseTeamName?: string;
+  onCancelReuse?: () => void;
   draft: string;
   composerHeight?: number;
   onComposerHeightChange: (height: number) => void;
@@ -81,7 +83,7 @@ const systemMessageLabels: Record<SystemMessageKind, string> = {
 
 function Conversation({
   agent, kind, title, projectLabel, modelLabel, usageLabel, draft: initialDraft, composerHeight, onComposerHeightChange, onDraftInput, onDraftChange, onSend, onSteer, onCancel, onApproval, onResumeQueue, onClose,
-  disabled, disabledReason, focusMessageId, focusRequest, onOpenAgent, onLifecycle,
+  disabled, disabledReason, focusMessageId, focusRequest, onOpenAgent, onLifecycle, reuseTeamName, onCancelReuse,
 }: ChatProps) {
   const transcript = useRef<HTMLDivElement>(null);
   const [hiddenMessages, setHiddenMessages] = useState<Set<string>>(() => new Set());
@@ -488,6 +490,11 @@ function Conversation({
         onPointerDown={startComposerResize} onPointerMove={moveComposerResize} onPointerUp={endComposerResize}
         onPointerCancel={endComposerResize} onLostPointerCapture={endComposerResize} onKeyDown={composerResizeKey} />
       <form id={composerId} ref={composer} className="chat-composer" style={{ height: composerHeight }} onSubmit={submit}>
+        {reuseTeamName && <div className="chat-reuse-team">
+          <p id={`${composerId}-team`}><strong>{reuseTeamName}</strong> · New assignment. Old chats stay archived.</p>
+          <button type="button" disabled={sending} onClick={onCancelReuse}>Cancel reuse</button>
+          <button type="submit" disabled={!readyToSend}>Send goal</button>
+        </div>}
         {agent.queueDepth > 0 || agent.status === "working" ? (
           <div className="chat-queue" aria-live="polite">
             {agent.queueDepth > 0 ? `${agent.queueDepth} queued${agent.queuePaused ? " · paused" : ""}` : "New messages queue while this agent is working."}
@@ -499,7 +506,8 @@ function Conversation({
         {error && !shownInConversation(error) ? <p className="chat-error" role="alert">{error}</p> : null}
         <div className="chat-composer-box">
           <span className="chat-input-prompt" aria-hidden="true">&gt;</span>
-          <textarea aria-label={`Message ${recipient}`} rows={3} disabled={Boolean(agent.lifecycleBusy)}
+          <textarea aria-label={reuseTeamName ? `New goal for ${reuseTeamName}` : `Message ${recipient}`}
+            aria-describedby={reuseTeamName ? `${composerId}-team` : undefined} rows={3} disabled={Boolean(agent.lifecycleBusy)}
             value={draft} onChange={(event) => updateDraft(event.target.value)} onBlur={flushDraft} onKeyDown={handleComposerKey} />
         </div>
         {agent.canSteer && onSteer ? (

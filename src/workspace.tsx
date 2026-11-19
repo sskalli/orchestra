@@ -174,6 +174,7 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
   const [chooser, setChooser] = useState<{ agentId: string }>();
   const [projectDetails, setProjectDetails] = useState(false);
   const [archiveOpen, setArchiveOpen] = useState(false);
+  const [reuseTeam, setReuseTeam] = useState<{ id: string; name: string }>();
   const [lifecycle, setLifecycle] = useState<{ action: "archive" | "restore" | "delete"; agentId: string }>();
   const [lifecycleError, setLifecycleError] = useState("");
   const [lifecyclePending, setLifecyclePending] = useState(false);
@@ -434,6 +435,18 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
     projectLabel: snapshot.projects.length > 1 ? agent.projectId : undefined,
   }));
   const archivedAgents = agents.filter((agent) => agent.archivedAt);
+  const archivedTeams = snapshot.teams?.filter((team) => team.archivedAt) ?? [];
+
+  function focusPilotComposer() {
+    requestAnimationFrame(() => document.querySelector<HTMLTextAreaElement>(".sw-left .chat-composer textarea")?.focus());
+  }
+
+  function chooseTeam(team: { id: string; name: string }) {
+    setReuseTeam(team);
+    setArchiveOpen(false);
+    setLeftOpen(true);
+    focusPilotComposer();
+  }
 
   function subtree(id: string) {
     const ids = new Set([id]);
@@ -467,6 +480,10 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
       if (lifecycle.action === "delete") requestAnimationFrame(() => archivedToggle.current?.focus());
       if (lifecycle.action === "delete") {
         const ids = new Set(affected.map((agent) => agent.id));
+        const affectedTeams = new Set(affected.map((agent) => agent.teamId));
+        for (const teamId of affectedTeams) {
+          if (teamId && !agents.some((agent) => agent.teamId === teamId && !ids.has(agent.id))) ids.add(`reuseTeam:${teamId}`);
+        }
         draftsRef.current = Object.fromEntries(Object.entries(draftsRef.current).filter(([id]) => !ids.has(id)));
         setDrafts(draftsRef.current);
         if (selectedId && ids.has(selectedId)) select(null);
@@ -479,6 +496,9 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
   }
 
   function renderChat(agent: Agent, kind: "project" | "agent") {
+    const selectedTeam = kind === "project" ? reuseTeam : undefined;
+    const draftId = selectedTeam ? `reuseTeam:${selectedTeam.id}` : agent.id;
+    const teamIdentity = kind === "agent" && agent.teamId ? snapshot.teams?.find((team) => team.id === agent.teamId) : undefined;
     const team = kind === "agent" && agent.role !== "lead"
       ? agents.find((item) => item.role === "lead" && (item.id === agent.parentId || belongsTo(agent, item.id)))
       : undefined;
@@ -495,12 +515,19 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
     }
 
     async function submit(type: "send" | "steer", value: string) {
-      const revision = draftRevisions.current[agent.id] ?? 0;
-      await send({ type, agentId: agent.id, text: value });
-      if ((draftRevisions.current[agent.id] ?? 0) === revision) {
-        draftsRef.current = { ...draftsRef.current, [agent.id]: "" };
-        setDrafts((current) => (draftRevisions.current[agent.id] ?? 0) === revision && current[agent.id] === value
-          ? { ...current, [agent.id]: "" } : current);
+      const revision = draftRevisions.current[draftId] ?? 0;
+      const team = type === "send" ? selectedTeam : undefined;
+      if (team) {
+        await send({ type: "reuseTeam", agentId: agent.id, teamId: team.id, text: value });
+        setReuseTeam((current) => current === team ? undefined : current);
+        focusPilotComposer();
+      } else {
+        await send({ type, agentId: agent.id, text: value });
+      }
+      if ((draftRevisions.current[draftId] ?? 0) === revision) {
+        draftsRef.current = { ...draftsRef.current, [draftId]: "" };
+        setDrafts((current) => (draftRevisions.current[draftId] ?? 0) === revision && current[draftId] === value
+          ? { ...current, [draftId]: "" } : current);
       }
     }
 
@@ -510,12 +537,13 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
     const modelLabel = [model, effort && `${effort} effort${settings?.effort ? " requested" : ""}`].filter(Boolean).join(" · ");
 
     const scopedUsage = snapshot.usage?.byAgent[agent.id];
-    const teamUsage = snapshot.usage?.byTeam[agent.id];
+    const teamRoot = agent.parentId === projectAgent?.id;
+    const teamUsage = teamRoot ? snapshot.usage?.byTeam[agent.teamId ?? agent.id] : undefined;
     const usage = snapshot.usage ? usageLabel(scopedUsage, "Tokens") : undefined;
     const teamTokens = teamUsage ? usageLabel(teamUsage, "Team tokens") : undefined;
 
     return <WorkspaceChat
-      key={agent.id}
+      key={draftId}
       agent={{ ...agent, messages: agent.messages.map((entry) => {
         const source = agents.find((item) => item.id === entry.sourceAgentId);
         return source ? { ...entry, sourceName: `${snapshot.projects.length > 1 && source.projectId ? `${source.projectId} / ` : ""}${agentAppearance(source).displayName}` }
@@ -526,11 +554,17 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
       onLifecycle={(action) => requestLifecycle(action, agent.id)}
       title={kind === "project" ? projectName : team && snapshot.projects.length === 1
         ? `${agentAppearance(team).displayName} / ${agentAppearance(agent).displayName}`
-        : `${agentAppearance(agent).displayName}${team ? ` / ${agentAppearance(team).displayName}` : ""}`}
+        : `${agentAppearance(agent).displayName}${team ? ` / ${agentAppearance(team).displayName}`
+          : teamIdentity && teamIdentity.name !== agent.name ? ` / ${teamIdentity.name}` : ""}`}
       projectLabel={kind === "agent" && snapshot.projects.length > 1 ? agent.projectId : undefined}
       modelLabel={modelLabel}
       usageLabel={[usage, teamTokens].filter(Boolean).join(" · ")}
-      draft={drafts[agent.id] ?? ""}
+      reuseTeamName={selectedTeam?.name}
+      onCancelReuse={selectedTeam ? () => {
+        setReuseTeam(undefined);
+        focusPilotComposer();
+      } : undefined}
+      draft={drafts[draftId] ?? ""}
       composerHeight={composerSizes[kind]}
       onComposerHeightChange={(height) => {
         const next = { ...composerSizesRef.current, [kind]: height };
@@ -539,12 +573,12 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
         setComposerSizes(next);
       }}
       onDraftInput={(value) => {
-        draftsRef.current = { ...draftsRef.current, [agent.id]: value };
-        draftRevisions.current[agent.id] = (draftRevisions.current[agent.id] ?? 0) + 1;
+        draftsRef.current = { ...draftsRef.current, [draftId]: value };
+        draftRevisions.current[draftId] = (draftRevisions.current[draftId] ?? 0) + 1;
       }}
-      onDraftChange={(value) => setDrafts((current) => ({ ...current, [agent.id]: value }))}
+      onDraftChange={(value) => setDrafts((current) => ({ ...current, [draftId]: value }))}
       onSend={(value) => submit("send", value)}
-      onSteer={(value) => submit("steer", value)}
+      onSteer={selectedTeam ? undefined : (value) => submit("steer", value)}
       onCancel={() => send({ type: "cancel", agentId: agent.id })}
       onApproval={(approvalId, decision) => send({ type: "approval", agentId: agent.id, approvalId, decision })}
       onResumeQueue={() => send({ type: "resumeQueue", agentId: agent.id })}
@@ -585,16 +619,27 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
           {leftOpen && resizeHandle("left")}
         </aside>
         <section className="sw-canvas">
-          <button ref={archivedToggle} className="sw-archived-toggle" type="button" aria-expanded={archiveOpen} onClick={() => setArchiveOpen(!archiveOpen)}>Archived ({archivedAgents.length})</button>
+          <button ref={archivedToggle} className="sw-archived-toggle" type="button" aria-expanded={archiveOpen} onClick={() => setArchiveOpen(!archiveOpen)}>Archived ({archivedAgents.length + archivedTeams.length})</button>
           {(blocked || storageUnavailable) && <div className="sw-banner" role="status">{blocked ? blockedReason : "Browser storage is unavailable. Drafts and layout changes may not survive reload."}</div>}
           <WorkspaceCanvas agents={canvasAgents} signals={signals} selectedId={selectedId} onSelect={select} onStatus={handleStatus}
             emptyMessage={mode === "claude" ? "Use the project chat to message Claude Code." : undefined}
             initialCamera={savedCamera} onCameraChange={preferences.writeCamera} />
-          {archiveOpen && <section className="sw-archive-list" aria-label="Archived agents" onKeyDown={(event) => {
+          {archiveOpen && <section className="sw-archive-list" aria-label="Archive" onKeyDown={(event) => {
             if (event.key === "Escape") { event.stopPropagation(); setArchiveOpen(false); archivedToggle.current?.focus(); }
           }}>
-            <header><strong>Archived agents</strong><button type="button" aria-label="Close archived agents" onClick={() => { setArchiveOpen(false); archivedToggle.current?.focus(); }}>×</button></header>
-            {!archivedAgents.length && <p>No archived agents.</p>}
+            <header><strong>Archive</strong><button type="button" aria-label="Close archive" onClick={() => { setArchiveOpen(false); archivedToggle.current?.focus(); }}>×</button></header>
+            {!archivedAgents.length && !archivedTeams.length && <p>No archived teams or agents.</p>}
+            {archivedTeams.length > 0 && <section aria-label="Archived teams">
+              <h3>Teams</h3>
+              {archivedTeams.map((team) => <article key={team.id}>
+                <strong>{team.name}</strong>
+                <small>{team.projectIds.join(", ")}</small>
+                {team.scope && <small className="sw-archived-scope" title={team.scope}>{team.scope}</small>}
+                <div><button type="button" aria-label={`Use team ${team.name}`} disabled={blocked}
+                  onClick={() => chooseTeam({ id: team.id, name: team.name })}>Use team</button></div>
+              </article>)}
+            </section>}
+            {archivedAgents.length > 0 && <h3>Agent conversations</h3>}
             {archivedAgents.map((agent) => <article key={agent.id}>
               <button type="button" onClick={() => { select(agent.id); setArchiveOpen(false); }}>{agentAppearance(agent).displayName}</button>
               <small>Parent: {agents.find((parent) => parent.id === agent.parentId) ? agentAppearance(agents.find((parent) => parent.id === agent.parentId)!).displayName : "Project"}</small>
