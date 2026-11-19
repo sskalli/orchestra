@@ -43,6 +43,7 @@ test("workspace attributes early and late usage to the root run across delegatio
   assert.equal(exported?.byAgent.coordinator.tokens?.inputTokens, 160);
   assert.equal(exported?.byTeam[lead.id].tokens?.inputTokens, 40);
   assert.equal(exported?.decisions.length, 1);
+  assert.equal(exported?.decisions[0].outcome, "started");
 
   await send(lead.id, "unreported");
   await waitFor(() => total()?.unknownTurns === 1);
@@ -78,4 +79,78 @@ test("workspace attributes early and late usage to the root run across delegatio
   assert.equal(runtime.snapshot().provider.state, "ready", runtime.snapshot().provider.message);
   assert.equal(runtime.usageExport()?.total.tokens?.inputTokens, 190);
   assert.equal(runtime.usageExport()?.turns.some((turn) => turn.attribution?.agentId === lead.id), false);
+});
+
+test("workspace keeps an interrupted checkpoint's unknown tail out of the next run", async (t) => {
+  const project = mkdtempSync(join(tmpdir(), "orchestra-usage-recovery-"));
+  const store = workspaceStore(project, join(project, "state"));
+  let runtime = new WorkspaceRuntime({ cwd: project, store });
+  t.after(async () => {
+    await runtime.close();
+    rmSync(project, { recursive: true, force: true });
+  });
+
+  const send = (text: string) => runtime.command({ type: "send", agentId: "coordinator", text });
+  const usageTotal = () => runtime.snapshot().usage?.total.tokens?.totalTokens;
+  await runtime.start();
+  assert.equal(runtime.snapshot().provider.state, "ready", runtime.snapshot().provider.message);
+  await send("interrupted checkpoint");
+  await waitFor(() => usageTotal() === 100);
+  assert.equal(runtime.snapshot().agents[0].status, "working");
+
+  await runtime.close();
+  runtime = new WorkspaceRuntime({ cwd: project, store });
+  await runtime.start();
+  assert.equal(runtime.snapshot().provider.state, "ready", runtime.snapshot().provider.message);
+  assert.equal(usageTotal(), 100);
+  await send("after restart");
+  await waitFor(() => usageTotal() === 170);
+
+  const exported = runtime.usageExport();
+  const first = exported?.turns.find((turn) => turn.turnId === "interrupted checkpoint");
+  const next = exported?.turns.find((turn) => turn.turnId === "after restart");
+  assert(first?.attribution?.runId);
+  assert(next?.attribution?.runId);
+  assert.equal(first.partial, true);
+  assert.equal(exported?.byRun[first.attribution.runId].tokens?.totalTokens, 100);
+  assert.equal(exported?.byRun[next.attribution.runId].tokens?.totalTokens, 20);
+  assert.equal(exported?.unattributedTokens?.totalTokens, 50);
+});
+
+test("workspace records a rejected child start and relay as failed handoffs", async (t) => {
+  const project = mkdtempSync(join(tmpdir(), "orchestra-usage-handoff-"));
+  const store = workspaceStore(project, join(project, "state"));
+  const runtime = new WorkspaceRuntime({ cwd: project, store });
+  t.after(async () => {
+    await runtime.close();
+    rmSync(project, { recursive: true, force: true });
+  });
+
+  const coordinator = () => runtime.snapshot().agents.find((agent) => agent.id === "coordinator")!;
+  const send = (text: string) => runtime.command({ type: "send", agentId: "coordinator", text });
+  await runtime.start();
+  assert.equal(runtime.snapshot().provider.state, "ready", runtime.snapshot().provider.message);
+  await send("initial");
+  await waitFor(() => runtime.snapshot().agents.length === 2 &&
+    runtime.snapshot().agents.every((agent) => agent.status === "done"));
+
+  const lead = runtime.snapshot().agents.find((agent) => agent.name === "Fixture lead");
+  assert(lead);
+  const rejected = [
+    { text: "rejected child start", name: "Rejected lead" },
+    { text: `relay to ${lead.id}`, name: lead.name },
+  ];
+  for (const { text, name } of rejected) {
+    await send(text);
+    await waitFor(() => coordinator().status === "done");
+    const message = coordinator().messages.find((entry) => entry.role === "user" && entry.text === text);
+    const target = runtime.snapshot().agents.find((agent) => agent.name === name);
+    assert(message);
+    assert(target);
+    assert.equal(target.status, "error");
+    const decisions = runtime.usageExport()?.decisions.filter((decision) => decision.runId === message.id);
+    assert.equal(decisions?.find((decision) => decision.delegateId === target.id)?.outcome, "failed");
+    assert(decisions?.some((decision) => !decision.delegateId &&
+      decision.reason === "Completed the turn without delegating."));
+  }
 });

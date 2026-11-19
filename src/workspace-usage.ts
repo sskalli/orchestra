@@ -17,6 +17,7 @@ export type DelegationDecision = {
   complexity?: string;
   model?: string;
   reason: string;
+  outcome?: "queued" | "started" | "failed" | "uncertain";
 };
 type UsageThread = {
   id: string;
@@ -106,6 +107,7 @@ export class WorkspaceUsage {
   private readonly threads = new Map<string, UsageThread>();
   private readonly turns = new Map<string, UsageTurn>();
   private readonly decisions = new Map<string, DelegationDecision>();
+  private readonly resumedThreads = new Map<string, string | undefined>();
   private summaryCache?: UsageSummary;
   private dirty = false;
 
@@ -159,16 +161,29 @@ export class WorkspaceUsage {
     }
   }
 
-  registerTurn(threadId: string, turnId: string, attribution: UsageAttribution) {
+  registerTurn(threadId: string, turnId: string, attribution: UsageAttribution, recovered = false) {
     const thread = this.threads.get(threadId);
     if (!thread || !validId(turnId) || !validId(attribution.agentId)) return;
     const key = turnKey(threadId, turnId);
     const turn = this.turns.get(key);
+    if (!recovered && this.resumedThreads.has(threadId)) {
+      if (thread.checkpointTurnId === turnId) this.resumedThreads.delete(threadId);
+      else this.resumedThreads.set(threadId, turnId);
+    }
     if (turn?.attribution) return;
     this.turns.set(key, {
       threadId, turnId, attribution: { ...attribution }, tokens: turn?.tokens ?? null,
       partial: turn?.partial ?? (thread.incompleteTurnId === turnId),
     });
+    this.changed();
+  }
+
+  markResumedThread(threadId: string, interruptedTurnId?: string) {
+    this.resumedThreads.set(threadId, undefined);
+    if (!interruptedTurnId) return;
+    const turn = this.turns.get(turnKey(threadId, interruptedTurnId));
+    if (!turn || turn.partial) return;
+    turn.partial = true;
     this.changed();
   }
 
@@ -184,7 +199,7 @@ export class WorkspaceUsage {
     if (!thread.total) {
       thread.total = total;
       thread.incompleteTurnId = turnId;
-      thread.checkpointTurnId = turnId;
+      this.advanceCheckpoint(thread, turnId);
       if (turn) turn.partial = true;
       this.changed();
       return;
@@ -194,16 +209,18 @@ export class WorkspaceUsage {
     if (!additional) return;
     thread.total = total;
     const observed = turn ?? { threadId, turnId, tokens: null, partial: thread.incompleteTurnId === turnId };
-    // A newly observed turn's cumulative delta can include activity from an earlier unobserved turn.
+    // A new turn's cumulative delta may include an earlier turn's missing usage.
     const hasCoverageGap = this.hasCoverageGap(thread, turnId);
-    thread.checkpointTurnId = turnId;
+    this.advanceCheckpoint(thread, turnId);
     const last = hasCoverageGap ? readTokens(update.last) : undefined;
-    if (hasCoverageGap && (!last || last.totalTokens < additional.totalTokens)) {
-      const usableLast = last && tokenFields.every((field) => last[field] <= additional[field]) &&
+    if (hasCoverageGap && (!last || !tokenFields.every((field) => last[field] === additional[field]) ||
+        (last.cacheWriteInputTokens ?? 0) !== (additional.cacheWriteInputTokens ?? 0))) {
+      const usableLast = last && last.totalTokens < additional.totalTokens &&
+        tokenFields.every((field) => last[field] <= additional[field]) &&
         (last.cacheWriteInputTokens ?? 0) <= (additional.cacheWriteInputTokens ?? 0) ? last : undefined;
       const remainder = usableLast ? delta(additional, usableLast)! : additional;
       thread.unattributedTokens = addTokens(thread.unattributedTokens ?? null, remainder);
-      if (usableLast?.totalTokens) observed.tokens = usableLast;
+      if (usableLast?.totalTokens) observed.tokens = addTokens(observed.tokens, usableLast);
       observed.partial = true;
     } else {
       observed.tokens = addTokens(observed.tokens, additional);
@@ -212,8 +229,15 @@ export class WorkspaceUsage {
     this.changed();
   }
 
+  private advanceCheckpoint(thread: UsageThread, turnId: string) {
+    thread.checkpointTurnId = turnId;
+    if (this.resumedThreads.get(thread.id) === turnId) this.resumedThreads.delete(thread.id);
+  }
+
   private hasCoverageGap(thread: UsageThread, turnId: string) {
     if (turnId === thread.checkpointTurnId) return false;
+    // Resume can replay a checkpoint without proving that the previous turn's usage is complete.
+    if (this.resumedThreads.has(thread.id)) return true;
     let gap = false;
     for (const turn of this.turns.values()) {
       if (turn.threadId !== thread.id) continue;
@@ -247,6 +271,7 @@ export class WorkspaceUsage {
       if (thread.agentId && remove(thread.agentId)) {
         removedThreads.add(id);
         this.threads.delete(id);
+        this.resumedThreads.delete(id);
         removed = true;
       }
     }

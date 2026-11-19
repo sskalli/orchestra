@@ -1,4 +1,4 @@
-import { WorkspaceUsage } from "./workspace-usage.ts";
+import { WorkspaceUsage, type DelegationDecision } from "./workspace-usage.ts";
 import { readFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
@@ -329,13 +329,13 @@ export class WorkspaceRuntime {
     return root.role === "lead" ? root.id : undefined;
   }
 
-  private trackTurn(session: AgentSession, threadId: string, turnId: string, entry: WorkspaceMessage) {
+  private trackTurn(session: AgentSession, threadId: string, turnId: string, entry: WorkspaceMessage, recovered = false) {
     this.trackUsage((usage) => usage.registerTurn(threadId, turnId, {
       agentId: session.agent.id,
       runId: entry.orchestrationRunId ?? entry.id,
       teamId: this.usageTeam(session.agent),
       model: session.agent.modelSettings?.reportedModel ?? session.agent.modelSettings?.requestedModel,
-    }));
+    }, recovered));
   }
 
   subscribe(listener: (snapshot: WorkspaceSnapshot) => void) {
@@ -899,7 +899,9 @@ export class WorkspaceRuntime {
     if (threadId) {
       this.trackUsage((usage) => usage.registerThread(threadId, false, agent.id));
       const entry = run && agent.messages.find((message) => message.id === run.messageId);
-      if (entry && run?.turnId) this.trackTurn(session, threadId, run.turnId, entry);
+      const turnId = run?.turnId;
+      if (entry && turnId) this.trackTurn(session, threadId, turnId, entry, true);
+      this.trackUsage((usage) => usage.markResumedThread(threadId, turnId));
     }
     type RecoveredTurn = Turn & { items?: { id: string; type: string; text?: string }[] };
     try {
@@ -1720,17 +1722,18 @@ export class WorkspaceRuntime {
         const instruction = message("user", goal);
         const run = session.run!;
         instruction.orchestrationRunId = run.message.orchestrationRunId ?? run.message.id;
-        run.delegated = true;
+        recipient.agent.messages.push(instruction);
+        await this.enqueue(recipient, instruction);
+        const outcome = this.delegationOutcome(recipient, instruction);
+        if (outcome !== "failed") run.delegated = true;
         this.trackUsage((usage) => usage.recordDecision({
           id: instruction.id, at: Date.now(), agentId: session.agent.id, delegateId: recipient.agent.id,
           runId: instruction.orchestrationRunId, teamId: this.usageTeam(recipient.agent),
-          duty: recipient.agent.duty ?? recipient.agent.role, reason: "Sent a follow-up to an existing agent.",
-          model: recipient.agent.modelSettings?.reportedModel,
+          duty: recipient.agent.duty ?? recipient.agent.role, reason: "Follow-up for an existing agent.",
+          model: recipient.agent.modelSettings?.reportedModel, outcome,
         }));
-        recipient.agent.messages.push(instruction);
-        await this.enqueue(recipient, instruction);
-        if (instruction.state !== "failed") this.signal(session.agent.id, recipient.agent.id);
-        reply(instruction.state !== "failed", instruction.state === "failed" ? "The turn could not start." : "Instruction delivered.");
+        if (outcome !== "failed") this.signal(session.agent.id, recipient.agent.id);
+        reply(outcome !== "failed", outcome === "failed" ? "The turn could not start." : "Instruction delivered.");
         return;
       }
       if (params.tool !== tool.name) throw new Error("Unknown workspace tool.");
@@ -1797,15 +1800,6 @@ export class WorkspaceRuntime {
       const assignment = message("user", goal);
       const run = session.run!;
       assignment.orchestrationRunId = run.message.orchestrationRunId ?? run.message.id;
-      run.delegated = true;
-      this.trackUsage((usage) => usage.recordDecision({
-        id: assignment.id, at: Date.now(), agentId: session.agent.id, delegateId: agent.agent.id,
-        runId: assignment.orchestrationRunId, teamId: this.usageTeam(agent.agent),
-        duty, complexity: modelSettings.complexity, model: modelSettings.requestedModel,
-        reason: duty === "lead" ? "Started a lead for coordinated work."
-          : duty === "coder" ? session.agent.role === "coordinator" ? "Assigned implementation directly to a coder." : "Assigned an isolated implementation candidate."
-          : prerequisite || integrationCheck ? "Scheduled an independent candidate check." : "Delegated a specialist assignment.",
-      }));
       assignment.state = "queued";
       agent.agent.messages.push(assignment);
       agent.queue.push(assignment);
@@ -1816,13 +1810,30 @@ export class WorkspaceRuntime {
       } else {
         await this.startDelegation(agent, turn);
       }
-      if (agent.agent.status !== "error") this.signal(session.agent.id, agent.agent.id);
-      reply(agent.agent.status !== "error", JSON.stringify({
+      const outcome = agent.agent.status === "error" ? "failed" : this.delegationOutcome(agent, assignment);
+      if (outcome !== "failed") run.delegated = true;
+      this.trackUsage((usage) => usage.recordDecision({
+        id: assignment.id, at: Date.now(), agentId: session.agent.id, delegateId: agent.agent.id,
+        runId: assignment.orchestrationRunId, teamId: this.usageTeam(agent.agent),
+        duty, complexity: modelSettings.complexity, model: modelSettings.requestedModel, outcome,
+        reason: duty === "lead" ? "Lead for coordinated work."
+          : duty === "coder" ? session.agent.role === "coordinator" ? "Direct assignment to a coder." : "Implementation in an isolated candidate."
+          : prerequisite || integrationCheck ? "Independent candidate check." : "Specialist assignment.",
+      }));
+      if (outcome !== "failed") this.signal(session.agent.id, agent.agent.id);
+      reply(outcome !== "failed", JSON.stringify({
         id: agent.agent.id, projectId: project.id, name, duty, modelSettings: agent.agent.modelSettings, waitingFor: agent.waitingFor, candidate: agent.agent.candidate?.path,
       }));
     } catch (error) {
       reply(false, errorText(error));
     }
+  }
+
+  private delegationOutcome(agent: AgentSession, assignment: WorkspaceMessage): NonNullable<DelegationDecision["outcome"]> {
+    if (assignment.state === "failed") return "failed";
+    if (assignment.state === "queued") return "queued";
+    if (agent.run?.message === assignment && !agent.run.turn) return "uncertain";
+    return "started";
   }
 
   private expireApproval(session: AgentSession, pending: PendingApproval) {

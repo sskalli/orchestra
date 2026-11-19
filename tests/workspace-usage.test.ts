@@ -83,3 +83,40 @@ test("deletion purges turns, checkpoints, and decisions for removed participants
   usage.observe("worker-thread", "worker", { total: tokens(30) });
   assert.equal(usage.summary().total.tokens?.totalTokens, 10);
 });
+
+test("resume guards the first new checkpoint even without a saved active turn", () => {
+  const usage = new WorkspaceUsage();
+  const attribution = { agentId: "pilot" };
+  usage.registerThread("thread", true, "pilot");
+  usage.registerTurn("thread", "before", { ...attribution, runId: "before" });
+  usage.observe("thread", "before", { total: tokens(100) });
+  usage.markResumedThread("thread");
+  usage.observe("thread", "before", { total: tokens(110), last: tokens(10) });
+
+  // The new turn's usage can arrive before its acknowledgement.
+  usage.observe("thread", "after", { total: tokens(170), last: tokens(20) });
+  usage.registerTurn("thread", "after", { ...attribution, runId: "after" });
+  assert.equal(usage.summary().byRun.before.tokens?.totalTokens, 110);
+  assert.equal(usage.summary().byRun.after.tokens?.totalTokens, 20);
+  assert.equal(usage.summary().unattributedTokens?.totalTokens, 40);
+
+  usage.observe("thread", "after", { total: tokens(200), last: tokens(30) });
+  usage.registerTurn("thread", "next", { ...attribution, runId: "next" });
+  usage.observe("thread", "next", { total: tokens(260), last: tokens(25) });
+  assert.equal(usage.summary().byRun.after.tokens?.totalTokens, 50);
+  assert.equal(usage.summary().byRun.next.tokens?.totalTokens, 60);
+  assert.equal(usage.summary().unattributedTokens?.totalTokens, 40);
+});
+
+test("resume leaves the full increment unattributed when its latest breakdown is inconsistent", () => {
+  const usage = new WorkspaceUsage();
+  usage.registerThread("thread", true, "pilot");
+  usage.registerTurn("thread", "before", { agentId: "pilot", runId: "before" });
+  usage.observe("thread", "before", { total: tokens(100, 10) });
+  usage.markResumedThread("thread");
+  usage.registerTurn("thread", "after", { agentId: "pilot", runId: "after" });
+  usage.observe("thread", "after", { total: tokens(120, 10), last: tokens(19, 1) });
+
+  assert.equal(usage.summary().byRun.after.tokens, null);
+  assert.deepEqual(usage.summary().unattributedTokens, tokens(20));
+});
