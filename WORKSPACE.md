@@ -34,6 +34,18 @@ npm run workspace -- --live /path/to/git/project --provider company
 
 The endpoint must support Codex's Responses API. Use a custom provider ID (not the built-in `openai` ID). Without `--provider`, Orchestra uses `openai` and retains its ChatGPT sign-in requirement. Each custom provider ID has separate saved sessions from the default provider and other custom providers; transcripts are not continued across provider modes. Provider credentials should be supplied through the configured environment variable, not a command-line argument.
 
+### Multiple repositories
+
+Configure a shared workspace at launch by repeating `--project` with a unique ID and Git repository path:
+
+```bash
+npm run workspace -- --project app=/path/to/app --project api=/path/to/api
+```
+
+The coordinator chat and team map are shared. Ask the coordinator to delegate to a specific project ID; when the target is ambiguous, clarify it in chat. The coordinator must select a configured project for each new team or direct worker. A lead's workers inherit that lead's project, including its repository, `AGENTS.md`, and candidate worktree. The menu in the header lists project IDs and paths, and map and chat labels identify each agent's project.
+
+Use `--provider company` alongside `--project` to use a configured custom provider. A workspace's saved state is keyed by its full set of project IDs and resolved repository paths, independent of argument order, and by provider. Changing an ID, adding or removing a repository, or changing a path opens a separate workspace rather than migrating its existing conversations. A single-repository launch continues to use its previous state. Adding or removing projects requires restarting the server with a new project list.
+
 The live workspace opens a coordinator conversation, labeled **Computer** in the project chat. Discuss or refine a goal there, ask it to start a team, or ask for a standalone analysis. Each delegated agent has its own chat, queue, and status. The local Node process serves the browser workspace; closing the browser tab does not stop that process. Stop the server explicitly when finished.
 
 ## Workspace controls
@@ -53,7 +65,7 @@ The live workspace opens a coordinator conversation, labeled **Computer** in the
 - Message the busy Canvas worker to see the queue. Use **Steer current turn** to send input to the active turn separately.
 - With the local server running, reload the tab. The selected conversation, project dock, camera and per-agent drafts should return. The new event stream should show the running server's transcript, queue and pending approvals.
 
-Browser preferences, including drafts, camera and panel sizes, are scoped to the project, mode and local server origin. Live Orchestra servers save agent IDs, transcripts, queues and Codex thread IDs by project and provider under `${XDG_STATE_HOME:-~/.local/state}/orchestra`. The default `openai` provider retains its existing state location. Set `ORCHESTRA_STATE_DIR` to use a different directory. Run one live server per project, provider, and state directory. Demo runs use sample data.
+Browser preferences, including drafts, camera and panel sizes, are scoped to the workspace, mode and local server origin. Live Orchestra servers save agent IDs, transcripts, queues and Codex thread IDs by workspace and provider under `${XDG_STATE_HOME:-~/.local/state}/orchestra`. The default single-repository `openai` provider retains its existing state location. Set `ORCHESTRA_STATE_DIR` to use a different directory. Run one live server per workspace, provider, and state directory. Demo runs use sample data.
 
 After a live server restart, Orchestra requests the saved threads from Codex. If Codex confirms an interrupted turn completed, its reply is restored. Otherwise the interrupted message is flagged for review. Previous approval requests expire, and ordinary queued messages stay paused until you select **Resume queue**. Scheduled assignments waiting on a prerequisite are instead marked failed and must be scheduled again. An active or unresumable thread is generally shown as unavailable; when an older tool registration needs refreshing, Orchestra instead opens a new thread with the current tools. A coordinator thread with no submitted history is opened fresh. When a replacement thread is opened, the old transcript remains visible in Orchestra but is not restored as that thread's conversation history.
 

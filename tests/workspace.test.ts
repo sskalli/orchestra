@@ -9,14 +9,25 @@ import { workspaceStore } from "../src/workspace-store.ts";
 import { createFeatureWorktree } from "../src/workspace-worktree.ts";
 import { numberAgentRoles } from "../src/workspace-agent-appearance.ts";
 import { parseWorkspaceArgs } from "../src/workspace-options.ts";
+import { resolveProjects, workspaceIdentity } from "../src/workspace-projects.ts";
 
 test("workspace launch options select a Codex provider only in live mode", () => {
-  assert.deepEqual(parseWorkspaceArgs([]), { live: false, projectPath: undefined, provider: "openai", feature: false });
+  assert.deepEqual(parseWorkspaceArgs([]), { live: false, projectPath: undefined, projects: [], provider: "openai", feature: false });
   assert.deepEqual(parseWorkspaceArgs(["--live", "/project", "--provider", "company-gateway"]), {
-    live: true, projectPath: "/project", provider: "company-gateway", feature: false,
+    live: true, projectPath: "/project", projects: [], provider: "company-gateway", feature: false,
   });
+  assert.deepEqual(parseWorkspaceArgs(["--project", "app=/app", "--project", "api=/api"]).projects, [
+    { id: "app", path: "/app" }, { id: "api", path: "/api" },
+  ]);
+  assert.equal(parseWorkspaceArgs(["--project", "app=/app"]).live, true);
   assert.throws(() => parseWorkspaceArgs(["--provider", "company-gateway"]), /Usage:/);
   assert.throws(() => parseWorkspaceArgs(["--live", "--provider"]), /provider ID/);
+  assert.throws(() => parseWorkspaceArgs(["--project", "app=/app", "--project", "app=/other"]), /Duplicate project/);
+  assert.throws(() => parseWorkspaceArgs(["--live", "/app", "--project", "api=/api"]), /either/);
+  assert.throws(() => parseWorkspaceArgs(["--project", "missing-path"]), /ID and path/);
+  const projects = [{ id: "app", path: "/app" }, { id: "api", path: "/api" }];
+  assert.equal(workspaceIdentity(projects), workspaceIdentity([...projects].reverse()));
+  assert.notEqual(workspaceIdentity(projects), workspaceIdentity(projects.slice(0, 1)));
 });
 
 test("simulation propagates designer failure and delivers all handoffs", async () => {
@@ -56,6 +67,7 @@ test("worktree changes stay isolated and saved state is project scoped", () => {
     git("init", "-q", repository);
     git("-C", repository, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
       "-c", "commit.gpgsign=false", "commit", "--allow-empty", "-qm", "Baseline");
+    assert.throws(() => resolveProjects([{ id: "a", path: repository }, { id: "b", path: repository }]), /different Git repository/);
     candidate = createFeatureWorktree(repository).path;
     writeFileSync(join(candidate, "feature.txt"), "candidate only");
     assert.equal(git("-C", repository, "status", "--porcelain"), "");

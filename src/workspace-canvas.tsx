@@ -15,6 +15,7 @@ export type CanvasAgent = {
   duty?: string;
   roleNumber?: number;
   goal?: string;
+  projectLabel?: string;
   status: string;
   activity?: string;
 };
@@ -445,7 +446,7 @@ export function WorkspaceCanvas({
           const status = lead || revealed.has(agent.id) ? statuses[statusAgent.status] : undefined;
           const { color, displayName } = agentAppearance(agent);
           const selected = agent.id === selectedId;
-          const label = `${displayName}, ${agent.activity ?? statuses[statusAgent.status]?.label ?? "Idle"}`;
+          const label = `${displayName}${agent.projectLabel ? `, project ${agent.projectLabel}` : ""}, ${agent.activity ?? statuses[statusAgent.status]?.label ?? "Idle"}`;
           return (
             <div
               key={agent.id}
@@ -473,17 +474,19 @@ export function WorkspaceCanvas({
               {status && <button
                 type="button"
                 className={`swarm-node-status status-${statusAgent.status}`}
-                aria-label={`${displayName}: ${status.label}`}
+                aria-label={`${displayName}${agent.projectLabel ? `, project ${agent.projectLabel}` : ""}: ${status.label}`}
                 onClick={() => onStatus(lead && !revealed.has(agent.id) &&
                   (statusAgent.status === "error" || statusAgent.status === "attention") ? agent.id : statusAgent.id)}
                 onFocus={(event) => { if (event.currentTarget.matches(":focus-visible")) setFocused(agent.id); }}
               ><status.Icon aria-hidden="true" focusable="false" /></button>}
-              {lead && <div className="swarm-team-label">
+              {(lead || (agent.projectLabel && !positions.has(agent.parentId ?? ""))) && <div className="swarm-team-label">
                 <strong>{displayName}</strong>
+                {agent.projectLabel && <span>Project: {agent.projectLabel}</span>}
                 {agent.goal && <span title={agent.goal}>{agent.goal}</span>}
               </div>}
               <div className="swarm-node-tooltip" aria-hidden="true">
                 <strong>{displayName}</strong>
+                {agent.projectLabel && <span>Project: {agent.projectLabel}</span>}
                 <span>{agent.activity ?? statuses[statusAgent.status]?.label ?? "Idle"}</span>
               </div>
             </div>

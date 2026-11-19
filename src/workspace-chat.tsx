@@ -35,6 +35,7 @@ type ChatProps = {
   agent: ChatAgent;
   kind: "project" | "agent";
   title?: string;
+  projectLabel?: string;
   draft: string;
   composerHeight?: number;
   onComposerHeightChange: (height: number) => void;
@@ -71,7 +72,7 @@ const systemMessageLabels: Record<SystemMessageKind, string> = {
 };
 
 function Conversation({
-  agent, kind, title, draft: initialDraft, composerHeight, onComposerHeightChange, onDraftInput, onDraftChange, onSend, onSteer, onApproval, onResumeQueue, onClose,
+  agent, kind, title, projectLabel, draft: initialDraft, composerHeight, onComposerHeightChange, onDraftInput, onDraftChange, onSend, onSteer, onApproval, onResumeQueue, onClose,
   disabled, disabledReason, focusMessageId, focusRequest, onOpenAgent,
 }: ChatProps) {
   const transcript = useRef<HTMLDivElement>(null);
@@ -107,7 +108,7 @@ function Conversation({
   const [resumingQueue, setResumingQueue] = useState(false);
   const [error, setError] = useState("");
   const { displayName } = agentAppearance(agent);
-  const recipient = kind === "project" ? title ?? displayName : displayName;
+  const recipient = `${projectLabel ? `${projectLabel} / ` : ""}${title ?? displayName}`;
   const heading = title ?? displayName;
   const blocked = Boolean(disabled);
   const readyToSend = !blocked && !sending && Boolean(draft.trim());
@@ -382,11 +383,11 @@ function Conversation({
         }), [agent.messages, agent.role, agent.roleNumber, approvalBusy, blocked, canApprove, displayName, kind, onOpenAgent, hiddenMessages, focusMessageId]);
 
   return (
-    <section ref={chat} className="workspace-chat" aria-label={kind === "project" ? "Project chat" : `${displayName} chat`}>
+    <section ref={chat} className="workspace-chat" aria-label={kind === "project" ? "Project chat" : `${recipient} chat`}>
       <header className="chat-header">
         <div className="chat-header-copy">
           <h2 title={heading}>{kind === "project" ? `COMMS // CHANNEL: ${heading}` : heading}</h2>
-          {kind === "agent" ? <span className="chat-agent-status">{statusLabels[agent.status]}</span> : null}
+          {kind === "agent" ? <span className="chat-agent-status">{projectLabel ? `Project: ${projectLabel} · ` : ""}{statusLabels[agent.status]}</span> : null}
         </div>
         <button className="chat-clear-button" type="button" title="Clear the visible log; conversation history is retained"
           onClick={() => {

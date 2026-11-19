@@ -91,7 +91,7 @@ function Workspace() {
   }
 
   const demo = snapshot.provider.state === "demo";
-  return <WorkspaceView key={JSON.stringify([snapshot.project.path, demo])} snapshot={snapshot} connected={connected} demo={demo} signals={signals} />;
+  return <WorkspaceView key={JSON.stringify([snapshot.workspaceKey, demo])} snapshot={snapshot} connected={connected} demo={demo} signals={signals} />;
 }
 
 function WorkspaceView({ snapshot, connected, demo, signals }: { snapshot: Snapshot; connected: boolean; demo: boolean; signals: AgentSignal[] }) {
@@ -103,7 +103,7 @@ function WorkspaceView({ snapshot, connected, demo, signals }: { snapshot: Snaps
     return () => window.removeEventListener("orchestra-storage-unavailable", onFailure);
   }, []);
   const agents = numberAgentRoles(snapshot.agents);
-  const [preferences] = useState(() => workspacePreferences(project.path, demo));
+  const [preferences] = useState(() => workspacePreferences(snapshot.workspaceKey, demo));
   const [saved] = useState(preferences.readView);
   const [savedCamera] = useState(preferences.readCamera);
   const [panelSizes, setPanelSizes] = useState(preferences.readPanels);
@@ -324,7 +324,10 @@ function WorkspaceView({ snapshot, connected, demo, signals }: { snapshot: Snaps
       onPointerDown={start} onPointerMove={move} onPointerUp={end} onPointerCancel={end} onLostPointerCapture={end} onKeyDown={keyboard} />;
   }
 
-  const canvasAgents = agents.filter((agent) => agent.role !== "coordinator");
+  const canvasAgents = agents.filter((agent) => agent.role !== "coordinator").map((agent) => ({
+    ...agent,
+    projectLabel: snapshot.projects.length > 1 ? agent.projectId : undefined,
+  }));
 
   function renderChat(agent: Agent, kind: "project" | "agent") {
     const team = kind === "agent" && agent.role !== "lead"
@@ -356,11 +359,14 @@ function WorkspaceView({ snapshot, connected, demo, signals }: { snapshot: Snaps
       key={agent.id}
       agent={{ ...agent, messages: agent.messages.map((entry) => {
         const source = agents.find((item) => item.id === entry.sourceAgentId);
-        return source ? { ...entry, sourceName: agentAppearance(source).displayName } : entry;
+        return source ? { ...entry, sourceName: `${snapshot.projects.length > 1 && source.projectId ? `${source.projectId} / ` : ""}${agentAppearance(source).displayName}` } : entry;
       }) }}
       kind={kind}
       onOpenAgent={(id) => select(id)}
-      title={kind === "project" ? projectName : team ? `${agentAppearance(team).displayName} / ${agentAppearance(agent).displayName}` : agentAppearance(agent).displayName}
+      title={kind === "project" ? projectName : team && snapshot.projects.length === 1
+        ? `${agentAppearance(team).displayName} / ${agentAppearance(agent).displayName}`
+        : `${agentAppearance(agent).displayName}${team ? ` / ${agentAppearance(team).displayName}` : ""}`}
+      projectLabel={kind === "agent" && snapshot.projects.length > 1 ? agent.projectId : undefined}
       draft={drafts[agent.id] ?? ""}
       composerHeight={composerSizes[kind]}
       onComposerHeightChange={(height) => {
@@ -390,9 +396,17 @@ function WorkspaceView({ snapshot, connected, demo, signals }: { snapshot: Snaps
     <div className="sw-app">
       <header className="sw-header">
         <div className="sw-brand"><Mark /><span>Orchestra</span></div>
-        <div className="sw-project-menu">
-          <button className="sw-project-button" type="button" aria-expanded={projectDetails} onClick={() => setProjectDetails(!projectDetails)}><Folder /><span>{projectName}</span><span className="sw-chevron" aria-hidden="true" /></button>
-          {projectDetails && <div className="sw-project-details"><strong>{projectName}</strong><span>{project.path}</span></div>}
+        <div className="sw-project-menu" onKeyDown={(event) => {
+          if (event.key === "Escape" && projectDetails) {
+            event.stopPropagation();
+            setProjectDetails(false);
+            event.currentTarget.querySelector("button")?.focus();
+          }
+        }}>
+          <button className="sw-project-button" type="button" aria-expanded={projectDetails} aria-controls="workspace-project-list" onClick={() => setProjectDetails(!projectDetails)}><Folder /><span>{projectName}</span><span className="sw-chevron" aria-hidden="true" /></button>
+          {projectDetails && <div id="workspace-project-list" className="sw-project-details">
+            {snapshot.projects.map((entry) => <div key={entry.id}><strong>{entry.id}</strong><span>{entry.path}</span></div>)}
+          </div>}
         </div>
         <div className={`sw-provider sw-provider--${connected ? provider.state : "connecting"}`} role="status"><span aria-hidden="true" />{connected ? providerLabels[provider.state] : "Reconnecting"}</div>
       </header>
@@ -413,7 +427,7 @@ function WorkspaceView({ snapshot, connected, demo, signals }: { snapshot: Snaps
             if (event.key === "Escape") { event.stopPropagation(); setChooser(undefined); }
           }}>
             <header><strong>Needs attention</strong><button type="button" aria-label="Close events" onClick={() => setChooser(undefined)}>×</button></header>
-            {activityFor(chooser.agentId).map((event, index) => <button key={`${event.agent.id}:${event.messageId}`} type="button" autoFocus={index === 0} onClick={() => select(event.agent.id, event.messageId)}><strong>{agentAppearance(event.agent).displayName}</strong><span>{event.text}</span></button>)}
+            {activityFor(chooser.agentId).map((event, index) => <button key={`${event.agent.id}:${event.messageId}`} type="button" autoFocus={index === 0} onClick={() => select(event.agent.id, event.messageId)}><strong>{snapshot.projects.length > 1 && event.agent.projectId ? `${event.agent.projectId} / ` : ""}{agentAppearance(event.agent).displayName}</strong><span>{event.text}</span></button>)}
           </div>}
         </section>
         <aside className="sw-dock sw-right" aria-label="Agent chat" inert={!selected} onKeyDown={(event) => {

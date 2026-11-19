@@ -1,4 +1,3 @@
-import { execFileSync } from "node:child_process";
 import { createServer, type IncomingMessage } from "node:http";
 import { readFile } from "node:fs/promises";
 import { extname, resolve } from "node:path";
@@ -6,11 +5,15 @@ import { fileURLToPath } from "node:url";
 import { WorkspaceRuntime } from "./workspace-runtime.ts";
 import { workspaceStore } from "./workspace-store.ts";
 import { parseWorkspaceArgs } from "./workspace-options.ts";
+import { defaultProject, resolveProjects, workspaceIdentity } from "./workspace-projects.ts";
 
-const { live, projectPath, provider } = parseWorkspaceArgs(process.argv.slice(2));
-const cwd = live
-  ? execFileSync("git", ["rev-parse", "--show-toplevel"], { cwd: resolve(projectPath ?? "."), encoding: "utf8" }).trim()
-  : process.cwd();
+const { live, projectPath, projects: specifiedProjects, provider } = parseWorkspaceArgs(process.argv.slice(2));
+let projects = live
+  ? resolveProjects(specifiedProjects.length ? specifiedProjects : [defaultProject(projectPath ?? ".")])
+  : [defaultProject(process.cwd())];
+if (live && !specifiedProjects.length) projects = [defaultProject(projects[0].path)];
+const cwd = projects[0].path;
+const identity = workspaceIdentity(projects);
 const port = Number(process.env.ORCHESTRA_PORT ?? process.env.SWARMER_PORT ?? 4317);
 if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error("Invalid ORCHESTRA_PORT");
 const host = `127.0.0.1:${port}`;
@@ -94,9 +97,10 @@ const server = createServer(async (request, response) => {
 server.listen(port, "127.0.0.1", () => {
   runtime = new WorkspaceRuntime({
     cwd,
+    projects,
     demo: !live,
     provider,
-    store: live ? workspaceStore(cwd, undefined, provider) : undefined,
+    store: live ? workspaceStore(identity, undefined, provider) : undefined,
   });
   console.log(`Orchestra ${live ? `(Codex: ${provider})` : "(demo)"} is available at ${origin}`);
   void runtime.start().catch((error) => console.error("Workspace startup failed:", error instanceof Error ? error.message : error));
