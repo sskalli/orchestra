@@ -1,3 +1,4 @@
+import { WorkspaceUsage, type DelegationDecision } from "./workspace-usage.ts";
 import { readFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
@@ -25,6 +26,7 @@ export type WorkspaceMessage = {
   sourceAgentName?: string;
   reportLabel?: string;
   providerItemId?: string;
+  orchestrationRunId?: string;
   state?: "queued" | "streaming" | "failed" | "cancelled";
   approval?: { id: string; state: "pending" | "accepted" | "declined" | "expired"; canAccept?: boolean };
 };
@@ -66,6 +68,7 @@ export type WorkspaceSnapshot = {
   workspaceKey: string;
   provider: { name: WorkspaceProvider; state: "demo" | "connecting" | "ready" | "signed-out" | "error" | "usage-limit"; message?: string };
   agents: WorkspaceAgent[];
+  usage?: Omit<ReturnType<WorkspaceUsage["summary"]>, "byRun"> & { issue?: string };
 };
 export type AgentSignal = { id: string; senderId: string; recipientId: string };
 export type WorkspaceCommand =
@@ -82,7 +85,7 @@ const legacyRequiredChecks: readonly CheckDuty[] = ["reviewer", "tester"];
 type Duty = "coder" | "reviewer" | "tester" | "analyser" | "designer" | "pm";
 
 type Run = {
-  turn?: Turn; messageOffset?: number; message: WorkspaceMessage; check?: WorkspaceAgent["check"];
+  turn?: Turn; delegated?: boolean; messageOffset?: number; message: WorkspaceMessage; check?: WorkspaceAgent["check"];
   demoTimer?: ReturnType<typeof setTimeout>; claude?: ReturnType<typeof runClaudeCode>;
   patches?: Map<string, FileUpdate[]>;
   checkTarget?: { agentId: string; submissionId: string; fingerprint: string };
@@ -242,6 +245,8 @@ export class WorkspaceRuntime {
   private readonly listeners = new Set<(snapshot: WorkspaceSnapshot) => void>();
   private readonly signalListeners = new Set<(signal: AgentSignal) => void>();
   private server?: AppServer;
+  private usage?: WorkspaceUsage;
+  private usageIssue?: string;
   private started = false;
   private closed = false;
   private simulationRunning = false;
@@ -288,7 +293,49 @@ export class WorkspaceRuntime {
   }
 
   snapshot(): WorkspaceSnapshot {
-    return structuredClone(this.state);
+    const usage = this.usage ?? (this.usageIssue ? new WorkspaceUsage() : undefined);
+    if (!usage) return structuredClone(this.state);
+    const { total, byAgent, byTeam, unattributedTokens } = usage.summary();
+    return structuredClone({
+      ...this.state, usage: { total, byAgent, byTeam, unattributedTokens, issue: this.usageIssue },
+    });
+  }
+
+  usageExport() {
+    if (!this.usage) return undefined;
+    return { version: 1, modelProvider: this.providerId, ...this.usage.snapshot() };
+  }
+
+  private trackUsage(update: (usage: WorkspaceUsage) => void) {
+    if (!this.usage) return;
+    try {
+      update(this.usage);
+    } catch {
+      this.usage = undefined;
+      this.usageIssue = "Usage tracking is unavailable because its local records could not be read or saved.";
+    }
+  }
+
+  private usageTeam(agent: WorkspaceAgent) {
+    let root = agent;
+    const visited = new Set<string>();
+    while (root.parentId && root.parentId !== coordinatorId) {
+      if (visited.has(root.id)) return undefined;
+      visited.add(root.id);
+      const parent = this.sessions.get(root.parentId)?.agent;
+      if (!parent) return undefined;
+      root = parent;
+    }
+    return root.role === "lead" ? root.id : undefined;
+  }
+
+  private trackTurn(session: AgentSession, threadId: string, turnId: string, entry: WorkspaceMessage, recovered = false) {
+    this.trackUsage((usage) => usage.registerTurn(threadId, turnId, {
+      agentId: session.agent.id,
+      runId: entry.orchestrationRunId ?? entry.id,
+      teamId: this.usageTeam(session.agent),
+      model: session.agent.modelSettings?.reportedModel ?? session.agent.modelSettings?.requestedModel,
+    }, recovered));
   }
 
   subscribe(listener: (snapshot: WorkspaceSnapshot) => void) {
@@ -325,6 +372,12 @@ export class WorkspaceRuntime {
       }
       this.publish();
       return;
+    }
+    try {
+      this.usage = new WorkspaceUsage(this.store?.usagePath);
+      this.trackUsage((usage) => usage.retainAgents([...this.sessions.keys()]));
+    } catch {
+      this.usageIssue = "Usage tracking is unavailable because its local records could not be read.";
     }
     const server = new AppServer(this.state.project.path, process.env, false);
     this.server = server;
@@ -610,6 +663,7 @@ export class WorkspaceRuntime {
           }
           throw new Error("Deletion could not be saved. The conversations were kept; resolve the storage failure before trying again.");
         }
+        this.trackUsage((usage) => usage.removeAgents([...ids]));
       } else {
         const archiveDates = affected.map((entry) => entry.agent.archivedAt);
         for (const entry of affected) {
@@ -842,6 +896,13 @@ export class WorkspaceRuntime {
 
   private async resumeThread({ agent, threadId, run, toolVersion }: SavedSession) {
     const session = this.sessions.get(agent.id)!;
+    if (threadId) {
+      this.trackUsage((usage) => usage.registerThread(threadId, false, agent.id));
+      const entry = run && agent.messages.find((message) => message.id === run.messageId);
+      const turnId = run?.turnId;
+      if (entry && turnId) this.trackTurn(session, threadId, turnId, entry, true);
+      this.trackUsage((usage) => usage.markResumedThread(threadId, turnId));
+    }
     type RecoveredTurn = Turn & { items?: { id: string; type: string; text?: string }[] };
     try {
       const settings = session.agent.modelSettings ?? this.selectModelSettings();
@@ -1008,6 +1069,7 @@ export class WorkspaceRuntime {
     if (modelProvider !== this.providerId || this.threadSessions.has(thread.id)) throw new Error("Codex returned an unexpected thread.");
     this.recordModelSettings(session, settings, response);
     session.threadId = thread.id;
+    this.trackUsage((usage) => usage.registerThread(thread.id, true, session.agent.id));
     session.freshThread = true;
     session.toolVersion = managementToolVersion;
     this.threadSessions.set(thread.id, session);
@@ -1109,6 +1171,7 @@ export class WorkspaceRuntime {
         rootTurnId: parent ? parent.rootTurnId ?? parent.id : undefined,
       });
       session.freshThread = false;
+      if (session.threadId) this.trackTurn(session, session.threadId, turn.id, next);
       if (session.run === run) {
         run.turn ??= turn;
         this.update(session);
@@ -1351,6 +1414,14 @@ export class WorkspaceRuntime {
 
   private onEvent({ method, params }: Event) {
     const session = params.threadId ? this.threadSessions.get(params.threadId) : undefined;
+    if (method === "thread/tokenUsage/updated") {
+      const { threadId, turnId, tokenUsage } = params;
+      if (threadId && turnId) {
+        this.trackUsage((usage) => usage.observe(threadId, turnId, tokenUsage));
+        this.publish(false);
+      }
+      return;
+    }
     if (method === "error") {
       const detail = errorText(params.error?.message ?? params.message ?? "Codex reported an error.");
       if (/usage.?limit|rate.?limit|quota/i.test(detail)) {
@@ -1373,6 +1444,10 @@ export class WorkspaceRuntime {
       return;
     }
     if (!session?.run) return;
+    if ((method === "turn/started" || method === "turn/completed") && params.threadId && params.turn &&
+        (!session.run.turn || session.run.turn.id === params.turn.id)) {
+      this.trackTurn(session, params.threadId, params.turn.id, session.run.message);
+    }
     if (method === "serverRequest/resolved") {
       const pending = [...session.approvals.values()].find((entry) => entry.requestId === params.requestId);
       if (pending) this.expireApproval(session, pending);
@@ -1386,6 +1461,14 @@ export class WorkspaceRuntime {
     if (method === "turn/completed" && params.turn && (!session.run.turn || params.turn.id === session.run.turn.id)) {
       const completed = params.turn.status === "completed";
       const cancelled = params.turn.status === "interrupted";
+      if (completed && !session.run.delegated && (session.agent.role === "coordinator" || session.agent.role === "lead")) {
+        const entry = session.run.message;
+        this.trackUsage((usage) => usage.recordDecision({
+          id: entry.id, at: Date.now(), agentId: session.agent.id, runId: entry.orchestrationRunId ?? entry.id,
+          teamId: this.usageTeam(session.agent), reason: "Completed the turn without delegating.",
+          model: session.agent.modelSettings?.reportedModel,
+        }));
+      }
       if (completed && this.state.provider.state === "connecting") this.setProvider("ready");
       else if (!completed && this.state.provider.state === "connecting") {
         this.setProvider("error", errorText(params.turn.error?.message ?? "Codex connection failed."));
@@ -1637,10 +1720,20 @@ export class WorkspaceRuntime {
         if (!recipient?.threadId) throw new Error("Choose an open descendant on your team.");
         this.checkCandidateAccess(recipient);
         const instruction = message("user", goal);
+        const run = session.run!;
+        instruction.orchestrationRunId = run.message.orchestrationRunId ?? run.message.id;
         recipient.agent.messages.push(instruction);
         await this.enqueue(recipient, instruction);
-        if (instruction.state !== "failed") this.signal(session.agent.id, recipient.agent.id);
-        reply(instruction.state !== "failed", instruction.state === "failed" ? "The turn could not start." : "Instruction delivered.");
+        const outcome = this.delegationOutcome(recipient, instruction);
+        if (outcome !== "failed") run.delegated = true;
+        this.trackUsage((usage) => usage.recordDecision({
+          id: instruction.id, at: Date.now(), agentId: session.agent.id, delegateId: recipient.agent.id,
+          runId: instruction.orchestrationRunId, teamId: this.usageTeam(recipient.agent),
+          duty: recipient.agent.duty ?? recipient.agent.role, reason: "Follow-up for an existing agent.",
+          model: recipient.agent.modelSettings?.reportedModel, outcome,
+        }));
+        if (outcome !== "failed") this.signal(session.agent.id, recipient.agent.id);
+        reply(outcome !== "failed", outcome === "failed" ? "The turn could not start." : "Instruction delivered.");
         return;
       }
       if (params.tool !== tool.name) throw new Error("Unknown workspace tool.");
@@ -1705,6 +1798,8 @@ export class WorkspaceRuntime {
         prerequisite.agent.requiredChecks.push(duty);
       }
       const assignment = message("user", goal);
+      const run = session.run!;
+      assignment.orchestrationRunId = run.message.orchestrationRunId ?? run.message.id;
       assignment.state = "queued";
       agent.agent.messages.push(assignment);
       agent.queue.push(assignment);
@@ -1715,13 +1810,30 @@ export class WorkspaceRuntime {
       } else {
         await this.startDelegation(agent, turn);
       }
-      if (agent.agent.status !== "error") this.signal(session.agent.id, agent.agent.id);
-      reply(agent.agent.status !== "error", JSON.stringify({
+      const outcome = agent.agent.status === "error" ? "failed" : this.delegationOutcome(agent, assignment);
+      if (outcome !== "failed") run.delegated = true;
+      this.trackUsage((usage) => usage.recordDecision({
+        id: assignment.id, at: Date.now(), agentId: session.agent.id, delegateId: agent.agent.id,
+        runId: assignment.orchestrationRunId, teamId: this.usageTeam(agent.agent),
+        duty, complexity: modelSettings.complexity, model: modelSettings.requestedModel, outcome,
+        reason: duty === "lead" ? "Lead for coordinated work."
+          : duty === "coder" ? session.agent.role === "coordinator" ? "Direct assignment to a coder." : "Implementation in an isolated candidate."
+          : prerequisite || integrationCheck ? "Independent candidate check." : "Specialist assignment.",
+      }));
+      if (outcome !== "failed") this.signal(session.agent.id, agent.agent.id);
+      reply(outcome !== "failed", JSON.stringify({
         id: agent.agent.id, projectId: project.id, name, duty, modelSettings: agent.agent.modelSettings, waitingFor: agent.waitingFor, candidate: agent.agent.candidate?.path,
       }));
     } catch (error) {
       reply(false, errorText(error));
     }
+  }
+
+  private delegationOutcome(agent: AgentSession, assignment: WorkspaceMessage): NonNullable<DelegationDecision["outcome"]> {
+    if (assignment.state === "failed") return "failed";
+    if (assignment.state === "queued") return "queued";
+    if (agent.run?.message === assignment && !agent.run.turn) return "uncertain";
+    return "started";
   }
 
   private expireApproval(session: AgentSession, pending: PendingApproval) {

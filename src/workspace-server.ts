@@ -60,6 +60,16 @@ const server = createServer(async (request, response) => {
   response.setHeader("Cache-Control", "no-store");
   response.setHeader("X-Content-Type-Options", "nosniff");
   const path = request.url?.split("?")[0];
+  if (request.method === "GET" && path === "/api/usage") {
+    const usage = runtime.usageExport();
+    if (!usage) {
+      response.writeHead(404).end();
+      return;
+    }
+    response.writeHead(200, { "Content-Type": "application/json", "Content-Disposition": 'attachment; filename="orchestra-usage.json"' })
+      .end(JSON.stringify(usage, null, 2));
+    return;
+  }
   if (request.method === "GET" && path === "/api/events") {
     response.writeHead(200, { "Content-Type": "text/event-stream" });
     const publish = (snapshot: ReturnType<typeof runtime.snapshot>) => response.write(`data: ${JSON.stringify(snapshot)}\n\n`);

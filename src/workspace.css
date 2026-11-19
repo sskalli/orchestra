@@ -66,7 +66,7 @@ button:focus-visible { outline: 2px solid #b8bcb8; outline-offset: 3px; }
 .sw-project-button:hover { background: var(--sw-control-hover); color: #fff; }
 .sw-project-button > span:first-of-type { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .sw-chevron { width: 7px; height: 7px; transform: translateY(-2px) rotate(45deg); border: solid currentColor; border-width: 0 1px 1px 0; flex: none; }
-.sw-project-details {
+.sw-project-details, .sw-usage-details {
   position: absolute; top: 40px; left: 15px; z-index: 8; display: grid; gap: 4px; width: max-content; max-width: min(260px, 70vw);
   max-height: calc(100dvh - 90px); overflow-y: auto;
   padding: var(--sw-popover-padding); border: 1px solid var(--sw-line); border-radius: var(--sw-popover-radius); background: var(--sw-popover-bg); font-size: var(--sw-popover-font); line-height: 1.5;
@@ -80,6 +80,17 @@ button:focus-visible { outline: 2px solid #b8bcb8; outline-offset: 3px; }
 .sw-provider--ready > span { background: #68ca84; }
 .sw-provider--error > span { background: #ec7474; }
 .sw-provider--usage-limit > span, .sw-provider--signed-out > span { background: #e5bb68; }
+.sw-usage-menu { position: relative; flex: none; }
+.sw-usage-menu summary { cursor: pointer; font-size: 11px; padding: 4px; border-radius: 4px; }
+.sw-usage-menu summary:hover { background: var(--sw-control-hover); }
+.sw-usage-menu summary:focus-visible, .sw-usage-details a:focus-visible { outline: 2px solid #b8bcb8; outline-offset: 2px; }
+.sw-usage-details { left: auto; right: 0; top: 32px; width: min(260px, calc(100vw - 26px)); gap: 8px; }
+.sw-usage-details p, .sw-usage-details dl, .sw-usage-details dd { margin: 0; }
+.sw-usage-details p { color: var(--sw-muted); }
+.sw-usage-details dl { display: grid; grid-template-columns: 1fr auto; column-gap: 8px; }
+.sw-usage-details dd { text-align: right; }
+.sw-usage-details .sw-usage-issue { color: #e5bb68; }
+.sw-usage-details a { color: inherit; justify-self: start; }
 .sw-body {
   --left-width: min(max(200px, var(--left-size, clamp(250px, 30vw, 500px))), 44vw);
   --right-width: min(max(230px, var(--right-size, clamp(270px, 25vw, 418px))), 44vw);
@@ -138,7 +149,9 @@ button:focus-visible { outline: 2px solid #b8bcb8; outline-offset: 3px; }
   .sw-resize--left { top: 0; right: 0; bottom: auto; left: 0; width: auto; height: 14px; cursor: row-resize; }
   .sw-resize--left::after { top: 0; right: 0; bottom: auto; left: 0; width: auto; height: 2px; }
   .sw-right { position: absolute; right: 0; top: 0; bottom: 0; }
-  .sw-provider { font-size: 10px; gap: 5px; }
+  .sw-provider { font-size: 10px; gap: 5px; overflow: hidden; text-overflow: ellipsis; }
+  .sw-provider > span { flex: none; }
+  .sw-usage-menu summary { font-size: 10px; }
 }
 @media (prefers-reduced-motion: reduce) {
   .sw-dock, .sw-dock-inner { transition: none !important; }

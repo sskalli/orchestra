@@ -11,9 +11,49 @@ import type { AgentSignal, WorkspaceRuntime } from "./workspace-runtime.ts";
 import "./workspace.css";
 
 type Snapshot = ReturnType<WorkspaceRuntime["snapshot"]>;
+type UsageTotals = NonNullable<Snapshot["usage"]>["total"];
 type Agent = Snapshot["agents"][number] & { roleNumber: number };
 type Command = Parameters<WorkspaceRuntime["command"]>[0];
 type Activity = { agent: Agent; messageId?: string; text: string };
+
+const formatTokens = new Intl.NumberFormat().format;
+
+function usageLabel(usage: UsageTotals | undefined, label: string) {
+  if (!usage?.tokens) return `${label}: Unknown`;
+  const partial = usage.partialTurns > 0 || usage.unknownTurns > 0;
+  return `${label}: ${formatTokens(usage.tokens.totalTokens)}${partial ? " (partial)" : ""}`;
+}
+
+function WorkspaceUsage({ usage }: { usage: NonNullable<Snapshot["usage"]> }) {
+  const { tokens, observedTurns, partialTurns, unknownTurns } = usage.total;
+  return <details className="sw-usage-menu">
+    <summary>Token usage</summary>
+    <div className="sw-usage-details" role="region" aria-label="Workspace token usage">
+      <strong>{usageLabel(usage.total, "Workspace tokens")}</strong>
+      <p>{observedTurns + partialTurns + unknownTurns === 0 ? "No turns recorded" : [
+        `${formatTokens(observedTurns)} measured`,
+        partialTurns > 0 && `${formatTokens(partialTurns)} partial`,
+        unknownTurns > 0 && `${formatTokens(unknownTurns)} unknown`,
+        "turn coverage",
+      ].filter(Boolean).join(" · ")}</p>
+      {tokens && <dl>
+        <dt>Input</dt><dd>{formatTokens(tokens.inputTokens)}</dd>
+        <dt>Cached input</dt><dd>{formatTokens(tokens.cachedInputTokens)}</dd>
+        {tokens.cacheWriteInputTokens !== undefined && <>
+          <dt>Cache write</dt><dd>{formatTokens(tokens.cacheWriteInputTokens)}</dd>
+        </>}
+        <dt>Output</dt><dd>{formatTokens(tokens.outputTokens)}</dd>
+        <dt>Reasoning output</dt><dd>{formatTokens(tokens.reasoningOutputTokens)}</dd>
+        {usage.unattributedTokens && <>
+          <dt>Unattributed</dt><dd>{formatTokens(usage.unattributedTokens.totalTokens)}</dd>
+        </>}
+      </dl>}
+      {usage.issue
+        ? <p className="sw-usage-issue" role="status">{usage.issue}</p>
+        : <a href="/api/usage" download="orchestra-usage.json">Download usage JSON</a>}
+    </div>
+  </details>;
+}
 
 function providerLabel({ name, state }: Snapshot["provider"]) {
   const title = name === "claude" ? "Claude Code" : "Codex";
@@ -144,7 +184,7 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
     const dismissOutside = (event: Event) => {
       const target = event.target;
       if (!(target instanceof Element)) return;
-      document.querySelectorAll<HTMLDetailsElement>(".chat-lifecycle-menu[open]").forEach((menu) => {
+      document.querySelectorAll<HTMLDetailsElement>(".chat-lifecycle-menu[open], .sw-usage-menu[open]").forEach((menu) => {
         if (!menu.contains(target)) menu.open = false;
       });
       if (!target.closest(".sw-project-menu")) setProjectDetails(false);
@@ -153,8 +193,8 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
     const dismissOnEscape = (event: globalThis.KeyboardEvent) => {
       if (event.key !== "Escape") return;
       const target = event.target instanceof Element ? event.target : undefined;
-      const menu = target?.closest<HTMLDetailsElement>(".chat-lifecycle-menu[open]") ??
-        document.querySelector<HTMLDetailsElement>(".chat-lifecycle-menu[open]");
+      const menu = target?.closest<HTMLDetailsElement>(".chat-lifecycle-menu[open], .sw-usage-menu[open]") ??
+        document.querySelector<HTMLDetailsElement>(".chat-lifecycle-menu[open], .sw-usage-menu[open]");
       const projectTrigger = document.querySelector<HTMLButtonElement>(".sw-project-button[aria-expanded='true']");
       if (menu) {
         menu.open = false;
@@ -469,6 +509,11 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
     const effort = settings?.effort ?? settings?.reportedEffort;
     const modelLabel = [model, effort && `${effort} effort${settings?.effort ? " requested" : ""}`].filter(Boolean).join(" · ");
 
+    const scopedUsage = snapshot.usage?.byAgent[agent.id];
+    const teamUsage = snapshot.usage?.byTeam[agent.id];
+    const usage = snapshot.usage ? usageLabel(scopedUsage, "Tokens") : undefined;
+    const teamTokens = teamUsage ? usageLabel(teamUsage, "Team tokens") : undefined;
+
     return <WorkspaceChat
       key={agent.id}
       agent={{ ...agent, messages: agent.messages.map((entry) => {
@@ -484,6 +529,7 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
         : `${agentAppearance(agent).displayName}${team ? ` / ${agentAppearance(team).displayName}` : ""}`}
       projectLabel={kind === "agent" && snapshot.projects.length > 1 ? agent.projectId : undefined}
       modelLabel={modelLabel}
+      usageLabel={[usage, teamTokens].filter(Boolean).join(" · ")}
       draft={drafts[agent.id] ?? ""}
       composerHeight={composerSizes[kind]}
       onComposerHeightChange={(height) => {
@@ -527,6 +573,7 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
           </div>}
         </div>
         <div className={`sw-provider sw-provider--${connected ? provider.state : "connecting"}`} role="status"><span aria-hidden="true" />{connected ? providerLabel(provider) : "Reconnecting"}</div>
+        {snapshot.usage && <WorkspaceUsage usage={snapshot.usage} />}
       </header>
       <main ref={bodyRef} className={`sw-body ${leftOpen ? "is-project-open" : ""} ${selected ? "is-agent-open" : ""} ${resizing ? "is-resizing" : ""}`}
         style={{ "--left-size": panelSizes.left ? `${panelSizes.left}px` : undefined,

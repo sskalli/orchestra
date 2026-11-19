@@ -8,6 +8,7 @@ export type FileUpdate = { path: string; kind: { type: "add" | "delete" } | { ty
 type Params = {
   threadId?: string;
   turnId?: string;
+  tokenUsage?: unknown;
   turn?: Turn;
   item?: { id?: string; type: string; text?: string; changes?: FileUpdate[] };
   itemId?: string;
