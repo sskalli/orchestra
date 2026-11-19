@@ -120,12 +120,12 @@ export class AppServer {
     this.child.stdin.write(JSON.stringify(message) + "\n");
   }
 
-  async call<T>(method: string, params: object): Promise<T> {
+  async call<T>(method: string, params: object, requestTimeoutMs = timeoutMs): Promise<T> {
     const id = this.nextId++;
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
       return await new Promise<T>((resolve, reject) => {
-        timer = setTimeout(() => reject(new Error(`Timed out calling ${method}`)), timeoutMs);
+        timer = setTimeout(() => reject(new Error(`Timed out calling ${method}`)), requestTimeoutMs);
         this.pending.set(id, { resolve: (result) => resolve(result as T), reject });
         this.send({ id, method, params });
       });

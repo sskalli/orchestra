@@ -464,6 +464,11 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
       }
     }
 
+    const settings = agent.modelSettings;
+    const model = settings?.reportedModel ?? settings?.requestedModel;
+    const effort = settings?.effort ?? settings?.reportedEffort;
+    const modelLabel = [model, effort && `${effort} effort${settings?.effort ? " requested" : ""}`].filter(Boolean).join(" · ");
+
     return <WorkspaceChat
       key={agent.id}
       agent={{ ...agent, messages: agent.messages.map((entry) => {
@@ -478,6 +483,7 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
         ? `${agentAppearance(team).displayName} / ${agentAppearance(agent).displayName}`
         : `${agentAppearance(agent).displayName}${team ? ` / ${agentAppearance(team).displayName}` : ""}`}
       projectLabel={kind === "agent" && snapshot.projects.length > 1 ? agent.projectId : undefined}
+      modelLabel={modelLabel}
       draft={drafts[agent.id] ?? ""}
       composerHeight={composerSizes[kind]}
       onComposerHeightChange={(height) => {

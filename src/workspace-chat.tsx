@@ -40,6 +40,7 @@ type ChatProps = {
   kind: "project" | "agent";
   title?: string;
   projectLabel?: string;
+  modelLabel?: string;
   draft: string;
   composerHeight?: number;
   onComposerHeightChange: (height: number) => void;
@@ -78,7 +79,7 @@ const systemMessageLabels: Record<SystemMessageKind, string> = {
 };
 
 function Conversation({
-  agent, kind, title, projectLabel, draft: initialDraft, composerHeight, onComposerHeightChange, onDraftInput, onDraftChange, onSend, onSteer, onCancel, onApproval, onResumeQueue, onClose,
+  agent, kind, title, projectLabel, modelLabel, draft: initialDraft, composerHeight, onComposerHeightChange, onDraftInput, onDraftChange, onSend, onSteer, onCancel, onApproval, onResumeQueue, onClose,
   disabled, disabledReason, focusMessageId, focusRequest, onOpenAgent, onLifecycle,
 }: ChatProps) {
   const transcript = useRef<HTMLDivElement>(null);
@@ -429,6 +430,7 @@ function Conversation({
         <div className="chat-header-copy">
           <h2 title={heading}>{kind === "project" ? `COMMS // CHANNEL: ${heading}` : heading}</h2>
           {kind === "agent" ? <span className="chat-agent-status">{projectLabel ? `Project: ${projectLabel} · ` : ""}{archived ? "Archived" : agent.lifecycleBusy ? "Updating…" : statusLabels[agent.status]}</span> : null}
+          {modelLabel && <span className="chat-agent-status">{modelLabel}</span>}
         </div>
         <details className="chat-lifecycle-menu">
           <summary aria-label={kind === "project" ? "Project chat actions" : "Agent actions"} title="Chat actions">⋯</summary>

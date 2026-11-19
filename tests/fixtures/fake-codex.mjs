@@ -28,10 +28,12 @@ createInterface({ input: process.stdin }).on("line", (line) => {
   trace({ method, params });
   if (method === "initialize") write({ id, result: {} });
   else if (method === "account/read") write({ id, result: { account: { type: "chatgpt" } } });
+  else if (method === "config/read") write({ id, result: { config: { model_provider: null } } });
+  else if (method === "model/list") write({ id, result: { data: [] } });
   else if (method === "thread/start") {
-    write({ id, result: { thread: { id: `thread-${++nextThread}` }, modelProvider: params.modelProvider } });
+    write({ id, result: { thread: { id: `thread-${++nextThread}` }, modelProvider: params.modelProvider, model: params.model ?? "fixture-default" } });
   } else if (method === "thread/resume") {
-    write({ id, result: { thread: { id: params.threadId, status: { type: "idle" } }, modelProvider: params.modelProvider } });
+    write({ id, result: { thread: { id: params.threadId, status: { type: "idle" } }, modelProvider: params.modelProvider, model: params.model ?? "fixture-default" } });
   } else if (method === "turn/start") {
     const turn = { id: `turn-${++nextTurn}`, rootTurnId: null, status: "inProgress" };
     write({ id, result: { turn } });

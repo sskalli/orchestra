@@ -19,7 +19,13 @@ async function waitFor(condition: () => boolean) {
   }
 }
 
-test("shared workspace scopes delegation, worktrees, and resumed threads to their projects", async () => {
+test("shared workspace scopes delegation, worktrees, and resumed threads to their projects", async (t) => {
+  const previousModel = process.env.CODEX_MODEL;
+  process.env.CODEX_MODEL = "fixture-requested";
+  t.after(() => {
+    if (previousModel === undefined) delete process.env.CODEX_MODEL;
+    else process.env.CODEX_MODEL = previousModel;
+  });
   const directory = mkdtempSync(join(tmpdir(), "orchestra-multi-"));
   const trace = join(directory, "trace.jsonl");
   process.env.ORCHESTRA_TEST_TRACE = trace;
@@ -64,6 +70,7 @@ test("shared workspace scopes delegation, worktrees, and resumed threads to thei
     }
     await runtime.close();
 
+    process.env.CODEX_MODEL = "fixture-restart-override";
     runtime = new WorkspaceRuntime({ cwd: blue, projects: [...projects].reverse(), modelProvider: "company", store });
     await runtime.start();
     assert.equal(runtime.snapshot().provider.state, "ready");
@@ -72,7 +79,9 @@ test("shared workspace scopes delegation, worktrees, and resumed threads to thei
     const starts = events.filter((event) => event.method === "thread/start");
     const resumed = events.filter((event) => event.method === "thread/resume");
     assert(starts.every((event) => event.params.modelProvider === "company"));
-    assert(resumed.every((event) => event.params.modelProvider === "company"));
+    assert(resumed.length > 0);
+    assert(resumed.every((event) => event.params.modelProvider === "company" && event.params.model === "fixture-requested"));
+    assert(runtime.snapshot().agents.every((agent) => agent.modelSettings?.reportedModel === "fixture-requested"));
     for (const project of projects) {
       assert(starts.some((event) => event.params.cwd === project.path && event.params.developerInstructions.includes(`assigned project is ${project.id}`)));
       const candidate = candidates.find((entry) => entry.projectId === project.id)!;

@@ -7,6 +7,8 @@ import type { Event, FileUpdate, Id, Thread, Turn } from "./app-server.ts";
 import { checkClaudeCode, ClaudeCodeError, runClaudeCode } from "./claude-code.ts";
 import { createFeatureWorktree, describeWorktreePatch } from "./workspace-worktree.ts";
 import { fingerprintCandidate, integrateCandidates } from "./workspace-integration.ts";
+import { readModelCatalog, recordReportedModel, selectModelSettings } from "./workspace-models.ts";
+import type { ModelSettings, ReportedModel } from "./workspace-models.ts";
 import type { SavedSession, workspaceStore } from "./workspace-store.ts";
 import { defaultProject, workspaceIdentity } from "./workspace-projects.ts";
 import type { WorkspaceProject } from "./workspace-projects.ts";
@@ -34,12 +36,16 @@ export type WorkspaceAgent = {
   projectId?: string;
   goal?: string;
   duty?: Duty;
+  modelSettings?: ModelSettings;
   candidate?: Candidate;
+  acceptanceOwnerId?: string;
+  requiredChecks?: CheckDuty[];
+  validationEvidence?: Partial<Record<CheckDuty, CheckResult>>;
   submissionId?: string;
   submissionFingerprint?: string;
   validationTargetId?: string;
   integration?: { id: string; path: string; base: string; fingerprint: string; sources: { agentId: string; submissionId: string; head: string; fingerprint?: string }[]; confirmed?: boolean };
-  check?: { submissionId: string; targetAgentId?: string; candidateFingerprint?: string; outcome: "passed" | "changes-requested" | "blocked"; summary: string; recordedAt: number };
+  check?: CheckResult;
   status: AgentStatus;
   messages: WorkspaceMessage[];
   queueDepth: number;
@@ -69,6 +75,10 @@ export type WorkspaceCommand =
   | { type: "approval"; agentId: string; approvalId: string; decision: "accept" | "decline" };
 
 type Candidate = { path: string; base: string };
+type CheckDuty = "reviewer" | "tester";
+type CheckResult = { submissionId: string; targetAgentId?: string; candidateFingerprint?: string;
+  outcome: "passed" | "changes-requested" | "blocked"; summary: string; recordedAt: number };
+const legacyRequiredChecks: readonly CheckDuty[] = ["reviewer", "tester"];
 type Duty = "coder" | "reviewer" | "tester" | "analyser" | "designer" | "pm";
 
 type Run = {
@@ -95,7 +105,7 @@ type AgentSession = {
 };
 
 const coordinatorId = "coordinator";
-const managementToolVersion = 8;
+const managementToolVersion = 9;
 const workspaceThreadConfig = { "features.multi_agent": false, "features.multi_agent_v2": false };
 const input = (text: string) => [{ type: "text", text, text_elements: [] }];
 const hasSubmittedMessage = (agent: WorkspaceAgent) =>
@@ -104,12 +114,14 @@ const tool = {
   type: "function",
   deferLoading: false,
   name: "delegate_agent",
-  description: "Start an addressable team lead, coder, reviewer, tester, analyser, designer, or product adviser. The pilot can start teams or read-only tasks. Leads can start multiple coders in isolated worktrees. Set afterAgentId to attach a check to that coder and wait for its current submission. Coders can delegate reviewer, tester, or designer children for their own candidate. In a multi-repository workspace, the pilot must provide a configured projectId. Workers inherit their team’s project.",
+  description: "Start an addressable team lead, coder, reviewer, tester, analyser, designer, or product adviser. The pilot can assign isolated work directly to a coder or start a lead for coordinated work. Leads can start multiple coders in isolated worktrees. For coders, set requiredChecks to the independent checks that add evidence. Use routine complexity for narrow, predictable work and complex for difficult or high-risk work. Omit complexity for typical work. Set afterAgentId to attach a check to that coder and wait for its current submission. Coders can delegate reviewer, tester, or designer children for their own candidate. In a multi-repository workspace, the pilot must provide a configured projectId. Workers inherit their team’s project.",
   inputSchema: {
     type: "object",
     properties: { name: { type: "string" }, goal: { type: "string" },
       duty: { type: "string", enum: ["lead", "coder", "reviewer", "tester", "analyser", "designer", "pm"] },
       projectId: { type: "string" },
+      complexity: { type: "string", enum: ["routine", "complex"] },
+      requiredChecks: { type: "array", items: { type: "string", enum: ["reviewer", "tester"] } },
       afterAgentId: { type: "string" } },
     required: ["name", "goal", "duty"],
     additionalProperties: false,
@@ -220,6 +232,7 @@ export class WorkspaceRuntime {
   private readonly state: WorkspaceSnapshot;
   private readonly demo: boolean;
   private readonly providerId: string;
+  private modelCatalog: Awaited<ReturnType<typeof readModelCatalog>> = [];
   private readonly projects: WorkspaceProject[];
   private readonly store?: ReturnType<typeof workspaceStore>;
   private storageFailed = false;
@@ -343,6 +356,14 @@ export class WorkspaceRuntime {
         }
       }
       const coordinator = this.sessions.get(coordinatorId)!;
+      if (this.providerId === "openai") {
+        try {
+          this.modelCatalog = await readModelCatalog(server);
+        } catch {
+          coordinator.agent.messages.push(message("system",
+            "Codex model discovery is unavailable. New agents will use the configured provider defaults or CODEX_MODEL.", "notice"));
+        }
+      }
       if (!coordinator.threadId) await this.attachThread(coordinator);
       for (const entry of saved ?? []) {
         if (entry.agent.archivedAt) continue;
@@ -823,28 +844,32 @@ export class WorkspaceRuntime {
     const session = this.sessions.get(agent.id)!;
     type RecoveredTurn = Turn & { items?: { id: string; type: string; text?: string }[] };
     try {
-      const { thread, modelProvider, initialTurnsPage } = await this.server!.call<{
+      const settings = session.agent.modelSettings ?? this.selectModelSettings();
+      const response = await this.server!.call<ReportedModel & {
         thread: Thread & { status?: { type: string }; turns?: RecoveredTurn[] };
         modelProvider: string;
         initialTurnsPage?: { data: RecoveredTurn[] };
       }>("thread/resume", {
         threadId, cwd: this.sessionCwd(session), modelProvider: this.providerId,
-        model: process.env.CODEX_MODEL,
+        model: settings.reportedModel ?? settings.requestedModel,
         ...this.threadPermissions(session),
         config: workspaceThreadConfig,
         developerInstructions: this.instructions(session),
         excludeTurns: true,
         initialTurnsPage: { limit: 8, itemsView: "full" },
       });
+      const { thread, modelProvider, initialTurnsPage } = response;
       if (thread.id !== threadId || modelProvider !== this.providerId || this.threadSessions.has(thread.id)) {
         throw new Error("Codex returned an unexpected saved thread.");
       }
       const turn = run?.turnId && (initialTurnsPage?.data ?? thread.turns)?.find((entry) => entry.id === run.turnId);
-      const refreshTools = (session.agent.role !== "worker" || session.agent.duty === "coder" || session.agent.duty === "reviewer" ||
-        session.agent.duty === "tester") && toolVersion !== managementToolVersion;
+      const refreshTools = session.agent.role !== "worker" || session.agent.duty === "coder"
+        ? toolVersion !== managementToolVersion
+        : (session.agent.duty === "reviewer" || session.agent.duty === "tester") && (toolVersion ?? 0) < 8;
       if (thread.status?.type === "active" || turn && turn.status === "inProgress") {
         throw new Error("Codex still reports an active turn. Check again after restarting the workspace.");
       }
+      this.recordModelSettings(session, settings, response);
       delete session.agent.unavailableReason;
       delete session.recovery;
       this.threadSessions.set(thread.id, session);
@@ -947,12 +972,26 @@ export class WorkspaceRuntime {
     return `${projectContext}\nUse Orchestra's tools for delegation and product questions.\n\n${instructions}`;
   }
 
+  private selectModelSettings(complexity?: unknown): ModelSettings {
+    return selectModelSettings(this.modelCatalog, process.env.CODEX_MODEL, complexity);
+  }
+
+  private recordModelSettings(session: AgentSession, settings: ModelSettings, response: ReportedModel) {
+    const expectedModel = settings.reportedModel ?? settings.requestedModel;
+    if (expectedModel && response.model && response.model !== expectedModel) {
+      session.agent.messages.push(message("system",
+        `Codex reported model ${response.model} instead of ${expectedModel}. Check the provider configuration if this was unexpected.`, "notice"));
+    }
+    session.agent.modelSettings = recordReportedModel(settings, response, this.modelCatalog);
+  }
+
   private async attachThread(session: AgentSession) {
     session.opening = true;
     try {
-    const { thread, modelProvider } = await this.server!.call<{ thread: Thread; modelProvider: string }>("thread/start", {
+    const settings = session.agent.modelSettings ?? this.selectModelSettings();
+    const response = await this.server!.call<ReportedModel & { thread: Thread; modelProvider: string }>("thread/start", {
       cwd: this.sessionCwd(session),
-      model: process.env.CODEX_MODEL,
+      model: settings.reportedModel ?? settings.requestedModel,
       modelProvider: this.providerId,
       ...this.threadPermissions(session),
       config: workspaceThreadConfig,
@@ -961,10 +1000,13 @@ export class WorkspaceRuntime {
       dynamicTools: session.agent.role === "worker" && session.agent.duty !== "coder"
         ? [decisionTool, ...(session.agent.duty === "reviewer" || session.agent.duty === "tester" ? [checkTool] : [])]
         : [tool, relayTool, listTool, inspectGitTool, reportTool, decisionTool,
-          ...(session.agent.role === "lead" ? [confirmCoderTool, integrateTool, confirmIntegrationTool] : [])],
+          ...((session.agent.role === "coordinator" || session.agent.role === "lead") ? [confirmCoderTool] : []),
+          ...(session.agent.role === "lead" ? [integrateTool, confirmIntegrationTool] : [])],
       developerInstructions: this.instructions(session),
     });
+    const { thread, modelProvider } = response;
     if (modelProvider !== this.providerId || this.threadSessions.has(thread.id)) throw new Error("Codex returned an unexpected thread.");
+    this.recordModelSettings(session, settings, response);
     session.threadId = thread.id;
     session.freshThread = true;
     session.toolVersion = managementToolVersion;
@@ -1022,11 +1064,16 @@ export class WorkspaceRuntime {
     if (session.agent.duty === "coder") {
       session.agent.submissionId = randomUUID();
       delete session.agent.submissionFingerprint;
+      delete session.agent.validationEvidence;
       for (const lead of this.sessions.values()) {
         if (lead.agent.integration?.sources.some((source) => source.agentId === session.agent.id)) delete lead.agent.integration.confirmed;
       }
     }
-    if (session.agent.duty === "reviewer" || session.agent.duty === "tester") delete session.agent.check;
+    const duty = session.agent.duty;
+    if (duty === "reviewer" || duty === "tester") {
+      delete session.agent.check;
+      this.recordCoderCheck(duty, run.checkTarget, "The latest check has no verified result.");
+    }
     session.run = run;
     delete next.state;
     this.update(session);
@@ -1057,7 +1104,7 @@ export class WorkspaceRuntime {
         }),
         input: input(next.text),
         additionalContext: this.teamReportContext(session),
-        effort: "low",
+        effort: session.agent.modelSettings?.effort,
         parentTurnId: parent?.id,
         rootTurnId: parent ? parent.rootTurnId ?? parent.id : undefined,
       });
@@ -1160,13 +1207,15 @@ export class WorkspaceRuntime {
       try { session.agent.submissionFingerprint = fingerprintCandidate(session.agent.candidate.path); }
       catch (error) { completed = false; detail = `Unable to snapshot the candidate: ${errorText(error)}`; }
     }
-    const validation = session.agent.duty === "reviewer" || session.agent.duty === "tester";
+    const duty = session.agent.duty;
+    const validation = duty === "reviewer" || duty === "tester";
     if (completed && validation && !session.agent.check) {
       const summary = "The turn finished without recording a review or test outcome. Request a fresh check with submit_check_result.";
       if (binding) session.agent.check = { submissionId: binding.submissionId, targetAgentId: binding.agentId,
         candidateFingerprint: binding.fingerprint, outcome: "blocked", summary, recordedAt: Date.now() };
       session.agent.messages.push(message("system", summary, "action"));
     }
+    if (validation) this.recordCoderCheck(duty, binding, detail ?? "The check did not complete.", session.agent.check);
     session.agent.status = completed
       ? session.agent.duty === "coder" ? "awaiting-confirmation"
         : validation && session.agent.check?.outcome === "changes-requested" ? "error"
@@ -1215,6 +1264,18 @@ export class WorkspaceRuntime {
     }
   }
 
+  private recordCoderCheck(duty: CheckDuty, binding: Run["checkTarget"], summary: string, result?: CheckResult) {
+    if (!binding) return;
+    const coder = this.sessions.get(binding.agentId)?.agent;
+    if (coder?.duty !== "coder" || coder.submissionId !== binding.submissionId) return;
+    // Keep acceptance evidence with the submission even if its checker's conversation is removed.
+    coder.validationEvidence ??= {};
+    coder.validationEvidence[duty] = result ?? {
+      submissionId: binding.submissionId, targetAgentId: binding.agentId, candidateFingerprint: binding.fingerprint,
+      outcome: "blocked", summary, recordedAt: Date.now(),
+    };
+  }
+
   private scopedChecks(coder: AgentSession) {
     return [...this.sessions.values()].filter((entry) => this.isActive(entry) &&
       (entry.agent.duty === "reviewer" || entry.agent.duty === "tester") &&
@@ -1236,7 +1297,9 @@ export class WorkspaceRuntime {
     checkOutcome?: NonNullable<WorkspaceAgent["check"]>["outcome"]) {
     if (!session.agent.parentId || this.closed || !this.isActive(session)) return;
     const parent = this.sessions.get(session.agent.parentId);
-    const outcome = session.agent.status === "awaiting-confirmation" ? "finished its turn and is awaiting confirmation."
+    const acceptanceOwner = this.sessions.get(session.agent.acceptanceOwnerId ?? session.agent.parentId);
+    const outcome = session.agent.status === "awaiting-confirmation"
+      ? `finished its turn and is awaiting confirmation${acceptanceOwner ? ` from ${acceptanceOwner.agent.name}` : ""}.`
       : completed ? "finished its turn." : "could not complete its turn.";
     const text = `${session.agent.name} ${outcome}${result ? "\n" + result : ""}`;
     const kind = !completed || checkOutcome === "changes-requested" ? "error"
@@ -1479,33 +1542,41 @@ export class WorkspaceRuntime {
       }
       if (params.tool === confirmCoderTool.name) {
         const coder = reports.find((entry) => entry.agent.id === params.arguments?.agentId && entry.agent.duty === "coder");
-        if (session.agent.role !== "lead" || coder?.agent.status !== "awaiting-confirmation" || coder.run || coder.queue.length) {
+        if ((session.agent.role !== "lead" && session.agent.role !== "coordinator") ||
+            coder?.agent.status !== "awaiting-confirmation" || coder.run || coder.recovery || coder.queue.length) {
           throw new Error("Choose a coder on your team whose submission is awaiting confirmation.");
         }
-        if (coder.agent.parentId !== session.agent.id || !coder.agent.candidate || !coder.agent.submissionId) throw new Error("Only this coder's team lead can accept its submission.");
+        const ownerId = coder.agent.acceptanceOwnerId ?? (session.agent.role === "lead" ? coder.agent.parentId : undefined);
+        if (ownerId !== session.agent.id || !coder.agent.candidate || !coder.agent.submissionId) {
+          throw new Error("Only the assigned acceptance owner can confirm this submission.");
+        }
         const fingerprint = fingerprintCandidate(coder.agent.candidate.path);
+        if (coder.agent.acceptanceOwnerId && !coder.agent.submissionFingerprint) {
+          throw new Error("Orchestra could not verify the submitted snapshot. Ask the coder to submit it again.");
+        }
         if (coder.agent.submissionFingerprint && coder.agent.submissionFingerprint !== fingerprint) throw new Error("The candidate changed after submission. Ask the coder to submit it again.");
         const checks = this.scopedChecks(coder);
-        if (checks.some((entry) => entry.run || entry.waitingFor || entry.agent.status === "working")) {
+        if (checks.some((entry) => entry.run || entry.recovery || entry.waitingFor || entry.queue.length || entry.agent.status === "working")) {
           throw new Error("Wait for this coder's scheduled review and testing to finish before confirming.");
         }
-        for (const duty of ["reviewer", "tester"] as const) {
-          const latest = checks.filter((entry) => entry.agent.duty === duty && entry.agent.check &&
-            entry.agent.check.submissionId === coder.agent.submissionId &&
-            (!entry.agent.check.targetAgentId || entry.agent.check.targetAgentId === coder.agent.id))
+        for (const duty of coder.agent.requiredChecks ?? legacyRequiredChecks) {
+          const latest = coder.agent.validationEvidence?.[duty] ?? checks
+            .filter((entry) => entry.agent.duty === duty && entry.agent.check?.submissionId === coder.agent.submissionId &&
+              (!entry.agent.check?.targetAgentId || entry.agent.check.targetAgentId === coder.agent.id))
             .map((entry) => entry.agent.check!).sort((a, b) => b.recordedAt - a.recordedAt)[0];
-          if (latest?.outcome !== "passed" || latest.candidateFingerprint !== fingerprint) {
+          if (latest?.outcome !== "passed" || latest.submissionId !== coder.agent.submissionId || latest.candidateFingerprint !== fingerprint) {
             throw new Error(`The current submission needs a fresh passing ${duty} report for this exact candidate. ${latest?.summary ?? "Request a fresh check."}`);
           }
         }
         coder.agent.submissionFingerprint = fingerprint;
         coder.agent.status = "done";
         const notice = `${session.agent.name} confirmed ${coder.agent.name}'s implementation.`;
-        for (const recipient of [coder, session, this.sessions.get(coordinatorId)]) {
-          recipient?.agent.messages.push(message("system", notice, "success", session.agent.id));
+        for (const recipient of new Set([coder, session, this.sessions.get(coordinatorId)])) {
+          recipient?.agent.messages.push(message("system", notice, "success",
+            recipient === coder ? session.agent.id : coder.agent.id));
         }
         this.signal(session.agent.id, coder.agent.id);
-        this.signal(session.agent.id, coordinatorId);
+        if (session.agent.id !== coordinatorId) this.signal(session.agent.id, coordinatorId);
         this.publish();
         reply(true, notice);
         return;
@@ -1555,7 +1626,7 @@ export class WorkspaceRuntime {
       if (params.tool === listTool.name) {
         reply(true, JSON.stringify(reports.map(({ agent }) => ({
           id: agent.id, projectId: agent.projectId, parentId: agent.parentId, name: agent.name, role: agent.role, duty: agent.duty, goal: agent.goal, status: agent.status,
-          submissionId: agent.submissionId, validationTargetId: agent.validationTargetId, candidate: agent.candidate?.path, check: agent.check,
+          submissionId: agent.submissionId, acceptanceOwnerId: agent.acceptanceOwnerId, requiredChecks: agent.requiredChecks, validationTargetId: agent.validationTargetId, candidate: agent.candidate?.path, check: agent.check,
         }))));
         return;
       }
@@ -1580,10 +1651,18 @@ export class WorkspaceRuntime {
       if (duty !== "lead" && duty !== "coder" && duty !== "reviewer" && duty !== "tester" && duty !== "analyser" && duty !== "designer" && duty !== "pm") {
         throw new Error("Choose lead, coder, reviewer, tester, analyser, designer, or product adviser.");
       }
-      if ((duty === "lead" && session.agent.role !== "coordinator") || (duty === "coder" && session.agent.role !== "lead")) {
-        throw new Error("The pilot starts leads. A lead starts coders.");
+      if ((duty === "lead" && session.agent.role !== "coordinator") || (duty === "coder" && session.agent.role !== "lead" && session.agent.role !== "coordinator")) {
+        throw new Error("Only the pilot can start leads. Only the pilot or a lead can assign coders.");
       }
       const project = this.selectProject(session, params.arguments?.projectId);
+      const modelSettings = this.selectModelSettings(params.arguments?.complexity);
+      const checkPlan = params.arguments?.requiredChecks;
+      const requiredChecks = checkPlan === undefined ? [] : checkPlan;
+      if ((duty !== "coder" && checkPlan !== undefined) ||
+          !Array.isArray(requiredChecks) || new Set(requiredChecks).size !== requiredChecks.length ||
+          requiredChecks.some((check) => check !== "reviewer" && check !== "tester")) {
+        throw new Error("Specify unique reviewer or tester requirements only when assigning a coder.");
+      }
       const checkDuty = duty === "tester" || duty === "reviewer" || duty === "designer";
       if (session.agent.duty === "coder" && !checkDuty) throw new Error("Coders may delegate only reviewer, tester, or designer checks for their own work.");
       const after = params.arguments?.afterAgentId ?? (session.agent.duty === "coder" ? session.agent.id : undefined);
@@ -1594,8 +1673,8 @@ export class WorkspaceRuntime {
         throw new Error("Schedule review, design review, or testing after an active or completed coder on your team.");
       }
       const integrationCheck = !prerequisite && checkDuty && session.agent.role === "lead" ? session.agent.integration : undefined;
-      if (!prerequisite && (duty === "reviewer" || duty === "tester") && session.agent.role === "lead" && !integrationCheck) {
-        throw new Error("Set afterAgentId to the coder to validate, or create an integration candidate first.");
+      if (!prerequisite && (duty === "reviewer" || duty === "tester") && !integrationCheck) {
+        throw new Error("Set afterAgentId to the coder to validate. A lead can also create an integration candidate first.");
       }
       const candidate = duty === "coder" ? createFeatureWorktree(project.path)
         : prerequisite?.agent.candidate ?? (integrationCheck ? { path: integrationCheck.path, base: integrationCheck.base } : session.agent.candidate);
@@ -1604,11 +1683,15 @@ export class WorkspaceRuntime {
       agent.agent.projectId = project.id;
       agent.agent.duty = duty === "lead" ? undefined : duty;
       agent.agent.candidate = candidate;
+      agent.agent.modelSettings = modelSettings;
       if (prerequisite || integrationCheck) agent.agent.validationTargetId = prerequisite?.agent.id ?? session.agent.id;
       if (duty === "coder") {
+        agent.agent.acceptanceOwnerId = session.agent.id;
+        agent.agent.requiredChecks = requiredChecks;
         const notice = `Feature worktree for ${name}: ${candidate!.path}`;
-        session.agent.messages.push(message("system", notice, "notice"));
-        this.sessions.get(coordinatorId)?.agent.messages.push(message("system", notice, "notice"));
+        for (const recipient of new Set([session, this.sessions.get(coordinatorId)])) {
+          recipient?.agent.messages.push(message("system", notice, "notice", agent.agent.id));
+        }
       }
       try {
         if (!prerequisite || (!prerequisite.run && coderIsReady(prerequisite.agent))) this.checkCandidateAccess(agent);
@@ -1616,6 +1699,10 @@ export class WorkspaceRuntime {
         this.sessions.delete(agent.agent.id);
         this.state.agents.pop();
         throw error;
+      }
+      if (prerequisite && (duty === "reviewer" || duty === "tester") && prerequisite.agent.requiredChecks &&
+          !prerequisite.agent.requiredChecks.includes(duty)) {
+        prerequisite.agent.requiredChecks.push(duty);
       }
       const assignment = message("user", goal);
       assignment.state = "queued";
@@ -1630,7 +1717,7 @@ export class WorkspaceRuntime {
       }
       if (agent.agent.status !== "error") this.signal(session.agent.id, agent.agent.id);
       reply(agent.agent.status !== "error", JSON.stringify({
-        id: agent.agent.id, projectId: project.id, name, duty, waitingFor: agent.waitingFor, candidate: agent.agent.candidate?.path,
+        id: agent.agent.id, projectId: project.id, name, duty, modelSettings: agent.agent.modelSettings, waitingFor: agent.waitingFor, candidate: agent.agent.candidate?.path,
       }));
     } catch (error) {
       reply(false, errorText(error));

@@ -81,7 +81,7 @@
   transition: transform .14s ease-out;
 }
 
-.swarm-node.is-lead .swarm-node-target { width: 52px; height: 52px; }
+.swarm-node.is-hub .swarm-node-target { width: 52px; height: 52px; }
 .swarm-node-target:focus-visible,
 .swarm-node-status:focus-visible { outline: 2px solid #dedede; outline-offset: 2px; }
 
@@ -89,9 +89,9 @@
 .swarm-node:focus-within .swarm-node-target,
 .swarm-node.is-selected .swarm-node-target { transform: translate(-50%, -50%) scale(1.24); }
 
-.swarm-node.is-lead:hover .swarm-node-target,
-.swarm-node.is-lead:focus-within .swarm-node-target,
-.swarm-node.is-lead.is-selected .swarm-node-target { transform: translate(-50%, -50%) scale(1.16); }
+.swarm-node.is-hub:hover .swarm-node-target,
+.swarm-node.is-hub:focus-within .swarm-node-target,
+.swarm-node.is-hub.is-selected .swarm-node-target { transform: translate(-50%, -50%) scale(1.16); }
 
 .swarm-node-disc {
   display: block;
@@ -105,7 +105,7 @@
   box-shadow: 0 0 16px 6px color-mix(in srgb, var(--agent-color) 46%, transparent);
 }
 
-.swarm-node.is-lead .swarm-node-disc {
+.swarm-node.is-hub .swarm-node-disc {
   width: 28px;
   height: 28px;
   box-shadow: 0 0 24px 8px color-mix(in srgb, var(--agent-color) 48%, transparent);
@@ -120,7 +120,7 @@
   color: #efeeee;
 }
 
-.swarm-node.is-lead .swarm-node-status {
+.swarm-node.is-hub .swarm-node-status {
   left: 31px;
   top: -12px;
   width: 23px;
@@ -139,7 +139,7 @@
   height: 13px;
 }
 
-.swarm-node.is-lead .swarm-node-status svg {
+.swarm-node.is-hub .swarm-node-status svg {
   width: 17px;
   height: 17px;
 }
@@ -160,6 +160,7 @@
   pointer-events: none;
 }
 
+.swarm-node.is-direct-coder .swarm-team-label,
 .swarm-node:hover .swarm-team-label,
 .swarm-node:focus-within .swarm-team-label,
 .swarm-node.is-selected .swarm-team-label,
@@ -249,7 +250,7 @@
   width: 180px;
 }
 
-.swarm-node.is-lead .swarm-team-label {
+.swarm-node.is-hub .swarm-team-label {
   top: -14px;
   left: 26px;
 }
@@ -301,7 +302,7 @@
 
 .swarm-node-tooltip-content span { margin-top: 3px; }
 
-.swarm-node.is-lead .swarm-node-tooltip { top: 40px; left: 41px; }
+.swarm-node.is-hub .swarm-node-tooltip { top: 40px; left: 41px; }
 .swarm-node.is-status-hovered .swarm-node-tooltip { display: grid; }
 .swarm-node-tooltip-content span { color: #aaa; }
 

@@ -231,6 +231,115 @@ test("a queued checker with a missing target fails visibly instead of rejecting 
   } finally { await runtime.close(); }
 });
 
+test("the pilot delegates a direct coder and accepts its unchanged candidate without extra agents", async (t) => {
+  const project = repository(t);
+  if (!project) return;
+  const baseline = git(project, "rev-parse", "HEAD");
+  const { runtime, internal, create, call } = harness(project);
+  const pilot = internal.sessions.get("coordinator");
+  await internal.attachThread(pilot);
+  const otherLead = create("other-lead");
+  try {
+    const delegated = await call(pilot, "delegate_agent", {
+      name: "copy change", duty: "coder", goal: "Change the fixture copy", complexity: "routine", requiredChecks: [],
+    });
+    assert.equal(delegated.success, true, delegated.text);
+    const coder = internal.sessions.get(JSON.parse(delegated.text).id);
+    assert.equal(coder.agent.parentId, pilot.agent.id);
+    assert.equal(coder.agent.acceptanceOwnerId, pilot.agent.id);
+    assert.deepEqual(coder.agent.requiredChecks, []);
+    assert.notEqual(coder.agent.candidate.path, project);
+    writeFileSync(join(coder.agent.candidate.path, "baseline.txt"), "updated copy\n");
+    clearTimeout(coder.run.demoTimer);
+    assert.equal(internal.finish(coder, true), true);
+    assert.equal(coder.agent.status, "awaiting-confirmation");
+    const unauthorized = await call(otherLead, "confirm_implementation", { agentId: coder.agent.id });
+    assert.equal(unauthorized.success, false);
+    writeFileSync(join(coder.agent.candidate.path, "baseline.txt"), "edited after submission\n");
+    const stale = await call(pilot, "confirm_implementation", { agentId: coder.agent.id });
+    assert.equal(stale.success, false);
+    assert.match(stale.text, /changed after submission/i);
+    writeFileSync(join(coder.agent.candidate.path, "baseline.txt"), "updated copy\n");
+    const accepted = await call(pilot, "confirm_implementation", { agentId: coder.agent.id });
+    assert.equal(accepted.success, true, accepted.text);
+    assert.equal(coder.agent.status, "done");
+    assert.equal(git(project, "rev-parse", "HEAD"), baseline);
+    assert.equal(git(project, "status", "--porcelain"), "");
+    assert.equal(readFileSync(join(project, "baseline.txt"), "utf8"), "baseline\n");
+  } finally { await runtime.close(); }
+});
+
+test("a lead must satisfy chosen checks and cannot bypass a scheduled check by archiving it", async (t) => {
+  const project = repository(t);
+  if (!project) return;
+  const { runtime, internal, create, call } = harness(project);
+  const lead = create("lead");
+  const pilot = internal.sessions.get("coordinator");
+  await internal.attachThread(pilot);
+  try {
+    const delegated = await call(lead, "delegate_agent", {
+      name: "high-risk change", duty: "coder", goal: "Implement feature", requiredChecks: ["reviewer"],
+    });
+    assert.equal(delegated.success, true, delegated.text);
+    const coder = internal.sessions.get(JSON.parse(delegated.text).id);
+    clearTimeout(coder.run.demoTimer);
+    assert.equal(internal.finish(coder, true), true);
+    const confirm = () => call(lead, "confirm_implementation", { agentId: coder.agent.id });
+    assert.match((await confirm()).text, /fresh passing reviewer/i);
+    const wrongOwner = await call(pilot, "confirm_implementation", { agentId: coder.agent.id });
+    assert.equal(wrongOwner.success, false);
+    assert.match(wrongOwner.text, /acceptance owner/i);
+    const check = await call(lead, "delegate_agent", {
+      name: "review", duty: "reviewer", goal: "Review", afterAgentId: coder.agent.id,
+    });
+    assert.equal(check.success, true, check.text);
+    assert.match((await confirm()).text, /scheduled review/i);
+    const reviewer = internal.sessions.get(JSON.parse(check.text).id);
+    const result = await call(reviewer, "submit_check_result", { outcome: "passed", summary: "Passed review" });
+    assert.equal(result.success, true, result.text);
+    clearTimeout(reviewer.run.demoTimer);
+    internal.onEvent({ method: "turn/completed", params: { threadId: reviewer.threadId,
+      turn: { id: reviewer.run.turn.id, status: "completed" } } });
+    assert.equal(reviewer.agent.check?.outcome, "passed");
+    const followUp = await call(lead, "delegate_agent", {
+      name: "targeted review", duty: "reviewer", goal: "Recheck a possible bug", afterAgentId: coder.agent.id,
+    });
+    assert.equal(followUp.success, true, followUp.text);
+    const followUpReviewer = internal.sessions.get(JSON.parse(followUp.text).id);
+    const finding = await call(followUpReviewer, "submit_check_result", {
+      outcome: "changes-requested", summary: "Found a regression",
+    });
+    assert.equal(finding.success, true, finding.text);
+    clearTimeout(followUpReviewer.run.demoTimer);
+    internal.onEvent({ method: "turn/completed", params: { threadId: followUpReviewer.threadId,
+      turn: { id: followUpReviewer.run.turn.id, status: "completed" } } });
+    await runtime.command({ type: "archive", agentId: followUpReviewer.agent.id });
+    const stillBlocked = await confirm();
+    assert.equal(stillBlocked.success, false);
+    assert.match(stillBlocked.text, /found a regression/i);
+
+    await internal.begin(reviewer, { id: "review-resolution", role: "user", text: "Reproduce the finding" });
+    const checked = await call(reviewer, "submit_check_result", { outcome: "passed", summary: "Finding disproved" });
+    assert.equal(checked.success, true, checked.text);
+    clearTimeout(reviewer.run.demoTimer);
+    internal.onEvent({ method: "turn/completed", params: { threadId: reviewer.threadId,
+      turn: { id: reviewer.run.turn.id, status: "completed" } } });
+
+    const optional = await call(lead, "delegate_agent", {
+      name: "behavior check", duty: "tester", goal: "Check behavior", afterAgentId: coder.agent.id,
+    });
+    assert.equal(optional.success, true, optional.text);
+    const tester = internal.sessions.get(JSON.parse(optional.text).id);
+    clearTimeout(tester.run.demoTimer);
+    internal.finish(tester, false);
+    await runtime.command({ type: "archive", agentId: tester.agent.id });
+    assert.deepEqual(coder.agent.requiredChecks, ["reviewer", "tester"]);
+    const blocked = await confirm();
+    assert.equal(blocked.success, false);
+    assert.match(blocked.text, /fresh passing tester/i);
+  } finally { await runtime.close(); }
+});
+
 test("multiple coders receive distinct worktrees and the lead keeps the project checkout", async (t) => {
   const project = repository(t);
   if (!project) return;
@@ -337,7 +446,8 @@ test("check turns capture the exact candidate at begin and reject changes before
     clearTimeout(checker.run.demoTimer);
     internal.onEvent({ method: "turn/completed", params: { threadId: checker.threadId,
       turn: { id: checker.run.turn.id, status: "completed" } } });
-    assert.equal(checker.agent.check, undefined, "late completion must not publish obsolete passing evidence");
+    assert.equal(checker.agent.check?.outcome, "blocked", "late completion must not publish obsolete passing evidence");
+    assert.match(checker.agent.check.summary, /validation became stale/i);
   } finally { await runtime.close(); }
 });
 
