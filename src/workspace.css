@@ -30,6 +30,11 @@
   --sw-text: #ededed;
   --sw-active: #d4d4d4;
   --sw-terminal: #141518;
+  --sw-popover-bg: #181a1d;
+  --sw-popover-radius: 4px;
+  --sw-popover-padding: 7px;
+  --sw-popover-font: 11px;
+  --sw-control-hover: #303030;
 }
 .workspace-chat, .swarm-canvas {
   font-family: "Orchestra Terminal", "IBM Plex Mono", ui-monospace, monospace;
@@ -56,16 +61,17 @@ button:focus-visible { outline: 2px solid #b8bcb8; outline-offset: 3px; }
 .sw-project-menu { position: relative; padding-left: 20px; border-left: 1px solid var(--sw-line); min-width: 0; }
 .sw-project-button {
   display: flex; align-items: center; gap: 10px; background: none; border: 0;
-  border-radius: 0; padding: 5px; cursor: pointer; max-width: 42vw;
+  border-radius: 4px; padding: 5px; cursor: pointer; max-width: 42vw; font-size: 11px;
 }
-.sw-project-button:hover { background: #292b2a; }
+.sw-project-button:hover { background: var(--sw-control-hover); color: #fff; }
 .sw-project-button > span:first-of-type { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .sw-chevron { width: 7px; height: 7px; transform: translateY(-2px) rotate(45deg); border: solid currentColor; border-width: 0 1px 1px 0; flex: none; }
 .sw-project-details {
-  position: absolute; top: 40px; left: 15px; z-index: 8; display: grid; gap: 5px; width: min(320px, 70vw);
-  padding: 12px 14px; border: 1px solid var(--sw-line); border-radius: 0; background: var(--sw-terminal);
+  position: absolute; top: 40px; left: 15px; z-index: 8; display: grid; gap: 4px; width: max-content; max-width: min(260px, 70vw);
+  padding: var(--sw-popover-padding); border: 1px solid var(--sw-line); border-radius: var(--sw-popover-radius); background: var(--sw-popover-bg); font-size: var(--sw-popover-font); line-height: 1.5;
 }
-.sw-project-details span { color: var(--sw-muted); font-size: 12px; overflow-wrap: anywhere; }
+.sw-project-details { font-size: 10px; overflow-wrap: anywhere; }
+.sw-project-details span { color: var(--sw-muted); font-size: inherit; overflow-wrap: anywhere; }
 .sw-provider { margin-left: auto; display: flex; align-items: center; gap: 8px; color: var(--sw-muted); font-size: 12px; white-space: nowrap; }
 .sw-provider > span { width: 7px; height: 7px; border-radius: 50%; background: #8b9490; }
 .sw-provider--ready > span { background: #68ca84; }
@@ -102,17 +108,17 @@ button:focus-visible { outline: 2px solid #b8bcb8; outline-offset: 3px; }
   width: 38px; height: 43px; border: 0; background: transparent; cursor: pointer;
   margin: 8px 2px; border-radius: 4px; font-size: 20px;
 }
-.sw-rail-button:hover { background: #272928; }
+.sw-rail-button:hover { background: var(--sw-control-hover); color: #fff; }
 .sw-loading { height: 100dvh; display: flex; align-items: center; justify-content: center; gap: 14px; color: var(--sw-muted); }
 .sw-banner, .sw-activity {
   position: absolute; z-index: 3; left: 50%; top: 16px; transform: translateX(-50%);
-  max-width: calc(100% - 24px); border: 1px solid #484743; border-radius: 0; background: #242524;
+  max-width: calc(100% - 24px); border: 1px solid #484743; border-radius: 4px; background: #242524;
 }
 .sw-banner { padding: 8px 12px; width: max-content; color: #ededed; font-size: 13px; }
 .sw-activity { width: 320px; padding: 8px; box-shadow: 0 12px 40px #0008; }
 .sw-activity header { display: flex; justify-content: space-between; align-items: center; padding: 4px 6px 7px; }
-.sw-activity button { border: 0; background: transparent; text-align: left; border-radius: 0; padding: 7px; cursor: pointer; }
-.sw-activity button:hover { background: #333535; }
+.sw-activity button { border: 0; background: transparent; text-align: left; border-radius: 4px; padding: 7px; cursor: pointer; }
+.sw-activity button:hover { background: var(--sw-control-hover); color: #fff; }
 .sw-activity > button { display: grid; gap: 4px; width: 100%; }
 .sw-activity > button span { color: var(--sw-muted); font-size: 12px; overflow-wrap: anywhere; }
 @media (max-width: 800px) {
@@ -135,9 +141,36 @@ button:focus-visible { outline: 2px solid #b8bcb8; outline-offset: 3px; }
   .sw-dock, .sw-dock-inner { transition: none !important; }
 }
 
-[data-agent-color="lead"] { --agent-color: #62e76c; }
+[data-agent-color="lead"] { --agent-color: #6fff9d; }
 [data-agent-color="coder"] { --agent-color: #ff6269; }
-[data-agent-color="reviewer"] { --agent-color: #ff9f46; }
-[data-agent-color="tester"] { --agent-color: #f2d653; }
-[data-agent-color="designer"] { --agent-color: #64d8da; }
-[data-agent-color="other"] { --agent-color: #bd91ff; }
+[data-agent-color="researcher"] { --agent-color: #ad7bff; }
+[data-agent-color="reviewer"] { --agent-color: #ffb86a; }
+[data-agent-color="tester"] { --agent-color: #ff69d1; }
+[data-agent-color="designer"] { --agent-color: #42e8ff; }
+[data-agent-color="other"] { --agent-color: #a4b7d0; }
+
+.sw-archived-toggle { position: absolute; z-index: 4; right: 12px; top: 12px; padding: 4px 7px; font-size: 11px; border-radius: 4px; background: #181a1d; border: 1px solid var(--sw-line); cursor: pointer; }
+.sw-archive-list { position: absolute; z-index: 5; right: 12px; top: 42px; width: min(290px, calc(100% - 24px)); max-height: 65%; overflow: auto; padding: var(--sw-popover-padding); font-size: var(--sw-popover-font); line-height: 1.5; border-radius: var(--sw-popover-radius); background: var(--sw-popover-bg); border: 1px solid var(--sw-line); }
+.sw-archive-list header { display: flex; align-items: center; justify-content: space-between; }
+.sw-archive-list article { display: grid; gap: 5px; border-top: 1px solid var(--sw-line); padding: 8px 0; margin-top: 7px; }
+.sw-archive-list small { color: var(--sw-muted); overflow-wrap: anywhere; }
+.sw-archive-list button, .sw-lifecycle-dialog button { padding: 7px; background: #202226; border: 1px solid var(--sw-line); cursor: pointer; text-align: left; border-radius: 4px; }
+.sw-archive-list article > div, .sw-lifecycle-dialog footer { display: flex; flex-wrap: wrap; gap: 8px; }
+.sw-lifecycle-dialog { max-width: min(380px, calc(100vw - 32px)); padding: 14px; border-radius: var(--sw-popover-radius); color: var(--sw-text); background: var(--sw-popover-bg); border: 1px solid var(--sw-line); font-family: "Orchestra Terminal", ui-monospace, monospace; font-size: var(--sw-popover-font); line-height: 1.5; }
+.sw-lifecycle-dialog::backdrop { background: #0009; }
+.sw-lifecycle-dialog { max-height: calc(100dvh - 32px); overflow: auto; }
+.sw-lifecycle-dialog h2 { font-size: 12px; margin: 0 0 10px; font-weight: 500; }
+.sw-lifecycle-dialog p { overflow-wrap: anywhere; margin: 8px 0; }
+.sw-lifecycle-dialog [role="alert"] { color: #ff9393; }
+.sw-lifecycle-dialog footer { justify-content: flex-end; gap: 6px; margin-top: 12px; }
+.sw-lifecycle-dialog button { padding: 5px 8px; min-height: 26px; font-size: inherit; }
+.sw-lifecycle-dialog button:disabled, .sw-archive-list button:disabled { opacity: .5; cursor: default; }
+
+.sw-archive-list button { padding: 4px 6px; min-height: 24px; font-size: 11px; overflow-wrap: anywhere; }
+
+/* Ordinary controls share the quiet map-control hover treatment. */
+.sw-app button:not(.swarm-node-target):not(.swarm-node-status):not(:disabled):hover,
+.sw-app .chat-lifecycle-menu > summary:hover {
+  background: var(--sw-control-hover);
+  color: #fff;
+}

@@ -4,12 +4,16 @@ import { createInterface } from "node:readline";
 export type Id = string | number;
 export type Turn = { id: string; rootTurnId: string | null; status: string; error?: { message: string } };
 export type Thread = { id: string };
+export type FileUpdate = { path: string; kind: { type: "add" | "delete" } | { type: "update"; move_path: string | null }; diff: string };
 type Params = {
   threadId?: string;
   turnId?: string;
   turn?: Turn;
-  item?: { type: string; text?: string };
+  item?: { id?: string; type: string; text?: string; changes?: FileUpdate[] };
   itemId?: string;
+  changes?: FileUpdate[];
+  grantRoot?: string | null;
+  reason?: string | null;
   command?: string | null;
   kind?: string;
   requestId?: Id;
