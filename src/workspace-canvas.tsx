@@ -1,6 +1,6 @@
 import { agentAppearance } from "./workspace-agent-appearance.ts";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import type { KeyboardEvent, PointerEvent } from "react";
+import type { CSSProperties, KeyboardEvent, PointerEvent } from "react";
 import { LuCircleAlert, LuCircleCheck, LuInfo, LuLoaderCircle, LuTriangleAlert } from "react-icons/lu";
 import type { IconType } from "react-icons";
 import type { Camera } from "./workspace-preferences.ts";
@@ -190,6 +190,7 @@ export function WorkspaceCanvas({
   selectedId,
   onSelect,
   onStatus,
+  emptyMessage = "Teams appear here when the coordinator delegates work.",
   initialCamera,
   onCameraChange,
 }: {
@@ -198,6 +199,7 @@ export function WorkspaceCanvas({
   selectedId?: string | null;
   onSelect: (id: string | null) => void;
   onStatus: (id: string) => void;
+  emptyMessage?: string;
   initialCamera?: Camera;
   onCameraChange?: (camera: Camera) => void;
 }) {
@@ -209,6 +211,7 @@ export function WorkspaceCanvas({
   const [camera, setCamera] = useState<Camera>(initialCamera ?? { x: 0, y: 0, scale: 1 });
   const [origin, setOrigin] = useState<Point>({ x: 0, y: 0 });
   const [hovered, setHovered] = useState<string | null>(null);
+  const [statusHovered, setStatusHovered] = useState<string | null>(null);
   const [focused, setFocused] = useState<string | null>(null);
   const [dragging, setDragging] = useState(false);
   const firstFit = useRef(Boolean(initialCamera));
@@ -291,11 +294,30 @@ export function WorkspaceCanvas({
     return [...members.values()];
   }
 
-  const revealed = new Set<string>();
-  for (const id of highlighted) {
-    const node = id && positions.get(id);
-    if (node) for (const agent of subtree(node.agent)) revealed.add(agent.id);
+  function subtreeIds(rootId: string) {
+    const ids = new Set<string>();
+    const queue = [rootId];
+    while (queue.length) {
+      const id = queue.shift();
+      if (!id || ids.has(id)) continue;
+      ids.add(id);
+      for (const child of children.get(id) ?? []) queue.push(child.id);
+    }
+    return ids;
   }
+
+  const selectedRevealed = new Set<string>();
+  if (selectedId) {
+    for (const id of subtreeIds(selectedId)) selectedRevealed.add(id);
+  }
+
+  const interactionRevealed = new Set<string>();
+  for (const id of [hovered, focused]) {
+    if (!id) continue;
+    for (const childId of subtreeIds(id)) interactionRevealed.add(childId);
+  }
+
+  const revealed = new Set<string>([...selectedRevealed, ...interactionRevealed]);
 
   const links = new Map<string, [Node, Node]>();
   for (const node of layout.nodes) {
@@ -417,8 +439,14 @@ export function WorkspaceCanvas({
       onKeyDown={keyboard}
     >
       <Starfield />
-      {layout.nodes.length === 0 && <div className="swarm-canvas-empty">Teams appear here when the coordinator delegates work.</div>}
-      <div className="swarm-canvas-world" style={{ transform: `translate(${camera.x - origin.x}px, ${camera.y - origin.y}px) scale(${camera.scale})` }}>
+      {layout.nodes.length === 0 && <div className="swarm-canvas-empty">{emptyMessage}</div>}
+      <div
+        className="swarm-canvas-world"
+        style={{
+          transform: `translate(${camera.x - origin.x}px, ${camera.y - origin.y}px) scale(${camera.scale})`,
+          "--swarm-overlay-scale": String(1 / camera.scale),
+        } as CSSProperties}
+      >
         <svg className="swarm-canvas-guides" aria-hidden="true" width="1" height="1">
           {layout.teams.flatMap((team, index) => Array.from({ length: team.depth }, (_, ring) => (
             <circle key={`${index}-${ring}`} cx={team.x} cy={team.y} r={radiusAt(ring + 1)} />
@@ -440,23 +468,34 @@ export function WorkspaceCanvas({
           return <MessageDot key={signal.id} from={sender} to={recipient} />;
         })}
         {layout.nodes.map(({ agent, x, y, lead }) => {
-          const team = lead && !revealed.has(agent.id) ? subtree(agent) : [agent];
+          const team = lead ? subtree(agent) : [agent];
           const statusAgent = statusPriority.map((level) => team.find((member) => member.status === level))
             .find((member) => member !== undefined) ?? agent;
           const status = lead || revealed.has(agent.id) ? statuses[statusAgent.status] : undefined;
+          const statusLabel = status?.label ?? statuses[statusAgent.status]?.label ?? "Idle";
           const { color, displayName } = agentAppearance(agent);
           const selected = agent.id === selectedId;
-          const label = `${displayName}${agent.projectLabel ? `, project ${agent.projectLabel}` : ""}, ${agent.activity ?? statuses[statusAgent.status]?.label ?? "Idle"}`;
+          const showChildStatusIcon = Boolean(status) && selectedRevealed.has(agent.id) && !highlighted.has(agent.id);
+          const describedRole = agent.goal ?? agent.duty ?? agent.activity ?? statuses[statusAgent.status]?.label ?? "Idle";
+          const tooltipId = `swarm-node-tooltip-${agent.id}`;
+          const accessibleName = `${displayName}${agent.projectLabel ? `, project ${agent.projectLabel}` : ""}`;
+          const label = `${accessibleName}, ${agent.activity ?? statuses[statusAgent.status]?.label ?? "Idle"}`;
           return (
             <div
               key={agent.id}
               data-agent-color={color}
-              className={`swarm-node ${lead ? "is-lead" : "is-worker"}${selected ? " is-selected" : ""}`}
+              className={`swarm-node ${lead ? "is-lead" : "is-worker"}${selected ? " is-selected" : ""}${statusHovered === agent.id ? " is-status-hovered" : ""}${showChildStatusIcon ? " is-subtree-only" : ""}`}
               style={{ left: x, top: y }}
               onPointerEnter={() => setHovered(agent.id)}
-              onPointerLeave={() => setHovered((id) => id === agent.id ? null : id)}
+              onPointerLeave={() => {
+                setHovered((id) => id === agent.id ? null : id);
+                setStatusHovered((id) => id === agent.id ? null : id);
+              }}
               onBlur={(event) => {
-                if (!event.currentTarget.contains(event.relatedTarget)) setFocused((id) => id === agent.id ? null : id);
+                if (!event.currentTarget.contains(event.relatedTarget)) {
+                  setFocused((id) => id === agent.id ? null : id);
+                  setStatusHovered((id) => id === agent.id ? null : id);
+                }
               }}
             >
               <button
@@ -471,24 +510,41 @@ export function WorkspaceCanvas({
                 onClick={() => onSelect(agent.id)}
                 onFocus={(event) => { if (event.currentTarget.matches(":focus-visible")) setFocused(agent.id); }}
               ><span className="swarm-node-disc" /></button>
-              {status && <button
-                type="button"
-                className={`swarm-node-status status-${statusAgent.status}`}
-                aria-label={`${displayName}${agent.projectLabel ? `, project ${agent.projectLabel}` : ""}: ${status.label}`}
-                onClick={() => onStatus(lead && !revealed.has(agent.id) &&
-                  (statusAgent.status === "error" || statusAgent.status === "attention") ? agent.id : statusAgent.id)}
-                onFocus={(event) => { if (event.currentTarget.matches(":focus-visible")) setFocused(agent.id); }}
-              ><status.Icon aria-hidden="true" focusable="false" /></button>}
-              {(lead || (agent.projectLabel && !positions.has(agent.parentId ?? ""))) && <div className="swarm-team-label">
-                <strong>{displayName}</strong>
-                {agent.projectLabel && <span>Project: {agent.projectLabel}</span>}
-                {agent.goal && <span title={agent.goal}>{agent.goal}</span>}
-              </div>}
-              <div className="swarm-node-tooltip" aria-hidden="true">
-                <strong>{displayName}</strong>
-                {agent.projectLabel && <span>Project: {agent.projectLabel}</span>}
-                <span>{agent.activity ?? statuses[statusAgent.status]?.label ?? "Idle"}</span>
+              <div className="swarm-team-label">
+                <div className="swarm-team-label-content">
+                  <strong>
+                    {status && <button
+                      type="button"
+                      className={`swarm-team-status-icon status-${statusAgent.status}`}
+                      aria-label={`${accessibleName}: ${statusLabel}`}
+                      aria-describedby={tooltipId}
+                      onClick={() => onStatus(lead &&
+                        (statusAgent.status === "error" || statusAgent.status === "attention") ? agent.id : statusAgent.id)}
+                      onPointerEnter={() => setStatusHovered(agent.id)}
+                      onPointerLeave={() => setStatusHovered((id) => id === agent.id ? null : id)}
+                      onFocus={(event) => {
+                        if (event.currentTarget.matches(":focus-visible")) {
+                          setFocused(agent.id);
+                          setStatusHovered(agent.id);
+                        }
+                      }}
+                      onBlur={() => {
+                        setStatusHovered((id) => id === agent.id ? null : id);
+                      }}
+                    ><status.Icon aria-hidden="true" focusable="false" /></button>}
+                    <span>{displayName}</span>
+                  </strong>
+                  <span title={describedRole}>{describedRole}</span>
+                  {agent.projectLabel && <span>Project: {agent.projectLabel}</span>}
+                </div>
               </div>
+              {status && <div className="swarm-node-tooltip" id={tooltipId}>
+                <div className="swarm-node-tooltip-content">
+                  <strong>{displayName}</strong>
+                  {agent.projectLabel && <span>Project: {agent.projectLabel}</span>}
+                  <span>{agent.activity ?? statuses[statusAgent.status]?.label ?? "Idle"}</span>
+                </div>
+              </div>}
             </div>
           );
         })}

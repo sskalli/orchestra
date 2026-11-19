@@ -14,6 +14,8 @@ Use compact multiline chat inputs without a focus outline, a terminal prompt mar
 
 ## Agent interactions
 
+Team structure follows useful work boundaries, not a fixed role count or one-coder-per-feature rule. A lead may use one coder for cohesive work or several for independent features or separable parts of a large feature. Each coder has an isolated candidate; its independent reviewers and testers appear as children of that coder. The lead retains acceptance authority. When separate candidates are combined, a tester under the lead validates their integration and regressions before combined acceptance. Avoid redundant delegation and reuse existing agents for repairs.
+
 - Idle agents begin a new turn when messaged. Busy agents visibly queue messages for their next turn. Offer a separate Steer current turn action where supported.
 - A spinner means working. Yellow warning means a question or approval needs your response. Green check means assigned work is done and the session remains open. Red warning means a run failed. Blue notice means an optional update is ready to inspect. Idle has no icon.
 - Clicking a status icon opens the relevant conversation at the event. Roll worker warnings and failures up to the lead. If several workers need attention, let the user choose the request.

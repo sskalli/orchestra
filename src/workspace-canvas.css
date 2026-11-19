@@ -33,7 +33,9 @@
   transform-origin: 0 0;
 }
 
-.swarm-canvas-guides { overflow: visible; pointer-events: none; }
+/* Keep the map layers below controls and overlays outside the world. */
+.swarm-canvas-world { z-index: 0; }
+.swarm-canvas-guides { z-index: 0; overflow: visible; pointer-events: none; }
 .swarm-canvas-guides circle { fill: none; stroke: #2a2e32; stroke-width: 1; vector-effect: non-scaling-stroke; }
 .swarm-canvas-guides line { stroke: #b9ae94; stroke-width: 1; stroke-dasharray: 5 5; vector-effect: non-scaling-stroke; }
 .swarm-signal { animation: swarm-signal-fade .35s ease-out forwards; }
@@ -50,13 +52,14 @@
 
 .swarm-node {
   position: absolute;
+  z-index: 2;
   width: 0;
   height: 0;
 }
 
 .swarm-node:hover,
 .swarm-node:focus-within,
-.swarm-node.is-selected { z-index: 2; }
+.swarm-node.is-selected { z-index: 3; }
 
 .swarm-node-target,
 .swarm-node-status {
@@ -72,48 +75,56 @@
 }
 
 .swarm-node-target {
-  width: 38px;
-  height: 38px;
-  transform: translate(-50%, -50%);
+  width: 34px;
+  height: 34px;
+  transform: translate(-50%, -50%) scale(1);
+  transition: transform .14s ease-out;
 }
 
-.swarm-node.is-lead .swarm-node-target { width: 58px; height: 58px; }
+.swarm-node.is-lead .swarm-node-target { width: 52px; height: 52px; }
 .swarm-node-target:focus-visible,
 .swarm-node-status:focus-visible { outline: 2px solid #dedede; outline-offset: 2px; }
-.swarm-node.is-selected .swarm-node-target { outline: 1px solid #999; outline-offset: 1px; }
+
+.swarm-node:hover .swarm-node-target,
+.swarm-node:focus-within .swarm-node-target,
+.swarm-node.is-selected .swarm-node-target { transform: translate(-50%, -50%) scale(1.24); }
+
+.swarm-node.is-lead:hover .swarm-node-target,
+.swarm-node.is-lead:focus-within .swarm-node-target,
+.swarm-node.is-lead.is-selected .swarm-node-target { transform: translate(-50%, -50%) scale(1.16); }
 
 .swarm-node-disc {
   display: block;
-  width: 6px;
-  height: 6px;
+  width: 5px;
+  height: 5px;
   border-radius: 50%;
   background: var(--agent-color);
 }
 
 .swarm-node.is-worker .swarm-node-disc {
-  box-shadow: 0 0 12px 4px color-mix(in srgb, var(--agent-color) 35%, transparent);
+  box-shadow: 0 0 16px 6px color-mix(in srgb, var(--agent-color) 46%, transparent);
 }
 
 .swarm-node.is-lead .swarm-node-disc {
-  width: 32px;
-  height: 32px;
-  box-shadow: 0 0 18px 5px color-mix(in srgb, var(--agent-color) 35%, transparent);
+  width: 28px;
+  height: 28px;
+  box-shadow: 0 0 24px 8px color-mix(in srgb, var(--agent-color) 48%, transparent);
 }
 
 .swarm-node-status {
   z-index: 1;
-  width: 23px;
-  height: 23px;
-  left: 13px;
-  top: -23px;
+  width: 19px;
+  height: 19px;
+  left: 12px;
+  top: -19px;
   color: #efeeee;
 }
 
 .swarm-node.is-lead .swarm-node-status {
-  left: 32px;
-  top: -13px;
-  width: 27px;
-  height: 27px;
+  left: 31px;
+  top: -12px;
+  width: 23px;
+  height: 23px;
 }
 
 .swarm-node-status:hover { background: #ffffff14; }
@@ -124,13 +135,13 @@
 
 .swarm-node-status svg {
   display: block;
-  width: 16px;
-  height: 16px;
+  width: 13px;
+  height: 13px;
 }
 
 .swarm-node.is-lead .swarm-node-status svg {
-  width: 21px;
-  height: 21px;
+  width: 17px;
+  height: 17px;
 }
 
 .swarm-node-status.status-working svg {
@@ -140,12 +151,31 @@
 @keyframes swarm-canvas-spin { to { transform: rotate(360deg); } }
 
 .swarm-team-label {
+  display: none;
   position: absolute;
-  top: 0;
-  left: 65px;
-  width: 175px;
+  top: -8px;
+  left: 34px;
+  width: 210px;
   transform: translateY(-50%);
   pointer-events: none;
+}
+
+.swarm-node:hover .swarm-team-label,
+.swarm-node:focus-within .swarm-team-label,
+.swarm-node.is-selected .swarm-team-label,
+.swarm-node.is-subtree-only .swarm-team-label { display: block; }
+
+.swarm-node.is-subtree-only .swarm-team-label {
+  width: auto;
+}
+
+.swarm-node.is-subtree-only .swarm-team-label strong > span,
+.swarm-node.is-subtree-only .swarm-team-label-content > span {
+  visibility: hidden;
+}
+
+.swarm-node.is-subtree-only .swarm-team-label strong > span {
+  display: none;
 }
 
 .swarm-team-label strong,
@@ -156,34 +186,128 @@
   white-space: nowrap;
 }
 
-.swarm-team-label strong { color: var(--sw-text); font-size: 9px; font-weight: 500; letter-spacing: .02em; }
-.swarm-team-label span { color: var(--sw-muted); margin-top: 2px; font-size: 9px; }
+.swarm-team-label strong {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-height: var(--swarm-label-icon-box);
+  line-height: var(--swarm-label-icon-box);
+  position: relative;
+  padding-left: calc(var(--swarm-label-icon-box) + 4px);
+}
+
+.swarm-team-label strong > span {
+  line-height: 1;
+  margin-top: 0;
+}
+
+.swarm-team-status-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  position: absolute;
+  left: 0;
+  top: 50%;
+  transform: translateY(-50%);
+  width: var(--swarm-label-icon-box);
+  height: var(--swarm-label-icon-box);
+  line-height: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: #efeeee;
+  pointer-events: auto;
+  cursor: pointer;
+}
+
+.swarm-team-status-icon svg {
+  display: block;
+  width: calc(var(--swarm-label-icon-box) - 2px);
+  height: calc(var(--swarm-label-icon-box) - 2px);
+}
+
+.swarm-team-status-icon.status-attention { color: #efcd43; }
+.swarm-team-status-icon.status-error { color: #ff6e66; }
+.swarm-team-status-icon.status-done { color: #8be384; }
+.swarm-team-status-icon:is(.status-notice, .status-awaiting-confirmation) { color: #85b6ff; }
+.swarm-team-status-icon.status-working svg { animation: swarm-canvas-spin 1.8s linear infinite; }
+.swarm-team-status-icon:focus-visible { outline: 1px solid #dedede; outline-offset: 1px; }
+
+.swarm-team-label-content {
+  --swarm-label-icon-box: 20px;
+  --swarm-label-row: 12px;
+  position: relative;
+  min-height: var(--swarm-label-icon-box);
+  transform: scale(calc(var(--swarm-overlay-scale, 1) * 1.25));
+  transform-origin: left center;
+}
+
+.swarm-node.is-worker .swarm-team-label {
+  top: -1px;
+  left: 12px;
+  width: 180px;
+}
+
+.swarm-node.is-lead .swarm-team-label {
+  top: -14px;
+  left: 26px;
+}
+
+.swarm-team-label strong { color: var(--sw-text); font-size: 11px; font-weight: 500; letter-spacing: .02em; }
+.swarm-node.is-subtree-only .swarm-team-label strong {
+  padding-left: 0;
+}
+.swarm-team-label-content > span {
+  display: flex;
+  align-items: center;
+  min-height: var(--swarm-label-row);
+  line-height: var(--swarm-label-row);
+  color: var(--sw-muted);
+  margin-top: 0;
+  margin-left: calc(var(--swarm-label-icon-box) + 4px);
+  font-size: 11px;
+}
 
 .swarm-node-tooltip {
   display: none;
   position: absolute;
-  top: 23px;
-  left: 0;
-  min-width: max-content;
-  max-width: 220px;
+  top: 25px;
+  left: 20px;
   transform: translateX(-50%);
-  padding: 5px 7px;
-  border: 1px solid #414141;
-  border-radius: 0;
-  color: #ebebeb;
-  background: #222;
   pointer-events: none;
-  font-size: 9px;
-  line-height: 1.4;
 }
 
-.swarm-node.is-lead .swarm-node-tooltip { top: 35px; }
-.swarm-node:hover .swarm-node-tooltip,
-.swarm-node:focus-within .swarm-node-tooltip { display: grid; }
-.swarm-node-tooltip span { color: #aaa; }
+.swarm-node-tooltip-content {
+  width: max-content;
+  min-width: 130px;
+  max-width: 260px;
+  transform: scale(calc(var(--swarm-overlay-scale, 1) * 1.25));
+  transform-origin: top center;
+  padding: 7px calc(var(--sw-popover-padding) + 2px);
+  border: 1px solid var(--sw-line);
+  border-radius: var(--sw-popover-radius);
+  color: #ebebeb;
+  background: var(--sw-popover-bg);
+  font-size: 11px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.swarm-node-tooltip-content strong,
+.swarm-node-tooltip-content span {
+  display: block;
+}
+
+.swarm-node-tooltip-content span { margin-top: 3px; }
+
+.swarm-node.is-lead .swarm-node-tooltip { top: 40px; left: 41px; }
+.swarm-node.is-status-hovered .swarm-node-tooltip { display: grid; }
+.swarm-node-tooltip-content span { color: #aaa; }
 
 .swarm-canvas-controls {
   position: absolute;
+  z-index: 1;
   right: 16px;
   bottom: 16px;
   display: flex;
@@ -191,7 +315,7 @@
   gap: 3px;
   padding: 4px;
   border: 1px solid #353535;
-  border-radius: 0;
+  border-radius: 4px;
   background: #101214;
   color: var(--sw-active);
   cursor: default;
@@ -200,7 +324,7 @@
 
 .swarm-canvas-controls button {
   border: 0;
-  border-radius: 0;
+  border-radius: 4px;
   background: transparent;
   color: inherit;
   min-height: 27px;
@@ -209,7 +333,7 @@
   font: inherit;
 }
 
-.swarm-canvas-controls button:hover { background: #303030; color: #fff; }
+.swarm-canvas-controls button:hover { background: var(--sw-control-hover); color: #fff; }
 .swarm-canvas-controls button:focus-visible { outline: 1px solid #ccc; }
 .swarm-canvas-controls output { min-width: 34px; text-align: center; font-variant-numeric: tabular-nums; }
 .swarm-canvas-controls .swarm-fit { padding: 0 8px; }
@@ -226,18 +350,19 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .swarm-node-target { transition: none; }
   .swarm-node-status.status-working svg { animation: none; }
 }
 
 .swarm-message-dot {
   position: absolute;
-  z-index: 4;
+  z-index: 1;
   width: 3.4px;
   height: 3.4px;
   margin: -1.7px 0 0 -1.7px;
   border-radius: 50%;
   background: #f2f2f2;
-  box-shadow: 0 0 4px 2px #eeeeeebb, 0 0 10px 3px #cccccc66;
+  box-shadow: 0 0 7px 3px #eeeeeeeb, 0 0 16px 6px #d0d0d088;
   pointer-events: none;
 }
 @media (prefers-reduced-motion: reduce) {

@@ -38,13 +38,13 @@ createInterface({ input: process.stdin }).on("line", (line) => {
     write({ method: "turn/started", params: { threadId: params.threadId, turn } });
     const text = params.input?.[0]?.text ?? "";
     if (text.startsWith("delegate:")) {
-      const [, projectId, duty, goal] = text.split(":");
+      const [, projectId, duty, goal, afterAgentId] = text.split(":");
       const requestId = `tool-${++nextRequest}`;
       pending.set(requestId, { threadId: params.threadId, turn });
       write({ id: requestId, method: "item/tool/call", params: {
         threadId: params.threadId, turnId: turn.id, tool: "delegate_agent",
         arguments: { name: `${projectId || "inherited"}-${duty}`, duty, goal,
-          ...(projectId ? { projectId } : {}) },
+          ...(projectId ? { projectId } : {}), ...(afterAgentId ? { afterAgentId } : {}) },
       } });
     } else {
       complete(params.threadId, turn);

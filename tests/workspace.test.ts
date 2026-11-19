@@ -17,6 +17,10 @@ test("workspace launch options select a Codex provider only in live mode", () =>
   assert.deepEqual(parseWorkspaceArgs(["--live", "/project", "--provider", "company-gateway"]), {
     live: true, projectPath: "/project", projects: [], provider: "company-gateway", feature: false,
   });
+  assert.deepEqual(parseWorkspaceArgs(["--claude", "/project"]), {
+    live: true, projectPath: "/project", projects: [], provider: "openai", feature: false, claude: true,
+  });
+  assert.throws(() => parseWorkspaceArgs(["--claude", "/project", "--provider", "company-gateway"]));
   assert.deepEqual(parseWorkspaceArgs(["--project", "app=/app", "--project", "api=/api"]).projects, [
     { id: "app", path: "/app" }, { id: "api", path: "/api" },
   ]);
@@ -31,7 +35,7 @@ test("workspace launch options select a Codex provider only in live mode", () =>
   assert.notEqual(workspaceIdentity(projects), workspaceIdentity(projects.slice(0, 1)));
 });
 
-test("browser drafts stay with their Codex provider and preserve default legacy drafts", () => {
+test("browser drafts stay with their mode and Codex model provider", () => {
   const original = Object.getOwnPropertyDescriptor(globalThis, "localStorage");
   const state = new Map<string, string>();
   Object.defineProperty(globalThis, "localStorage", {
@@ -47,16 +51,22 @@ test("browser drafts stay with their Codex provider and preserve default legacy 
       drafts: { coordinator: "Default draft" },
     }));
 
-    const company = workspacePreferences(project, false, "company-gateway");
+    const company = workspacePreferences(project, "codex", "company-gateway");
     assert.deepEqual(company.readView().drafts, {});
     company.writeView({ leftOpen: true, selectedId: null, drafts: { coordinator: "Company draft" } });
 
-    const defaultProvider = workspacePreferences(project, false, "openai");
+    const defaultProvider = workspacePreferences(project, "codex", "openai");
     assert.deepEqual(defaultProvider.readView().drafts, { coordinator: "Default draft" });
     defaultProvider.writeView({ ...defaultProvider.readView(), drafts: { coordinator: "Updated default draft" } });
-    assert.deepEqual(workspacePreferences(project, false).readView().drafts, { coordinator: "Updated default draft" });
-    assert.deepEqual(workspacePreferences(project, false, "company-gateway").readView().drafts, { coordinator: "Company draft" });
-    assert.deepEqual(workspacePreferences(project, false, "another-gateway").readView().drafts, {});
+    const claude = workspacePreferences(project, "claude");
+    assert.deepEqual(claude.readView().drafts, {});
+    claude.writeView({ ...claude.readView(), drafts: { coordinator: "Claude draft" } });
+
+    assert.deepEqual(workspacePreferences(project, "codex").readView().drafts, { coordinator: "Updated default draft" });
+    assert.deepEqual(workspacePreferences(project, "codex", "company-gateway").readView().drafts, { coordinator: "Company draft" });
+    assert.deepEqual(workspacePreferences(project, "codex", "another-gateway").readView().drafts, {});
+    assert.deepEqual(workspacePreferences(project, "claude").readView().drafts, { coordinator: "Claude draft" });
+    assert.deepEqual(workspacePreferences(project, "demo").readView().drafts, {});
   } finally {
     if (original) Object.defineProperty(globalThis, "localStorage", original);
     else Reflect.deleteProperty(globalThis, "localStorage");

@@ -21,14 +21,18 @@ export type ChatAgent = {
     text: string;
     kind?: SystemMessageKind;
     sourceName?: string;
+    sourceDeleted?: boolean;
     sourceAgentId?: string;
     reportLabel?: string;
-    state?: "queued" | "streaming" | "failed";
+    state?: "queued" | "streaming" | "failed" | "cancelled";
     approval?: { id: string; state: "pending" | "accepted" | "declined" | "expired"; canAccept?: boolean };
   }[];
   queueDepth: number;
   queuePaused?: boolean;
   canSteer: boolean;
+  canCancel?: boolean;
+  archivedAt?: number;
+  lifecycleBusy?: boolean;
 };
 
 type ChatProps = {
@@ -43,10 +47,12 @@ type ChatProps = {
   onDraftChange: (text: string) => void;
   onSend: (text: string) => Promise<void> | void;
   onSteer?: (text: string) => Promise<void> | void;
+  onCancel?: () => Promise<void>;
   onApproval?: (approvalId: string, decision: "accept" | "decline") => Promise<void> | void;
   onResumeQueue?: () => Promise<void>;
   onClose: () => void;
   onOpenAgent?: (id: string) => void;
+  onLifecycle?: (action: "archive" | "restore" | "delete") => void;
   disabled?: boolean;
   disabledReason?: string;
   focusMessageId?: string;
@@ -72,8 +78,8 @@ const systemMessageLabels: Record<SystemMessageKind, string> = {
 };
 
 function Conversation({
-  agent, kind, title, projectLabel, draft: initialDraft, composerHeight, onComposerHeightChange, onDraftInput, onDraftChange, onSend, onSteer, onApproval, onResumeQueue, onClose,
-  disabled, disabledReason, focusMessageId, focusRequest, onOpenAgent,
+  agent, kind, title, projectLabel, draft: initialDraft, composerHeight, onComposerHeightChange, onDraftInput, onDraftChange, onSend, onSteer, onCancel, onApproval, onResumeQueue, onClose,
+  disabled, disabledReason, focusMessageId, focusRequest, onOpenAgent, onLifecycle,
 }: ChatProps) {
   const transcript = useRef<HTMLDivElement>(null);
   const [hiddenMessages, setHiddenMessages] = useState<Set<string>>(() => new Set());
@@ -96,6 +102,7 @@ function Conversation({
   const composerLimits = useRef({ min: 0, max: 0 });
   const messages = useRef(new Map<string, HTMLElement>());
   const pinToBottom = useRef(true);
+  const [showJumpToLatest, setShowJumpToLatest] = useState(false);
   const [draft, setDraft] = useState(initialDraft);
   const draftRef = useRef(initialDraft);
   const draftRevision = useRef(0);
@@ -104,13 +111,15 @@ function Conversation({
   const mounted = useRef(true);
   draftChangeRef.current = onDraftChange;
   const [sending, setSending] = useState(false);
+  const [cancelling, setCancelling] = useState(false);
   const [approvalBusy, setApprovalBusy] = useState<string>();
   const [resumingQueue, setResumingQueue] = useState(false);
   const [error, setError] = useState("");
   const { displayName } = agentAppearance(agent);
   const recipient = `${projectLabel ? `${projectLabel} / ` : ""}${title ?? displayName}`;
   const heading = title ?? displayName;
-  const blocked = Boolean(disabled);
+  const archived = agent.archivedAt !== undefined;
+  const blocked = Boolean(disabled || archived || agent.lifecycleBusy);
   const readyToSend = !blocked && !sending && Boolean(draft.trim());
   const hasFocusMessage = agent.messages.some((message) => message.id === focusMessageId);
   const shownInConversation = (detail: string) => kind === "agent" && agent.messages.some((message) =>
@@ -183,7 +192,7 @@ function Conversation({
       observer.disconnect();
       if (resizeFrame.current !== null) cancelAnimationFrame(resizeFrame.current);
     };
-  }, []);
+  }, [archived]);
 
   function applyComposerHeight() {
     if (resizeFrame.current !== null) cancelAnimationFrame(resizeFrame.current);
@@ -240,8 +249,25 @@ function Conversation({
 
   useLayoutEffect(() => {
     const element = transcript.current;
-    if (element && pinToBottom.current) element.scrollTop = element.scrollHeight;
+    if (element && pinToBottom.current) {
+      element.scrollTop = element.scrollHeight;
+      setShowJumpToLatest(false);
+    }
   }, [agent.messages]);
+
+  function syncPinState(element: HTMLDivElement) {
+    const pinned = element.scrollHeight - element.scrollTop - element.clientHeight < 36;
+    pinToBottom.current = pinned;
+    setShowJumpToLatest(!pinned);
+  }
+
+  function scrollToLatest() {
+    const element = transcript.current;
+    if (!element) return;
+    pinToBottom.current = true;
+    element.scrollTop = element.scrollHeight;
+    setShowJumpToLatest(false);
+  }
 
   useLayoutEffect(() => {
     if (!focusMessageId) return;
@@ -249,6 +275,7 @@ function Conversation({
     const element = transcript.current;
     if (!message || !element) return;
     pinToBottom.current = false;
+    setShowJumpToLatest(true);
     message.focus({ preventScroll: true });
     const viewport = element.getBoundingClientRect();
     const target = message.getBoundingClientRect();
@@ -310,6 +337,19 @@ function Conversation({
     }
   }
 
+  async function cancelTurn() {
+    if (!onCancel || !agent.canCancel || cancelling || blocked) return;
+    setCancelling(true);
+    setError("");
+    try {
+      await onCancel();
+    } catch (failure) {
+      setError(failure instanceof Error ? failure.message : "The current turn could not be stopped.");
+    } finally {
+      setCancelling(false);
+    }
+  }
+
   function handleComposerKey(event: KeyboardEvent<HTMLTextAreaElement>) {
     if (event.key !== "Enter" || event.shiftKey || event.nativeEvent.isComposing) return;
     event.preventDefault();
@@ -318,7 +358,7 @@ function Conversation({
 
   const approvalHandler = useRef(resolveApproval);
   approvalHandler.current = resolveApproval;
-  const canApprove = Boolean(onApproval);
+  const canApprove = Boolean(onApproval) && !archived;
   const messageElements = useMemo(() => agent.messages.filter((message) =>
     !hiddenMessages.has(message.id)).map((message) => {
           const sender = message.role === "user" ? "USER" : message.role === "system" ? "SYSTEM" :
@@ -340,13 +380,13 @@ function Conversation({
               <div className="chat-message-content">
                 {compact ? <>
                   <div className="chat-agent-update-heading">
-                    <button type="button" onClick={() => onOpenAgent?.(message.sourceAgentId!)}>{message.sourceName}</button>
+                    <button type="button" disabled={message.sourceDeleted} onClick={() => onOpenAgent?.(message.sourceAgentId!)}>{message.sourceName}{message.sourceDeleted ? " · Deleted" : ""}</button>
                     <span aria-hidden="true"> — </span><span className="chat-update-category">{category}</span>
                   </div>
                   <details className="chat-agent-update-details">
                     <summary>Details</summary>
                     <p>{explanation}</p>
-                    <button type="button" onClick={() => onOpenAgent?.(message.sourceAgentId!)}>Open conversation</button>
+                    {!message.sourceDeleted && <button type="button" onClick={() => onOpenAgent?.(message.sourceAgentId!)}>Open conversation</button>}
                   </details>
                 </> : <>
                 <div className="chat-message-header">
@@ -354,6 +394,7 @@ function Conversation({
                   {systemKind ? <span className="chat-message-state">{systemMessageLabels[systemKind]}</span> : null}
                   {message.state === "queued" ? <span className="chat-message-state">Queued</span> : null}
                   {message.state === "failed" ? <span className="chat-message-state chat-message-state--failed">Failed</span> : null}
+                  {message.state === "cancelled" ? <span className="chat-message-state">Stopped</span> : null}
                 </div>
                 {approval ? <p>{message.text}</p> : (
                   <div className="chat-markdown">
@@ -387,13 +428,32 @@ function Conversation({
       <header className="chat-header">
         <div className="chat-header-copy">
           <h2 title={heading}>{kind === "project" ? `COMMS // CHANNEL: ${heading}` : heading}</h2>
-          {kind === "agent" ? <span className="chat-agent-status">{projectLabel ? `Project: ${projectLabel} · ` : ""}{statusLabels[agent.status]}</span> : null}
+          {kind === "agent" ? <span className="chat-agent-status">{projectLabel ? `Project: ${projectLabel} · ` : ""}{archived ? "Archived" : agent.lifecycleBusy ? "Updating…" : statusLabels[agent.status]}</span> : null}
         </div>
-        <button className="chat-clear-button" type="button" title="Clear the visible log; conversation history is retained"
-          onClick={() => {
-            setHiddenMessages(new Set(agent.messages.map((message) => message.id)));
-            pinToBottom.current = true;
-          }}>Clear chat</button>
+        <details className="chat-lifecycle-menu">
+          <summary aria-label={kind === "project" ? "Project chat actions" : "Agent actions"} title="Chat actions">⋯</summary>
+          <div>
+            <button type="button" title="Clear the visible log; conversation history is retained" onClick={(event) => {
+              const menu = event.currentTarget.closest("details");
+              menu?.removeAttribute("open");
+              menu?.querySelector("summary")?.focus();
+              setHiddenMessages(new Set(agent.messages
+                .filter((message) => message.approval?.state !== "pending")
+                .map((message) => message.id)));
+              pinToBottom.current = true;
+            }}>Clear chat</button>
+            {agent.role !== "coordinator" && onLifecycle && <>
+            <button type="button" disabled={agent.lifecycleBusy} onClick={(event) => {
+              event.currentTarget.closest("details")?.removeAttribute("open");
+              onLifecycle(archived ? "restore" : "archive");
+            }}>{archived ? "Restore" : agent.role === "lead" ? "Archive team" : "Archive agent"}</button>
+            <button type="button" disabled={agent.lifecycleBusy} onClick={(event) => {
+              event.currentTarget.closest("details")?.removeAttribute("open");
+              onLifecycle("delete");
+            }}>Delete permanently…</button>
+            </>}
+          </div>
+        </details>
         <button className="chat-icon-button" type="button" onClick={onClose}
           aria-label={kind === "project" ? "Collapse project chat" : "Close agent chat"}
           title={kind === "project" ? "Collapse project chat" : "Close agent chat"}>
@@ -401,11 +461,15 @@ function Conversation({
         </button>
       </header>
 
+      {archived && <p className="chat-archive-notice">Archived {new Date(agent.archivedAt!).toLocaleString()}. Restore to continue this conversation.</p>}
       <div className="chat-transcript" role="log" aria-label={`Conversation with ${recipient}`} aria-relevant="additions"
         ref={transcript} onScroll={(event) => {
-          const el = event.currentTarget;
-          pinToBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 36;
+          syncPinState(event.currentTarget);
         }}>
+        {showJumpToLatest && <button className="chat-jump-latest" type="button" onClick={scrollToLatest}
+          aria-label="Jump to latest message" title="Jump to latest message">
+          <span aria-hidden="true">↓</span>
+        </button>}
         {agent.messages.length === 0 ? (
           <p className="chat-empty">
             {kind === "project" ? "Send the coordinator a project goal." : `Send ${displayName} a message.`}
@@ -414,6 +478,7 @@ function Conversation({
         {messageElements}
       </div>
 
+      {!archived && <>
       <div ref={divider} className="chat-composer-resize" role="separator" tabIndex={0} aria-orientation="horizontal"
         aria-label={`Resize ${kind === "project" ? "project" : "agent"} chat input`} aria-controls={composerId}
         onPointerDown={startComposerResize} onPointerMove={moveComposerResize} onPointerUp={endComposerResize}
@@ -430,14 +495,19 @@ function Conversation({
         {error && !shownInConversation(error) ? <p className="chat-error" role="alert">{error}</p> : null}
         <div className="chat-composer-box">
           <span className="chat-input-prompt" aria-hidden="true">&gt;</span>
-          <textarea aria-label={`Message ${recipient}`} rows={3}
+          <textarea aria-label={`Message ${recipient}`} rows={3} disabled={Boolean(agent.lifecycleBusy)}
             value={draft} onChange={(event) => updateDraft(event.target.value)} onBlur={flushDraft} onKeyDown={handleComposerKey} />
         </div>
         {agent.canSteer && onSteer ? (
           <button className="chat-steer" type="button" disabled={!readyToSend}
             onClick={() => void send(onSteer)}>Steer current turn</button>
         ) : null}
+        {agent.canCancel && onCancel ? (
+          <button className="chat-steer" type="button" disabled={blocked || cancelling}
+            onClick={() => void cancelTurn()}>{cancelling ? "Stopping…" : "Stop current turn"}</button>
+        ) : null}
       </form>
+      </>}
     </section>
   );
 }

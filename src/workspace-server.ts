@@ -7,7 +7,8 @@ import { workspaceStore } from "./workspace-store.ts";
 import { parseWorkspaceArgs } from "./workspace-options.ts";
 import { defaultProject, resolveProjects, workspaceIdentity } from "./workspace-projects.ts";
 
-const { live, projectPath, projects: specifiedProjects, provider } = parseWorkspaceArgs(process.argv.slice(2));
+const { live, projectPath, projects: specifiedProjects, provider: modelProvider, claude } = parseWorkspaceArgs(process.argv.slice(2));
+const provider = claude ? "claude" : "codex";
 let projects = live
   ? resolveProjects(specifiedProjects.length ? specifiedProjects : [defaultProject(projectPath ?? ".")])
   : [defaultProject(process.cwd())];
@@ -31,7 +32,14 @@ async function readCommand(request: IncomingMessage) {
   }
   const command = JSON.parse(Buffer.concat(chunks).toString("utf8"));
   if (typeof command?.agentId !== "string") throw new Error("Invalid agent");
-  if (command.type === "resumeQueue") return { type: "resumeQueue" as const, agentId: command.agentId };
+  if (command.type === "archive") {
+    if (command.stopRunning !== undefined && typeof command.stopRunning !== "boolean") throw new Error("Invalid stop option");
+    return { type: "archive" as const, agentId: command.agentId, stopRunning: command.stopRunning };
+  }
+  if (command.type === "restore" || command.type === "delete") return { type: command.type as "restore" | "delete", agentId: command.agentId };
+  if (command.type === "resumeQueue" || command.type === "cancel") {
+    return { type: command.type as "resumeQueue" | "cancel", agentId: command.agentId };
+  }
   if ((command.type === "send" || command.type === "steer") && typeof command.text === "string" && command.text.trim()) {
     return { type: command.type as "send" | "steer", agentId: command.agentId, text: command.text };
   }
@@ -100,9 +108,11 @@ server.listen(port, "127.0.0.1", () => {
     projects,
     demo: !live,
     provider,
-    store: live ? workspaceStore(identity, undefined, provider) : undefined,
+    modelProvider,
+    store: live ? workspaceStore(identity, undefined, provider, claude ? undefined : modelProvider) : undefined,
   });
-  console.log(`Orchestra ${live ? `(Codex: ${provider})` : "(demo)"} is available at ${origin}`);
+  const mode = live ? claude ? "Claude Code" : `Codex: ${modelProvider}` : "demo";
+  console.log(`Orchestra (${mode}) is available at ${origin}`);
   void runtime.start().catch((error) => console.error("Workspace startup failed:", error instanceof Error ? error.message : error));
 });
 server.on("error", (error) => {

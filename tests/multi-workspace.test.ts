@@ -33,7 +33,7 @@ test("shared workspace scopes delegation, worktrees, and resumed threads to thei
   }
   const projects = resolveProjects([{ id: "red", path: red }, { id: "blue", path: blue }]);
   const store = workspaceStore(workspaceIdentity(projects), join(directory, "state"));
-  let runtime = new WorkspaceRuntime({ cwd: red, projects, provider: "company", store });
+  let runtime = new WorkspaceRuntime({ cwd: red, projects, modelProvider: "company", store });
   const candidates: { path: string; projectId: string }[] = [];
   try {
     await runtime.start();
@@ -55,12 +55,16 @@ test("shared workspace scopes delegation, worktrees, and resumed threads to thei
       candidates.push({ path: coder.candidate.path, projectId: project.id });
       assert.equal(git("-C", coder.candidate.path, "rev-parse", "--path-format=absolute", "--git-common-dir"),
         git("-C", project.path, "rev-parse", "--path-format=absolute", "--git-common-dir"));
+      await waitFor(() => runtime.snapshot().agents.find((agent) => agent.id === coder.id)?.status === "awaiting-confirmation");
+      const otherProject = project.id === "red" ? "blue" : "red";
+      await send("coordinator", `delegate:${otherProject}:reviewer:wrong-project:${coder.id}`);
+      assert.equal(runtime.snapshot().agents.some((agent) => agent.duty === "reviewer"), false);
       await send(lead.id, `delegate:${project.id === "red" ? "blue" : "red"}:analyser:wrong-project`);
       assert.equal(runtime.snapshot().agents.some((agent) => agent.name.endsWith("-analyser")), false);
     }
     await runtime.close();
 
-    runtime = new WorkspaceRuntime({ cwd: blue, projects: [...projects].reverse(), provider: "company", store });
+    runtime = new WorkspaceRuntime({ cwd: blue, projects: [...projects].reverse(), modelProvider: "company", store });
     await runtime.start();
     assert.equal(runtime.snapshot().provider.state, "ready");
     assert.equal(runtime.snapshot().agents.filter((agent) => agent.duty === "coder").length, 2);
@@ -99,7 +103,7 @@ test("existing single-project sessions without project IDs still resume", async 
   const lead = demo.snapshot().agents.find((agent) => agent.role === "lead")!;
   store.save([
     { agent: coordinator, threadId: "old-coordinator", toolVersion: 7 },
-    { agent: { ...lead, messages: [...lead.messages, { id: "submitted", role: "user", text: "Continue" }] },
+    { agent: { ...lead, projectId: undefined, messages: [...lead.messages, { id: "submitted", role: "user", text: "Continue" }] },
       threadId: "old-lead", toolVersion: 7 },
   ]);
   const runtime = new WorkspaceRuntime({ cwd: directory, store });

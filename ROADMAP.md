@@ -10,13 +10,15 @@ Run a real local Codex App Server session signed in with ChatGPT. Prove that a c
 
 ## 2. Prove parallel feature delivery
 
+**Workspace follow-up:** Flexible multi-coder scopes, nested coder-specific validation, and isolated combined-candidate testing are implemented. Runtime fixtures pass; Git integration fixtures could not execute in the restricted development environment (`EPERM`) and live multi-coder provider execution remains to be verified. Project-branch merging stays manual and requires approval.
+
 **Recorded status:** Accepted on November 11, 2026 for a disposable Git fixture using app-owned tools. General Codex shell and patch execution was not verified. See [DELIVERY-SPIKE.md](DELIVERY-SPIKE.md).
 
 Give a lead a two-feature roadmap. Run two squads in separate worktrees, each with implementation, review, and testing. Demonstrate that the lead can integrate the results and present the combined diff and checks. Verify that the project branch changes only after the user's merge approval. Exercise a conflict and a failing check.
 
 ## 3. Build the workspace
 
-**Status:** The browser workspace, chats, map, role-based delegation, and local persistence are implemented. Full milestone acceptance and live approval routing remain outstanding; see [WORKSPACE.md](WORKSPACE.md).
+**Status:** The browser workspace, chats, map, role-based delegation, local persistence, and Codex file-change approval routing are implemented. Full milestone acceptance and file approvals with a live Codex account remain outstanding. See [WORKSPACE.md](WORKSPACE.md).
 
 Deliver the charcoal three-panel workspace, radial canvas, animated chat docks, writable agent conversations and status icons defined in PRODUCT.md. Verify sibling placement, keyboard selection, pan and pointer-centered zoom, and click versus drag. Have a UX reviewer exercise the integrated workflow and recovery states.
 
@@ -28,6 +30,6 @@ Close and reopen the window during a run. Reopen a saved project and confirm its
 
 ## 5. Evaluate Claude
 
-**Status:** Planned; Codex is the current provider.
+**Status:** Experimental Claude Code coordinator chat is implemented. Local fixture tests cover the adapter. Live account validation and team workflow parity are outstanding.
 
-Run a small integration spike for Claude Code after the Codex workflow is proven. Verify the applicable sign-in route and rerun the core messaging and approval checks before adding support to the product scope.
+Verify live authentication, streamed replies, cancellation, and follow-up recovery with an installed Claude Code CLI. Evaluate tool permissions, approval routing, and delegation before adding Claude Code to the team workflow. See [WORKSPACE.md](WORKSPACE.md#claude-code-mode) for the current scope and manual checks.
