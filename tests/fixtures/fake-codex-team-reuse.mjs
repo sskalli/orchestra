@@ -31,7 +31,10 @@ createInterface({ input: process.stdin }).on("line", (line) => {
     pending.delete(id);
     record({ type: "tool-result", tool: state.tool, result });
     if (state.tool === "find_archived_team" && result.success) {
-      callTool(state, "delegate_agent", { name: "Fresh coder", duty: "coder", goal: "Implement the next task" });
+      callTool(state, "delegate_agent", {
+        name: "Fresh coder", duty: "coder", goal: "Implement the next task",
+        ...(state.wrongProject && { projectId: "other" }),
+      });
     } else if (state.tool === "delegate_agent" && result.success) {
       const delegation = JSON.parse(result.contentItems[0].text);
       callTool(state, "confirm_implementation", { agentId: delegation.id });
@@ -71,12 +74,9 @@ createInterface({ input: process.stdin }).on("line", (line) => {
   });
   emit("thread/tokenUsage/updated", { threadId, turnId: turn.id, tokenUsage: { total: counts(total), last: counts(20) } });
 
-  if (text.includes("Request wrong project")) {
-    callTool(state, "delegate_agent", { name: "Wrong coder", duty: "coder", goal: "wrong project", projectId: "other" });
-  } else if (text.includes("Reuse through selected team")) {
-    callTool(state, "delegate_agent", { name: "Fresh coder", duty: "coder", goal: "Implement the next task" });
-  } else if (text.includes("Legacy squad")) {
-    callTool(state, "find_archived_team", { name: "Legacy squad" });
+  if (text.includes("Legacy squad") || text.includes("legacy-lead")) {
+    const name = text.includes("legacy-lead") ? "legacy-lead" : "Legacy squad";
+    callTool({ ...state, wrongProject: text.includes("in the other repository") }, "find_archived_team", { name });
   } else if (text === "Implement the next task") {
     writeFileSync(join(cwdByThread.get(threadId), "README.md"), "Fresh candidate\n");
     emit("item/agentMessage/delta", { threadId, turnId: turn.id, itemId: "report", delta: "Updated README.md and checked the diff." });

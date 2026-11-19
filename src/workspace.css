@@ -170,9 +170,6 @@ button:focus-visible { outline: 2px solid #b8bcb8; outline-offset: 3px; }
 .sw-archive-list header { display: flex; align-items: center; justify-content: space-between; }
 .sw-archive-list article { display: grid; gap: 5px; border-top: 1px solid var(--sw-line); padding: 8px 0; margin-top: 7px; }
 .sw-archive-list small { color: var(--sw-muted); overflow-wrap: anywhere; }
-.sw-archive-list h3 { margin: 10px 0 0; font-size: inherit; font-weight: 500; color: var(--sw-muted); }
-.sw-archive-list article > strong { overflow-wrap: anywhere; }
-.sw-archived-scope { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; }
 .sw-archive-list button, .sw-lifecycle-dialog button { padding: 7px; background: #202226; border: 1px solid var(--sw-line); cursor: pointer; text-align: left; border-radius: 4px; }
 .sw-archive-list article > div, .sw-lifecycle-dialog footer { display: flex; flex-wrap: wrap; gap: 8px; }
 .sw-lifecycle-dialog { max-width: min(380px, calc(100vw - 32px)); padding: 14px; border-radius: var(--sw-popover-radius); color: var(--sw-text); background: var(--sw-popover-bg); border: 1px solid var(--sw-line); font-family: "Orchestra Terminal", ui-monospace, monospace; font-size: var(--sw-popover-font); line-height: 1.5; }

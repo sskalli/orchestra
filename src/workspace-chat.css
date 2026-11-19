@@ -273,10 +273,6 @@
   background: transparent;
 }
 
-.chat-reuse-team { display: flex; flex-wrap: wrap; align-items: start; gap: 5px 10px; margin-bottom: 5px; font-size: .657rem; }
-.chat-reuse-team p { flex: 1 1 150px; margin: 0; overflow-wrap: anywhere; }
-.chat-reuse-team button { padding: 2px 5px; color: inherit; background: transparent; border: 1px solid var(--sw-line); border-radius: 4px; }
-
 .chat-composer-box textarea {
   width: 100%;
   height: 100%;

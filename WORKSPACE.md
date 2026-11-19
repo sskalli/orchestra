@@ -120,7 +120,7 @@ The candidate remains on disk for inspection, and merging is manual. Tests that 
 
 ## Reusing an archived team
 
-In **Archived**, choose **Use team** beside the saved team's name. Enter the new goal in the pilot chat and send it with that team selected. You can also ask the pilot directly, for example `Use team "Contact Form" to add a confirmation dialog`. Duplicate names require selecting the intended team from **Archived**.
+Ask the pilot in the main chat to reuse the team by name, for example `Could you reuse the Contact Form team to add a confirmation dialog?`. If several archived teams share a name, the pilot asks you to reply with `Reuse team <ID>` for the intended one.
 
 Reuse attaches fresh assignments to the stable team ID and keeps its repository assignment. The pilot chooses the roster for the new goal. A small change can use just one coder, while coordinated work can start a new lead. **Restore** remains available for reopening an earlier conversation. Reuse leaves those conversations and queues archived and gives new sessions a bounded handoff from accepted work. Coders start from the current committed baseline, so previous changes should be merged before assigning dependent work.
 

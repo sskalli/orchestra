@@ -32,10 +32,6 @@ async function readCommand(request: IncomingMessage) {
   }
   const command = JSON.parse(Buffer.concat(chunks).toString("utf8"));
   if (typeof command?.agentId !== "string") throw new Error("Invalid agent");
-  if (command.type === "reuseTeam" && typeof command.teamId === "string" &&
-      typeof command.text === "string" && command.text.trim()) {
-    return { type: "reuseTeam" as const, agentId: command.agentId, teamId: command.teamId, text: command.text };
-  }
   if (command.type === "archive") {
     if (command.stopRunning !== undefined && typeof command.stopRunning !== "boolean") throw new Error("Invalid stop option");
     return { type: "archive" as const, agentId: command.agentId, stopRunning: command.stopRunning };

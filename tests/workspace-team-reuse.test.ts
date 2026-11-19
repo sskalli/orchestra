@@ -100,17 +100,19 @@ test("archived team reuse migrates legacy identity, starts a fresh coder, and su
   await waitFor(() => coordinator()?.status === "done");
   assert.equal(runtime.snapshot().agents.length, 4);
   assert(traceEvents().some((event) => event.type === "tool-result" && event.tool === "find_archived_team" &&
-    event.result.success === false && /several archived teams/i.test(event.result.contentItems[0].text)));
-  await runtime.command({ type: "delete", agentId: "duplicate-lead" });
+    event.result.success === false && /several archived teams/i.test(event.result.contentItems[0].text) &&
+    ["legacy-lead", "duplicate-lead"].every((id) => event.result.contentItems[0].text.includes(id))));
 
-  await runtime.command({ type: "reuseTeam", agentId: "coordinator", teamId: "legacy-lead", text: "Request wrong project" });
+  await runtime.command({ type: "send", agentId: "coordinator",
+    text: 'Use team "legacy-lead" to edit README in the other repository' });
   await waitFor(() => coordinator()?.status === "done");
-  assert.equal(runtime.snapshot().agents.length, 3);
+  assert.equal(runtime.snapshot().agents.length, 4);
   assert.equal(lookup()?.archivedAt, archiveDate);
   assert(traceEvents().some((event) => event.type === "tool-result" && event.tool === "delegate_agent" &&
     event.result.success === false && /project assigned to the selected team/i.test(event.result.contentItems[0].text)));
+  await runtime.command({ type: "delete", agentId: "duplicate-lead" });
 
-  await runtime.command({ type: "reuseTeam", agentId: "coordinator", teamId: "legacy-lead", text: "Reuse through selected team" });
+  await runtime.command({ type: "send", agentId: "coordinator", text: "Could you reuse the Legacy squad to edit README?" });
   await waitFor(() => coordinator()?.status === "done" &&
     runtime.snapshot().agents.some((agent) => agent.name === "Fresh coder" && agent.status === "done"));
   const fresh = runtime.snapshot().agents.find((agent) => agent.name === "Fresh coder");
