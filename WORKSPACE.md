@@ -36,14 +36,42 @@ The endpoint must support Codex's Responses API. Use a custom provider ID (not t
 
 The live workspace opens a coordinator conversation, labeled **Computer** in the project chat. Discuss or refine a goal there, ask it to start a team, or ask for a standalone analysis. Each delegated agent has its own chat, queue, and status. The local Node process serves the browser workspace; closing the browser tab does not stop that process. Stop the server explicitly when finished.
 
+## Claude Code mode
+
+Start a Git project with Claude Code 2.1.248 or later.
+
+```bash
+claude --version
+claude auth status
+npm run workspace -- --claude /path/to/git/project
+```
+
+Configure credentials directly in Claude Code. Set `CLAUDE_BIN` to use a specific executable. See [Claude Code CLI reference](https://code.claude.com/docs/en/cli-reference) and [Anthropic's authentication guidance](https://code.claude.com/docs/en/legal-and-compliance).
+
+- Claude mode provides a single coordinator chat with streamed replies. Project tools, code changes, Orchestra delegation, approval routing, and turn steering are unavailable. The CLI runs with restricted settings and an empty tool set. Claude Code still applies administrator-managed configuration and hooks where configured.
+- Send another message during a turn to queue it. **Stop current turn** cancels the CLI run and pauses queued input. Choose **Resume queue** to continue. Failed turns also pause queued input. Restart after resolving a sign-in or usage-limit error.
+- Orchestra stores Claude transcripts, CLI session IDs, and drafts separately from Codex. Follow-ups resume the CLI session after the first successful turn and require Claude Code session persistence. Leave `CLAUDE_CODE_SKIP_PROMPT_HISTORY` unset. A restart leaves interrupted turns flagged for review and queued messages paused. Orchestra does not reconcile incomplete Claude turns with CLI history or replay them automatically.
+- To verify with a signed-in CLI, send a prompt asking Claude to remember a distinctive word, send a follow-up asking for the word, then repeat the follow-up after restarting the server. For cancellation, queue a second prompt during a long reply, stop the turn, and confirm the second prompt waits for **Resume queue**. Live authentication, usage, and reply streaming still require verification with an installed CLI.
+
 ## Workspace controls
 
 - Select an agent to open its chat. Drag the edges of the project and agent panels to resize them; the handles also support arrow keys, Home and End. On narrow screens the project panel is below the map and its top edge changes its height.
 - Drag the divider above a chat input to adjust its height. Composer sizes are saved separately for project and agent chats. Enter sends a message; Shift+Enter adds a line. Drafts are preserved per conversation.
-- Agent roles have distinct node colors and halos. Hover or focus a node to see its details and related links. Supported agent-to-agent events animate a dot along a direct visible map link; the coordinator has no map node.
+- Agent roles have distinct node colors and halos. Hover or focus a node to see its own details and related links. Selecting a parent node also reveals descendant status icons (icon-only until the descendant itself is hovered/focused/selected). Supported agent-to-agent events animate a dot along a direct visible map link; the coordinator has no map node.
 - New system messages are labeled and colored by category: error, action required, warning, notice, or success. Older saved messages without a category remain neutral. Your messages have a lighter background and messages are separated by lines.
 
 ## Workspace checks
+
+### Archive and delete
+
+Use the **⋯** menu in an agent chat header to **Archive team**, **Archive agent**, or **Delete permanently…**. Every action includes the selected agent's descendants; the pilot cannot be archived or deleted.
+
+- Archive hides the subtree from the map, active status summaries, and new work routing. Chats, reports, queued input, and workspace references remain saved. Queued work stays paused.
+- For running work, confirm **Stop and archive**. Orchestra waits for the provider to finish stopping before hiding agents. Failed cancellation or uncertain provider state leaves them visible with an explanation. Resolve uncertain work before retrying.
+- **Archived (N)** on the map opens the archived list, including when the active map is empty. Open a conversation to read it, or choose **Restore**. Restoration includes the selected subtree and any archived ancestors it needs; it does not restart paused queues automatically.
+- **Delete permanently…** confirms the affected agent count and removes their Orchestra records, conversations, and reports. Running or unresolved work blocks deletion. Project files, Git branches, worktrees, and provider-owned conversation history are not deleted. Historical updates in the pilot chat remain, with deleted conversation links disabled.
+
+For manual verification, archive a nested agent, inspect its read-only chat in Archived, restore it, then archive a complete team. Reload and restart a live workspace to check persistence. Delete an archived team and confirm its conversations disappear while its project files and worktrees remain. Demo lifecycle changes last only for the running demo server.
 
 - Select a worker, enter a draft, switch to another worker, then return to the first. The original draft should still be there.
 - Tab to a node, use the arrow keys to move focus, and press Enter to open its conversation. Escape should close the conversation and restore focus to the node.
@@ -57,16 +85,19 @@ Browser preferences, including drafts, camera and panel sizes, are scoped to the
 
 After a live server restart, Orchestra requests the saved threads from Codex. If Codex confirms an interrupted turn completed, its reply is restored. Otherwise the interrupted message is flagged for review. Previous approval requests expire, and ordinary queued messages stay paused until you select **Resume queue**. Scheduled assignments waiting on a prerequisite are instead marked failed and must be scheduled again. An active or unresumable thread is generally shown as unavailable; when an older tool registration needs refreshing, Orchestra instead opens a new thread with the current tools. A coordinator thread with no submitted history is opened fresh. When a replacement thread is opened, the old transcript remains visible in Orchestra but is not restored as that thread's conversation history.
 
-The demo contains an approval control, but live sessions currently request `approvalPolicy: "never"`; unexpected live command or file-change approval requests are declined automatically. The live workspace does not yet provide the approval routing demonstrated by the milestone 1 spike.
+In live Codex mode, when App Server requests permission for a coder's file change, Orchestra shows the patch in that coder's chat and marks the agent as needing attention. Open the request and choose **Approve** or **Decline**. Approval applies to the displayed patch in the assigned feature worktree. Ordinary edits already allowed by the sandbox can proceed without prompting.
+
+Orchestra declines command approval requests, session-wide grants, and file changes whose scope it cannot verify. A changed or withdrawn request expires in the chat. File approval does not merge the worktree into the project branch. The browser path is verified against an App Server fixture. Reproduce with `node --test tests/codex-approval.test.ts`. A live App Server account run that emits an eligible file-change request still needs verification.
 
 A detected usage limit blocks new work. Orchestra does not automatically clear that state when the allowance renews; restart the workspace server once the provider is available again. Drafts and queued messages remain available for review.
 
-The checks above are a manual checklist, not a claim that the current workspace has been fully accepted. Live recovery of populated threads, approval routing, general Codex shell and patch execution, and desktop lifecycle behavior remain to be verified or implemented. See [ROADMAP.md](ROADMAP.md) and the historical [Codex](CODEX-SPIKE.md) and [delivery](DELIVERY-SPIKE.md) spike reports for their recorded results.
+The checks above are a manual checklist, not a claim that the current workspace has been fully accepted. Live recovery of populated threads, real-provider file approval routing, general Codex shell and patch execution, and desktop lifecycle behavior remain to be verified or implemented. See [ROADMAP.md](ROADMAP.md) and the historical [Codex](CODEX-SPIKE.md) and [delivery](DELIVERY-SPIKE.md) spike reports for their recorded results.
 
 ## Delegating from chat
 
-- Ask the coordinator to start a team for implementation. A lead's first coder assignment creates a detached worktree from the project HEAD. The project must be a Git repository with at least one commit; uncommitted and untracked changes are not included. The coder can write within that worktree.
-- Ask the pilot or lead to delegate a read-only analysis or design review. Ask a lead to schedule a designer, reviewer, or tester after its coder. Orchestra holds that assignment until the coder finishes and reports the resulting turn in the lead and pilot conversations. Designer feedback is advisory and does not replace required review or testing.
+- Ask the coordinator to start a team for implementation. The lead chooses one or several coders based on useful independent scopes, not feature count. Each coder assignment creates a separate detached worktree from the project HEAD. The project must be a Git repository with at least one commit; uncommitted and untracked project changes are not included.
+- Ask the pilot or lead to delegate a read-only analysis or design review. A lead schedules a designer, reviewer, or tester with `afterAgentId` naming the exact coder. The checker appears beneath that coder and uses its candidate; Orchestra waits for the coder's submission before starting scheduled checks. Coders can also arrange their own independent checks. Designer feedback is advisory and does not replace required review or testing.
+- When multiple accepted scopes must be delivered together, the lead calls `integrate_candidates` with their coder IDs. Orchestra snapshots their changes into a separate combined worktree, preserving source worktrees and the project branch. Conflicts fail explicitly. The lead delegates a tester with an integration/regression goal against that combined candidate, then uses `confirm_integration` after its current snapshot passes. This extra check is unnecessary for a single unchanged candidate.
 - Ask the pilot to relay refinements to an existing lead. Ask the lead to send instructions to its workers. You can also open and message any agent directly.
 
 The candidate remains on disk for inspection, and merging is manual. Tests that generate files or require missing dependencies may be blocked in the read-only tester session. Orchestra limits the workspace to 30 sessions and prevents conflicting coder and checker activity on the same candidate. In-memory prerequisites that were waiting when the server restarted are shown as interrupted so they can be scheduled again. The older `--feature` flag is accepted for compatibility with existing launch commands.
@@ -77,7 +108,7 @@ Orchestra loads the Markdown files in `roles/` into Codex as developer instructi
 
 A coder can use `raise_product_decision` to post an unresolved choice in the lead and pilot chats. The lead or pilot can delegate product advice and bring the remaining decision to the user. To pass review feedback to a coder, the lead uses `message_agent`.
 
-The lead can use `read_agent_report` to retrieve workers' findings during its Codex turn. Reviewers and testers record pass, changes requested, or blocked against the current coder submission. A new coder turn invalidates earlier check results. Confirmation requires passing review and testing for the same submission. To continue a candidate created before these checks were recorded, ask the lead to relay any outstanding findings to the original coder, then schedule fresh review and testing.
+The lead can use `list_agents`, `message_agent`, and `read_agent_report` across its descendants. Coders can manage their own read-only checkers, but cannot confirm their own implementation. Reviewers and testers record pass, changes requested, or blocked against the submission and candidate snapshot assigned at check start. A new coder turn or changed candidate invalidates earlier results. Confirmation requires passing independent review and testing for that same submission. Combined confirmation additionally requires current accepted sources and a passing tester for the exact integration snapshot. To continue an older candidate without scoped evidence, request fresh checks.
 
 Each new pilot or lead turn includes a snapshot of the relevant agents' statuses and recent reports. Reports arriving during an active turn appear in chat and can be fetched with `read_agent_report`. The next turn includes the updated snapshot. Orchestra does not start extra model turns solely to deliver reports.
 

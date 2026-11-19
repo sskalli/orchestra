@@ -3,6 +3,7 @@ export type WorkspaceOptions = {
   projectPath?: string;
   provider: string;
   feature: boolean;
+  claude?: true;
 };
 
 export function parseWorkspaceArgs(args: string[]): WorkspaceOptions {
@@ -11,11 +12,13 @@ export function parseWorkspaceArgs(args: string[]): WorkspaceOptions {
   let provider = "openai";
   let providerSpecified = false;
   let feature = false;
+  let claude = false;
 
   for (let index = 0; index < args.length; index++) {
     const arg = args[index];
-    if (arg === "--live") {
-      if (live) throw new Error("Specify --live only once.");
+    if (arg === "--live" || arg === "--claude") {
+      if (live) throw new Error("Specify only one workspace mode.");
+      claude = arg === "--claude";
       live = true;
       if (args[index + 1] && !args[index + 1].startsWith("--")) projectPath = args[++index];
     } else if (arg === "--provider") {
@@ -37,7 +40,8 @@ export function parseWorkspaceArgs(args: string[]): WorkspaceOptions {
   }
 
   if ((!live && (projectPath || providerSpecified || feature)) || (!live && args.length)) {
-    throw new Error("Usage: npm run workspace -- [--live [project-path]] [--provider provider-id]");
+    throw new Error("Usage: npm run workspace -- [--live [project-path] [--provider provider-id] | --claude [project-path]]");
   }
-  return { live, projectPath, provider, feature };
+  if (claude && providerSpecified) throw new Error("--provider is only supported in Codex mode.");
+  return { live, projectPath, provider, feature, ...(claude ? { claude: true } : {}) };
 }

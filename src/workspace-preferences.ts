@@ -4,13 +4,12 @@ export type ComposerSizes = { project?: number; agent?: number };
 
 type View = { leftOpen: boolean; selectedId: string | null; drafts: Record<string, string> };
 
-export function workspacePreferences(projectPath: string, demo: boolean, modelProvider = "openai") {
-  const mode = demo ? "demo" : "codex";
-  const customProvider = !demo && modelProvider !== "openai";
+export function workspacePreferences(projectPath: string, mode: "demo" | "codex" | "claude", modelProvider = "openai") {
+  const customProvider = mode === "codex" && modelProvider !== "openai";
   const key = customProvider
     ? `orchestra:workspace:v1:codex-provider:${modelProvider}:${projectPath}`
     : `orchestra:workspace:v1:${mode}:${projectPath}`;
-  const legacyKey = customProvider ? undefined : `swarmer:workspace:v1:${mode}:${projectPath}`;
+  const legacyKey = customProvider || mode === "claude" ? undefined : `swarmer:workspace:v1:${mode}:${projectPath}`;
 
   function read(name: string): unknown {
     try {

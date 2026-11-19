@@ -1,4 +1,5 @@
 import { agentAppearance, numberAgentRoles } from "./workspace-agent-appearance.ts";
+import { effectiveAgentStatus } from "./workspace-status.ts";
 import { useEffect, useRef, useState } from "react";
 import type { CSSProperties, KeyboardEvent, PointerEvent } from "react";
 import { createRoot } from "react-dom/client";
@@ -14,14 +15,17 @@ type Agent = Snapshot["agents"][number] & { roleNumber: number };
 type Command = Parameters<WorkspaceRuntime["command"]>[0];
 type Activity = { agent: Agent; messageId?: string; text: string };
 
-const providerLabels = {
-  demo: "Demo mode",
-  connecting: "Connecting to Codex",
-  ready: "Codex connected",
-  "signed-out": "Codex sign-in required",
-  error: "Codex unavailable",
-  "usage-limit": "Codex usage limit",
-};
+function providerLabel({ name, state }: Snapshot["provider"]) {
+  const title = name === "claude" ? "Claude Code" : "Codex";
+  return {
+    demo: "Demo mode",
+    connecting: `Connecting to ${title}`,
+    ready: `${title} connected`,
+    "signed-out": `${title} sign-in required`,
+    error: `${title} unavailable`,
+    "usage-limit": `${title} usage limit`,
+  }[state];
+}
 
 function Mark() {
   return <svg className="sw-mark" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.2"
@@ -38,7 +42,9 @@ function Folder() {
 
 function attention(agent: Agent): Activity[] {
   const pending = agent.messages.filter((message) => message.approval?.state === "pending");
-  if (pending.length) return pending.map((message) => ({ agent, messageId: message.id, text: message.text }));
+  if (pending.length) return pending.map((message) => ({
+    agent, messageId: message.id, text: message.text.split("\n", 1)[0].slice(0, 160),
+  }));
   if (agent.status === "attention" || agent.status === "error") {
     const message = agent.messages.findLast((entry) => entry.state === "failed" || entry.role === "system");
     return [{ agent, messageId: message?.id, text: message?.text ?? (agent.status === "error" ? "Run failed" : "Needs your response") }];
@@ -90,11 +96,11 @@ function Workspace() {
     return <main className="sw-loading"><Mark /><span>Connecting to Orchestra…</span></main>;
   }
 
-  const demo = snapshot.provider.state === "demo";
-  return <WorkspaceView key={JSON.stringify([snapshot.project.path, demo, snapshot.modelProvider])} snapshot={snapshot} connected={connected} demo={demo} signals={signals} />;
+  const mode = snapshot.provider.state === "demo" ? "demo" : snapshot.provider.name;
+  return <WorkspaceView key={JSON.stringify([snapshot.project.path, mode, snapshot.modelProvider])} snapshot={snapshot} connected={connected} mode={mode} signals={signals} />;
 }
 
-function WorkspaceView({ snapshot, connected, demo, signals }: { snapshot: Snapshot; connected: boolean; demo: boolean; signals: AgentSignal[] }) {
+function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snapshot; connected: boolean; mode: "demo" | Snapshot["provider"]["name"]; signals: AgentSignal[] }) {
   const { project, provider } = snapshot;
   const [storageUnavailable, setStorageUnavailable] = useState(false);
   useEffect(() => {
@@ -102,8 +108,8 @@ function WorkspaceView({ snapshot, connected, demo, signals }: { snapshot: Snaps
     window.addEventListener("orchestra-storage-unavailable", onFailure);
     return () => window.removeEventListener("orchestra-storage-unavailable", onFailure);
   }, []);
-  const agents = numberAgentRoles(snapshot.agents);
-  const [preferences] = useState(() => workspacePreferences(project.path, demo, snapshot.modelProvider));
+  const agents = numberAgentRoles(snapshot.agents.map((agent) => ({ ...agent, status: effectiveAgentStatus(agent) })));
+  const [preferences] = useState(() => workspacePreferences(project.path, mode, snapshot.modelProvider));
   const [saved] = useState(preferences.readView);
   const [savedCamera] = useState(preferences.readCamera);
   const [panelSizes, setPanelSizes] = useState(preferences.readPanels);
@@ -127,6 +133,65 @@ function WorkspaceView({ snapshot, connected, demo, signals }: { snapshot: Snaps
   const [focus, setFocus] = useState<{ id?: string; count: number }>({ count: 0 });
   const [chooser, setChooser] = useState<{ agentId: string }>();
   const [projectDetails, setProjectDetails] = useState(false);
+  const [archiveOpen, setArchiveOpen] = useState(false);
+  const [lifecycle, setLifecycle] = useState<{ action: "archive" | "restore" | "delete"; agentId: string }>();
+  const [lifecycleError, setLifecycleError] = useState("");
+  const [lifecyclePending, setLifecyclePending] = useState(false);
+  const lifecycleDialog = useRef<HTMLDialogElement>(null);
+  const archivedToggle = useRef<HTMLButtonElement>(null);
+
+  useEffect(() => {
+    const dismissOutside = (event: Event) => {
+      const target = event.target;
+      if (!(target instanceof Element)) return;
+      document.querySelectorAll<HTMLDetailsElement>(".chat-lifecycle-menu[open]").forEach((menu) => {
+        if (!menu.contains(target)) menu.open = false;
+      });
+      if (!target.closest(".sw-project-menu")) setProjectDetails(false);
+      if (!target.closest(".sw-archive-list, .sw-archived-toggle")) setArchiveOpen(false);
+    };
+    const dismissOnEscape = (event: globalThis.KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      const target = event.target instanceof Element ? event.target : undefined;
+      const menu = target?.closest<HTMLDetailsElement>(".chat-lifecycle-menu[open]") ??
+        document.querySelector<HTMLDetailsElement>(".chat-lifecycle-menu[open]");
+      const projectTrigger = document.querySelector<HTMLButtonElement>(".sw-project-button[aria-expanded='true']");
+      if (menu) {
+        menu.open = false;
+        menu.querySelector("summary")?.focus();
+        event.stopPropagation();
+      } else if (projectTrigger) {
+        setProjectDetails(false);
+        projectTrigger.focus();
+        event.stopPropagation();
+      } else if (archivedToggle.current?.getAttribute("aria-expanded") === "true") {
+        setArchiveOpen(false);
+        archivedToggle.current?.focus();
+        event.stopPropagation();
+      }
+    };
+    // Capture also catches clicks that map gestures or dock controls handle locally.
+    document.addEventListener("pointerdown", dismissOutside, true);
+    document.addEventListener("click", dismissOutside, true);
+    document.addEventListener("keydown", dismissOnEscape, true);
+    return () => {
+      document.removeEventListener("pointerdown", dismissOutside, true);
+      document.removeEventListener("click", dismissOutside, true);
+      document.removeEventListener("keydown", dismissOnEscape, true);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (lifecycle) lifecycleDialog.current?.showModal();
+    else lifecycleDialog.current?.close();
+  }, [lifecycle]);
+
+  useEffect(() => {
+    if (selectedId && !snapshot.agents.some((agent) => agent.id === selectedId)) {
+      setSelectedId(null);
+      setDockId(null);
+    }
+  }, [snapshot.agents, selectedId]);
 
   useEffect(() => {
     const media = window.matchMedia("(max-width: 650px)");
@@ -193,7 +258,7 @@ function WorkspaceView({ snapshot, connected, demo, signals }: { snapshot: Snaps
   const selected = agents.find((agent) => agent.id === selectedId);
   const dockAgent = agents.find((agent) => agent.id === dockId);
   const blocked = !connected || !["ready", "demo"].includes(provider.state);
-  const blockedReason = !connected ? "Reconnecting to the local workspace…" : provider.message ?? providerLabels[provider.state];
+  const blockedReason = !connected ? "Reconnecting to the local workspace…" : provider.message ?? providerLabel(provider);
   const projectName = project.name;
 
   function activityFor(id: string) {
@@ -205,7 +270,7 @@ function WorkspaceView({ snapshot, connected, demo, signals }: { snapshot: Snaps
         if (agent.parentId && ids.has(agent.parentId)) ids.add(agent.id);
       }
     }
-    return agents.filter((agent) => ids.has(agent.id)).flatMap(attention);
+    return agents.filter((agent) => !agent.archivedAt && ids.has(agent.id)).flatMap(attention);
   }
 
   function select(id: string | null, messageId?: string) {
@@ -324,7 +389,51 @@ function WorkspaceView({ snapshot, connected, demo, signals }: { snapshot: Snaps
       onPointerDown={start} onPointerMove={move} onPointerUp={end} onPointerCancel={end} onLostPointerCapture={end} onKeyDown={keyboard} />;
   }
 
-  const canvasAgents = agents.filter((agent) => agent.role !== "coordinator");
+  const canvasAgents = agents.filter((agent) => agent.role !== "coordinator" && !agent.archivedAt);
+  const archivedAgents = agents.filter((agent) => agent.archivedAt);
+
+  function subtree(id: string) {
+    const ids = new Set([id]);
+    let previous = 0;
+    while (previous !== ids.size) {
+      previous = ids.size;
+      for (const agent of agents) if (agent.parentId && ids.has(agent.parentId)) ids.add(agent.id);
+    }
+    return agents.filter((agent) => ids.has(agent.id));
+  }
+
+  function requestLifecycle(action: "archive" | "restore" | "delete", agentId: string) {
+    setLifecycleError("");
+    setLifecycle({ action, agentId });
+  }
+
+  const lifecycleAgent = agents.find((agent) => agent.id === lifecycle?.agentId);
+  const affected = lifecycleAgent ? subtree(lifecycleAgent.id) : [];
+  const hasRunning = affected.some((agent) => agent.status === "working" || agent.status === "attention" || agent.lifecycleBusy) ||
+    (affected.some((agent) => agent.simulation) && agents.some((agent) => agent.simulation && agent.status === "working"));
+
+  async function applyLifecycle() {
+    if (!lifecycle || lifecyclePending) return;
+    setLifecyclePending(true);
+    setLifecycleError("");
+    try {
+      await send(lifecycle.action === "archive"
+        ? { type: "archive", agentId: lifecycle.agentId, stopRunning: hasRunning }
+        : { type: lifecycle.action, agentId: lifecycle.agentId });
+      setLifecycle(undefined);
+      if (lifecycle.action === "delete") requestAnimationFrame(() => archivedToggle.current?.focus());
+      if (lifecycle.action === "delete") {
+        const ids = new Set(affected.map((agent) => agent.id));
+        draftsRef.current = Object.fromEntries(Object.entries(draftsRef.current).filter(([id]) => !ids.has(id)));
+        setDrafts(draftsRef.current);
+        if (selectedId && ids.has(selectedId)) select(null);
+      }
+    } catch (error) {
+      setLifecycleError(error instanceof Error ? error.message : "The action could not be completed.");
+    } finally {
+      setLifecyclePending(false);
+    }
+  }
 
   function renderChat(agent: Agent, kind: "project" | "agent") {
     const team = kind === "agent" && agent.role !== "lead"
@@ -356,10 +465,12 @@ function WorkspaceView({ snapshot, connected, demo, signals }: { snapshot: Snaps
       key={agent.id}
       agent={{ ...agent, messages: agent.messages.map((entry) => {
         const source = agents.find((item) => item.id === entry.sourceAgentId);
-        return source ? { ...entry, sourceName: agentAppearance(source).displayName } : entry;
+        return source ? { ...entry, sourceName: agentAppearance(source).displayName }
+          : entry.sourceAgentId ? { ...entry, sourceName: entry.sourceAgentName ?? "Deleted agent", sourceDeleted: true } : entry;
       }) }}
       kind={kind}
       onOpenAgent={(id) => select(id)}
+      onLifecycle={(action) => requestLifecycle(action, agent.id)}
       title={kind === "project" ? projectName : team ? `${agentAppearance(team).displayName} / ${agentAppearance(agent).displayName}` : agentAppearance(agent).displayName}
       draft={drafts[agent.id] ?? ""}
       composerHeight={composerSizes[kind]}
@@ -376,10 +487,11 @@ function WorkspaceView({ snapshot, connected, demo, signals }: { snapshot: Snaps
       onDraftChange={(value) => setDrafts((current) => ({ ...current, [agent.id]: value }))}
       onSend={(value) => submit("send", value)}
       onSteer={(value) => submit("steer", value)}
+      onCancel={() => send({ type: "cancel", agentId: agent.id })}
       onApproval={(approvalId, decision) => send({ type: "approval", agentId: agent.id, approvalId, decision })}
       onResumeQueue={() => send({ type: "resumeQueue", agentId: agent.id })}
       onClose={() => kind === "project" ? toggleProjectChat(false) : closeAgent(true)}
-      disabled={blocked || Boolean(agent.unavailableReason)}
+      disabled={blocked || Boolean(agent.unavailableReason) || Boolean(agent.archivedAt) || Boolean(agent.lifecycleBusy)}
       disabledReason={agent.unavailableReason ?? (blocked && !(connected && provider.state === "usage-limit") ? blockedReason : undefined)}
       focusMessageId={kind === "agent" ? focus.id : undefined}
       focusRequest={kind === "agent" ? focus.count : undefined}
@@ -394,7 +506,7 @@ function WorkspaceView({ snapshot, connected, demo, signals }: { snapshot: Snaps
           <button className="sw-project-button" type="button" aria-expanded={projectDetails} onClick={() => setProjectDetails(!projectDetails)}><Folder /><span>{projectName}</span><span className="sw-chevron" aria-hidden="true" /></button>
           {projectDetails && <div className="sw-project-details"><strong>{projectName}</strong><span>{project.path}</span></div>}
         </div>
-        <div className={`sw-provider sw-provider--${connected ? provider.state : "connecting"}`} role="status"><span aria-hidden="true" />{connected ? providerLabels[provider.state] : "Reconnecting"}</div>
+        <div className={`sw-provider sw-provider--${connected ? provider.state : "connecting"}`} role="status"><span aria-hidden="true" />{connected ? providerLabel(provider) : "Reconnecting"}</div>
       </header>
       <main ref={bodyRef} className={`sw-body ${leftOpen ? "is-project-open" : ""} ${selected ? "is-agent-open" : ""} ${resizing ? "is-resizing" : ""}`}
         style={{ "--left-size": panelSizes.left ? `${panelSizes.left}px` : undefined,
@@ -406,9 +518,24 @@ function WorkspaceView({ snapshot, connected, demo, signals }: { snapshot: Snaps
           {leftOpen && resizeHandle("left")}
         </aside>
         <section className="sw-canvas">
+          <button ref={archivedToggle} className="sw-archived-toggle" type="button" aria-expanded={archiveOpen} onClick={() => setArchiveOpen(!archiveOpen)}>Archived ({archivedAgents.length})</button>
           {(blocked || storageUnavailable) && <div className="sw-banner" role="status">{blocked ? blockedReason : "Browser storage is unavailable. Drafts and layout changes may not survive reload."}</div>}
           <WorkspaceCanvas agents={canvasAgents} signals={signals} selectedId={selectedId} onSelect={select} onStatus={handleStatus}
+            emptyMessage={mode === "claude" ? "Use the project chat to message Claude Code." : undefined}
             initialCamera={savedCamera} onCameraChange={preferences.writeCamera} />
+          {archiveOpen && <section className="sw-archive-list" aria-label="Archived agents" onKeyDown={(event) => {
+            if (event.key === "Escape") { event.stopPropagation(); setArchiveOpen(false); archivedToggle.current?.focus(); }
+          }}>
+            <header><strong>Archived agents</strong><button type="button" aria-label="Close archived agents" onClick={() => { setArchiveOpen(false); archivedToggle.current?.focus(); }}>×</button></header>
+            {!archivedAgents.length && <p>No archived agents.</p>}
+            {archivedAgents.map((agent) => <article key={agent.id}>
+              <button type="button" onClick={() => { select(agent.id); setArchiveOpen(false); }}>{agentAppearance(agent).displayName}</button>
+              <small>Parent: {agents.find((parent) => parent.id === agent.parentId) ? agentAppearance(agents.find((parent) => parent.id === agent.parentId)!).displayName : "Project"}</small>
+              <small>Archived {new Date(agent.archivedAt!).toLocaleString()}</small>
+              <div><button type="button" disabled={!connected || agent.lifecycleBusy} onClick={() => requestLifecycle("restore", agent.id)}>Restore</button>
+                <button type="button" disabled={!connected || agent.lifecycleBusy} onClick={() => requestLifecycle("delete", agent.id)}>Delete permanently…</button></div>
+            </article>)}
+          </section>}
           {chooser && <div className="sw-activity" role="dialog" aria-label="Events needing attention" onKeyDown={(event) => {
             if (event.key === "Escape") { event.stopPropagation(); setChooser(undefined); }
           }}>
@@ -423,6 +550,21 @@ function WorkspaceView({ snapshot, connected, demo, signals }: { snapshot: Snaps
           {selected && resizeHandle("right")}
         </aside>
       </main>
+      <dialog ref={lifecycleDialog} className="sw-lifecycle-dialog" aria-labelledby="lifecycle-heading" onCancel={(event) => {
+        if (lifecyclePending) event.preventDefault(); else setLifecycle(undefined);
+      }}>
+        <h2 id="lifecycle-heading">{lifecycle?.action === "delete" ? "Delete permanently?" : lifecycle?.action === "restore" ? "Restore agents?" : hasRunning ? "Stop and archive?" : "Archive agents?"}</h2>
+        <p>{lifecycleAgent && agentAppearance(lifecycleAgent).displayName}</p>
+        <p>{affected.length} agent{affected.length === 1 ? "" : "s"} in the selected subtree, including all descendants.</p>
+        {lifecycle?.action === "delete" ? <p>Their Orchestra records, conversations, and reports will be permanently removed. Project files, branches, and worktrees stay on disk.</p>
+          : lifecycle?.action === "restore" ? <p>Return this subtree to the active map. Any archived ancestors it needs will also be restored. Queued work stays paused.</p>
+          : <p>{hasRunning ? "Running work must stop before these agents are hidden. " : ""}Conversations and reports remain available in Archived.</p>}
+        {lifecycleError && <p role="alert">{lifecycleError}</p>}
+        <footer><button type="button" autoFocus disabled={lifecyclePending} onClick={() => setLifecycle(undefined)}>Cancel</button>
+          <button type="button" disabled={!connected || lifecyclePending || !lifecycleAgent} onClick={() => void applyLifecycle()}>
+            {lifecyclePending ? "Please wait…" : lifecycle?.action === "delete" ? "Delete permanently" : lifecycle?.action === "restore" ? "Restore" : hasRunning ? "Stop and archive" : "Archive"}
+          </button></footer>
+      </dialog>
     </div>
   );
 }

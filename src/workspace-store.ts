@@ -12,16 +12,18 @@ export type SavedSession = {
   run?: { messageId: string; turnId?: string };
 };
 
-export function workspaceStore(project: string, directory?: string, provider = "openai") {
+export function workspaceStore(project: string, directory?: string, provider = "codex", modelProvider?: string) {
   const stateRoot = process.env.XDG_STATE_HOME || join(homedir(), ".local", "state");
   const explicitDirectory = directory ?? process.env.ORCHESTRA_STATE_DIR ?? process.env.SWARMER_STATE_DIR;
   directory = explicitDirectory ?? join(stateRoot, "orchestra");
+  const claude = provider === "claude";
+  const codexProvider = modelProvider ?? (provider === "codex" || claude ? "openai" : provider);
   const filename = createHash("sha256")
     .update(project)
-    .update(provider === "openai" ? "" : `\0${provider}`)
+    .update(codexProvider === "openai" ? "" : `\0${codexProvider}`)
     .digest("hex") + ".json";
-  const path = join(directory, filename);
-  const legacyPath = explicitDirectory ? undefined : join(stateRoot, "swarmer", filename);
+  const path = join(directory, claude ? `claude-${filename}` : filename);
+  const legacyPath = explicitDirectory || claude ? undefined : join(stateRoot, "swarmer", filename);
   return {
     load(): SavedSession[] | undefined {
       let contents: string;
