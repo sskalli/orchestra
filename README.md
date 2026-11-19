@@ -35,6 +35,25 @@ CODEX_BIN=/usr/lib/chatgpt/resources/codex \
 
 Live model turns consume the signed-in account's Codex allowance. Account billing and credit settings determine whether additional usage can incur charges.
 
+To use a separately configured Codex custom provider instead, configure it in Codex's `config.toml` and pass its provider ID. For example:
+
+```toml
+[model_providers.company]
+name = "Company gateway"
+base_url = "https://gateway.example.com/v1"
+wire_api = "responses"
+env_key = "COMPANY_API_KEY"
+```
+
+Set the named API-key environment variable in your shell and launch Orchestra with the configured provider ID:
+
+```bash
+export COMPANY_API_KEY='your-api-key'
+npm run workspace -- --live /absolute/path/to/project --provider company
+```
+
+The endpoint must support the Responses API expected by Codex. Use a custom provider ID (not the built-in `openai` ID). The default `openai` mode continues to use ChatGPT sign-in. Custom-provider sessions have separate saved state from the default mode; they do not continue ChatGPT-authenticated threads. Configure the provider's model in Codex or set `CODEX_MODEL` when launching Orchestra.
+
 The coordinator appears as **Computer** in the project chat. You can refine a goal before delegating work, ask for an analysis or design review, or create a team with a lead, coder, reviewer, and tester.
 
 For example, ask the coordinator to implement a feature with acceptance criteria, arrange independent review, and schedule regression tests after the coder finishes. You can send follow-ups to the coordinator, lead, or individual workers throughout the workflow.
@@ -68,6 +87,7 @@ Closing the browser tab leaves the Node server running. Stop it with Ctrl+C in i
 | Setting | Purpose |
 | --- | --- |
 | `CODEX_BIN` | Codex executable, defaulting to `codex` on `PATH` |
+| `CODEX_MODEL` | Optional model override for Codex threads |
 | `ORCHESTRA_PORT` | Local server port, defaulting to `4317` |
 | `ORCHESTRA_STATE_DIR` | Override the directory for saved live workspace state |
 

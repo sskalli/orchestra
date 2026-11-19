@@ -181,6 +181,7 @@ function errorText(error: unknown) {
 export class WorkspaceRuntime {
   private readonly state: WorkspaceSnapshot;
   private readonly demo: boolean;
+  private readonly providerId: string;
   private readonly store?: ReturnType<typeof workspaceStore>;
   private storageFailed = false;
   private storageReady = false;
@@ -194,9 +195,15 @@ export class WorkspaceRuntime {
   private simulationRunning = false;
   private readonly simulationTimers = new Set<ReturnType<typeof setTimeout>>();
 
-  constructor({ cwd, demo = false, store }: { cwd: string; demo?: boolean; store?: ReturnType<typeof workspaceStore> }) {
+  constructor({ cwd, demo = false, provider = "openai", store }: {
+    cwd: string;
+    demo?: boolean;
+    provider?: string;
+    store?: ReturnType<typeof workspaceStore>;
+  }) {
     const path = resolve(cwd);
     this.demo = demo;
+    this.providerId = provider;
     this.store = demo ? undefined : store;
     this.state = { project: { name: basename(path), path }, provider: { state: demo ? "demo" : "connecting" }, agents: [] };
     this.createAgent(coordinatorId, "Coordinator", "coordinator");
@@ -232,7 +239,7 @@ export class WorkspaceRuntime {
       this.publish();
       return;
     }
-    const server = new AppServer(this.state.project.path, process.env, false);
+    const server = new AppServer(this.state.project.path, process.env, false, this.providerId !== "openai");
     this.server = server;
     server.onEvent = (event) => this.onEvent(event);
     server.onRequest = (event) => this.onRequest(event);
@@ -253,27 +260,30 @@ export class WorkspaceRuntime {
         capabilities: { experimentalApi: true, requestAttestation: false },
       });
       server.notify("initialized");
-      const { account } = await server.call<{ account?: { type: string } }>("account/read", { refreshToken: false });
-      if (account?.type !== "chatgpt") {
-        this.state.provider = { state: "signed-out", message: "Sign in to Codex with ChatGPT, then restart the workspace." };
-      } else {
-        const coordinator = this.sessions.get(coordinatorId)!;
-        if (!coordinator.threadId) await this.attachThread(coordinator);
-        for (const entry of saved ?? []) {
-          if (entry.threadId && this.sessions.get(entry.agent.id)?.threadId === entry.threadId) {
-            await this.resumeThread(entry);
-          } else if (entry.agent.role === "lead" && !this.sessions.get(entry.agent.id)?.threadId) {
-            const lead = this.sessions.get(entry.agent.id)!;
-            try {
-              await this.attachThread(lead);
-              delete lead.agent.unavailableReason;
-            } catch (error) {
-              lead.agent.unavailableReason = errorText(error);
-            }
+      if (this.providerId === "openai") {
+        const { account } = await server.call<{ account?: { type: string } }>("account/read", { refreshToken: false });
+        if (account?.type !== "chatgpt") {
+          this.state.provider = { state: "signed-out", message: "Sign in to Codex with ChatGPT, then restart the workspace." };
+          this.publish();
+          return;
+        }
+      }
+      const coordinator = this.sessions.get(coordinatorId)!;
+      if (!coordinator.threadId) await this.attachThread(coordinator);
+      for (const entry of saved ?? []) {
+        if (entry.threadId && this.sessions.get(entry.agent.id)?.threadId === entry.threadId) {
+          await this.resumeThread(entry);
+        } else if (entry.agent.role === "lead" && !this.sessions.get(entry.agent.id)?.threadId) {
+          const lead = this.sessions.get(entry.agent.id)!;
+          try {
+            await this.attachThread(lead);
+            delete lead.agent.unavailableReason;
+          } catch (error) {
+            lead.agent.unavailableReason = errorText(error);
           }
         }
-        if (!this.storageFailed && !this.closed) this.state.provider = { state: "ready" };
       }
+      if (!this.storageFailed && !this.closed) this.state.provider = { state: "ready" };
     } catch (error) {
       this.state.provider = { state: "error", message: errorText(error) };
     }
@@ -516,14 +526,14 @@ export class WorkspaceRuntime {
         modelProvider: string;
         initialTurnsPage?: { data: RecoveredTurn[] };
       }>("thread/resume", {
-        threadId, cwd: this.sessionCwd(session), modelProvider: "openai",
+        threadId, cwd: this.sessionCwd(session), modelProvider: this.providerId,
         ...this.threadPermissions(session),
         config: workspaceThreadConfig,
         developerInstructions: this.instructions(session),
         excludeTurns: true,
         initialTurnsPage: { limit: 8, itemsView: "full" },
       });
-      if (thread.id !== threadId || modelProvider !== "openai" || this.threadSessions.has(thread.id)) {
+      if (thread.id !== threadId || modelProvider !== this.providerId || this.threadSessions.has(thread.id)) {
         throw new Error("Codex returned an unexpected saved thread.");
       }
       const turn = run?.turnId && (initialTurnsPage?.data ?? thread.turns)?.find((entry) => entry.id === run.turnId);
@@ -607,7 +617,7 @@ export class WorkspaceRuntime {
     const { thread, modelProvider } = await this.server!.call<{ thread: Thread; modelProvider: string }>("thread/start", {
       cwd: this.sessionCwd(session),
       model: process.env.CODEX_MODEL,
-      modelProvider: "openai",
+      modelProvider: this.providerId,
       ...this.threadPermissions(session),
       config: workspaceThreadConfig,
       ephemeral: false,
@@ -617,7 +627,7 @@ export class WorkspaceRuntime {
         : [tool, relayTool, listTool, inspectGitTool, reportTool, decisionTool, ...(session.agent.role === "lead" ? [confirmCoderTool] : [])],
       developerInstructions: this.instructions(session),
     });
-    if (modelProvider !== "openai" || this.threadSessions.has(thread.id)) throw new Error("Codex returned an unexpected thread.");
+    if (modelProvider !== this.providerId || this.threadSessions.has(thread.id)) throw new Error("Codex returned an unexpected thread.");
     session.threadId = thread.id;
     session.freshThread = true;
     session.toolVersion = managementToolVersion;

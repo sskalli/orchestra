@@ -8,6 +8,16 @@ import { WorkspaceRuntime } from "../src/workspace-runtime.ts";
 import { workspaceStore } from "../src/workspace-store.ts";
 import { createFeatureWorktree } from "../src/workspace-worktree.ts";
 import { numberAgentRoles } from "../src/workspace-agent-appearance.ts";
+import { parseWorkspaceArgs } from "../src/workspace-options.ts";
+
+test("workspace launch options select a Codex provider only in live mode", () => {
+  assert.deepEqual(parseWorkspaceArgs([]), { live: false, projectPath: undefined, provider: "openai", feature: false });
+  assert.deepEqual(parseWorkspaceArgs(["--live", "/project", "--provider", "company-gateway"]), {
+    live: true, projectPath: "/project", provider: "company-gateway", feature: false,
+  });
+  assert.throws(() => parseWorkspaceArgs(["--provider", "company-gateway"]), /Usage:/);
+  assert.throws(() => parseWorkspaceArgs(["--live", "--provider"]), /provider ID/);
+});
 
 test("simulation propagates designer failure and delivers all handoffs", async () => {
   const original = globalThis.setTimeout;
@@ -100,6 +110,22 @@ test("legacy saved workspaces migrate on save and new state takes precedence", (
       if (value === undefined) delete process.env[key];
       else process.env[key] = value;
     }
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("custom providers use separate saved workspaces from the default provider", () => {
+  const directory = mkdtempSync(join(tmpdir(), "orchestra-provider-state-"));
+  try {
+    const project = "/example/project";
+    const defaultStore = workspaceStore(project, directory);
+    const providerStore = workspaceStore(project, directory, "company-gateway");
+    const agent = new WorkspaceRuntime({ cwd: project, demo: true }).snapshot().agents[0];
+    defaultStore.save([{ agent }]);
+    providerStore.save([{ agent: { ...agent, name: "Company provider" } }]);
+    assert.equal(defaultStore.load()?.[0].agent.name, agent.name);
+    assert.equal(providerStore.load()?.[0].agent.name, "Company provider");
+  } finally {
     rmSync(directory, { recursive: true, force: true });
   }
 });

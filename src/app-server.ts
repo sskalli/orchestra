@@ -51,11 +51,13 @@ export class AppServer {
   onRequest?: (request: Event & { id: Id }) => Promise<void>;
   onFailure?: (error: Error) => void;
 
-  constructor(cwd: string, environment = process.env, retainEvents = true) {
+  constructor(cwd: string, environment = process.env, retainEvents = true, preserveApiKeys = false) {
     this.retainEvents = retainEvents;
     const env = { ...environment };
-    delete env.OPENAI_API_KEY;
-    delete env.CODEX_API_KEY;
+    if (!preserveApiKeys) {
+      delete env.OPENAI_API_KEY;
+      delete env.CODEX_API_KEY;
+    }
     this.child = spawn(command, ["app-server", "--listen", "stdio://"], {
       cwd,
       env,
