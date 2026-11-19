@@ -61,6 +61,8 @@ createInterface({ input: process.stdin }).on("line", (line) => {
   const { id, method, params, result } = JSON.parse(line);
   if (method === "initialize") reply(id, {});
   else if (method === "account/read") reply(id, { account: { type: "chatgpt" } });
+  else if (method === "config/read") reply(id, { config: { model_provider: null } });
+  else if (method === "model/list") reply(id, { data: [] });
   else if (method === "thread/start") {
     const threadId = ["coordinator", "lead", "coder"][threads.size];
     assert.equal(params.approvalPolicy, threadId === "coder" ? "on-request" : "never");

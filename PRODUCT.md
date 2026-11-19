@@ -2,7 +2,7 @@
 
 This document describes the intended product, including behavior not yet implemented. For the current browser workspace and known limitations, see [WORKSPACE.md](WORKSPACE.md); milestone evidence and remaining work are tracked in [ROADMAP.md](ROADMAP.md).
 
-Orchestra is a local desktop workspace for coordinating coding agents. Open a Git project and give its coordinator a goal in the project chat. The coordinator creates team leads with goals ranging from a single feature to a roadmap release. Leads can split goals into squads, delegate implementation, review and testing, and report progress and blockers to the coordinator. Select any lead or worker to read its conversation and message it directly. Codex is the first provider. Claude is the next candidate.
+Orchestra is a local desktop workspace for coordinating coding agents. Open a Git project and give its coordinator a goal in the project chat. The coordinator can assign an isolated change directly to a coder or create a team lead for coordinated work. Leads can split goals into squads, delegate implementation, review and testing, and report progress and blockers to the coordinator. Select any lead or worker to read its conversation and message it directly. Codex is the first provider. Claude is the next candidate.
 
 ## Workspace
 
@@ -14,11 +14,11 @@ Use compact multiline chat inputs without a focus outline, a terminal prompt mar
 
 ## Agent interactions
 
-Team structure follows useful work boundaries, not a fixed role count or one-coder-per-feature rule. A lead may use one coder for cohesive work or several for independent features or separable parts of a large feature. Each coder has an isolated candidate; its independent reviewers and testers appear as children of that coder. The lead retains acceptance authority. When separate candidates are combined, a tester under the lead validates their integration and regressions before combined acceptance. Avoid redundant delegation and reuse existing agents for repairs.
+Team structure follows useful work boundaries, not a fixed role count or one-coder-per-feature rule. A lead may use one coder for cohesive work or several for independent features or separable parts of a large feature. Each coder has an isolated candidate; when assigned, independent reviewers and testers appear as children of that coder. The coordinator or lead that assigned the coder owns acceptance. When separate candidates are combined, a tester under the lead validates their integration and regressions before combined acceptance. Avoid redundant delegation and reuse existing agents for repairs.
 
 - Idle agents begin a new turn when messaged. Busy agents visibly queue messages for their next turn. Offer a separate Steer current turn action where supported.
 - A spinner means working. Yellow warning means a question or approval needs your response. Green check means assigned work is done and the session remains open. Red warning means a run failed. Blue notice means an optional update is ready to inspect. Idle has no icon.
-- Clicking a status icon opens the relevant conversation at the event. Roll worker warnings and failures up to the lead. If several workers need attention, let the user choose the request.
+- Clicking a status icon opens the relevant conversation at the event. Roll worker warnings and failures up to the lead or direct coder. If several workers need attention, let the user choose the request.
 - Each independent feature squad uses its own Git worktree. Its developers, reviewers and testers operate on the same feature changes. The lead integrates completed work and presents the combined diff and test results. Require user approval before merging into the project branch.
 - Closing the window keeps work running locally. Reopening restores the workspace, conversations and drafts. Explicit quit with active runs shows the affected teams and lets the user return or quit and stop the runs.
 - Show sign-in, reconnecting, and usage-limit states. When the provider blocks new work, preserve the goal, transcript and queued input and explain why progress paused.
