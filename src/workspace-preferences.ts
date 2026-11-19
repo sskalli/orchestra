@@ -4,14 +4,15 @@ export type ComposerSizes = { project?: number; agent?: number };
 
 type View = { leftOpen: boolean; selectedId: string | null; drafts: Record<string, string> };
 
-export function workspacePreferences(projectPath: string, demo: boolean) {
-  const key = `orchestra:workspace:v1:${demo ? "demo" : "codex"}:${projectPath}`;
+export function workspacePreferences(projectPath: string, mode: "demo" | "codex" | "claude") {
+  const key = `orchestra:workspace:v1:${mode}:${projectPath}`;
 
-  const legacyKey = `swarmer:workspace:v1:${demo ? "demo" : "codex"}:${projectPath}`;
+  const legacyKey = `swarmer:workspace:v1:${mode}:${projectPath}`;
 
   function read(name: string): unknown {
     try {
-      return JSON.parse(localStorage.getItem(`${key}:${name}`) ?? localStorage.getItem(`${legacyKey}:${name}`) ?? "null");
+      const saved = localStorage.getItem(`${key}:${name}`);
+      return JSON.parse(saved ?? (mode === "claude" ? null : localStorage.getItem(`${legacyKey}:${name}`)) ?? "null");
     } catch {
       return null;
     }

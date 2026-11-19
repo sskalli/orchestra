@@ -44,7 +44,7 @@ const roleWords: Record<string, string> = {
 
 export function agentAppearance(agent: AgentIdentity) {
   const role = roleSlug(agent);
-  const color = role === "lead" || role === "coder" || role === "reviewer" || role === "tester" || role === "designer" ? role : "other";
+  const color = role === "lead" || role === "coder" || role === "reviewer" || role === "tester" || role === "designer" || role === "researcher" ? role : "other";
   const alias = (roleWords[role] ?? role).replaceAll("-", "[-\\s]+");
   const separator = "[\\s:_|–—-]+";
   const topic = agent.name.toLowerCase().trim()

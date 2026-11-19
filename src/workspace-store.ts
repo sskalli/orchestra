@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import type { WorkspaceAgent } from "./workspace-runtime.ts";
+import type { WorkspaceAgent, WorkspaceProvider } from "./workspace-runtime.ts";
 
 export type SavedSession = {
   agent: WorkspaceAgent;
@@ -12,13 +12,13 @@ export type SavedSession = {
   run?: { messageId: string; turnId?: string };
 };
 
-export function workspaceStore(project: string, directory?: string) {
+export function workspaceStore(project: string, directory?: string, provider: WorkspaceProvider = "codex") {
   const stateRoot = process.env.XDG_STATE_HOME || join(homedir(), ".local", "state");
   const explicitDirectory = directory ?? process.env.ORCHESTRA_STATE_DIR ?? process.env.SWARMER_STATE_DIR;
   directory = explicitDirectory ?? join(stateRoot, "orchestra");
   const filename = createHash("sha256").update(project).digest("hex") + ".json";
-  const path = join(directory, filename);
-  const legacyPath = explicitDirectory ? undefined : join(stateRoot, "swarmer", filename);
+  const path = join(directory, provider === "claude" ? `claude-${filename}` : filename);
+  const legacyPath = explicitDirectory || provider !== "codex" ? undefined : join(stateRoot, "swarmer", filename);
   return {
     load(): SavedSession[] | undefined {
       let contents: string;
