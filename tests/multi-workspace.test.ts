@@ -117,3 +117,34 @@ test("existing single-project sessions without project IDs still resume", async 
     rmSync(directory, { recursive: true, force: true });
   }
 });
+
+test("a shared workspace can reopen after a live message simulation", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "orchestra-simulation-"));
+  process.env.ORCHESTRA_TEST_TRACE = join(directory, "trace.jsonl");
+  const projects = [{ id: "red", path: directory }, { id: "blue", path: tmpdir() }];
+  const store = workspaceStore(workspaceIdentity(projects), join(directory, "state"));
+  const options = { cwd: directory, projects, store };
+  let runtime = new WorkspaceRuntime(options);
+  try {
+    await runtime.start();
+    assert.equal(runtime.snapshot().provider.state, "ready");
+    await runtime.command({ type: "send", agentId: "coordinator", text: "/simulate team-messages" });
+    const simulation = runtime.snapshot().agents.filter((agent) => agent.simulation);
+    assert.equal(simulation.length, 5);
+    await runtime.close();
+    const saved = store.load();
+    assert(saved);
+    assert(saved.every(({ agent }) => !agent.simulation));
+
+    // An older runtime saved simulated agents without assigning them to a project.
+    store.save([...saved, ...simulation.map((agent) => ({ agent }))]);
+    runtime = new WorkspaceRuntime(options);
+    await runtime.start();
+    assert.equal(runtime.snapshot().provider.state, "ready");
+    assert(runtime.snapshot().agents.every((agent) => !agent.simulation));
+  } finally {
+    await runtime.close();
+    delete process.env.ORCHESTRA_TEST_TRACE;
+    rmSync(directory, { recursive: true, force: true });
+  }
+});

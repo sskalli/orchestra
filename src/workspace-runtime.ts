@@ -44,6 +44,7 @@ export type WorkspaceAgent = {
 };
 export type WorkspaceSnapshot = {
   project: { name: string; path: string };
+  modelProvider: string;
   projects: WorkspaceProject[];
   workspaceKey: string;
   provider: { state: "demo" | "connecting" | "ready" | "signed-out" | "error" | "usage-limit"; message?: string };
@@ -223,7 +224,9 @@ export class WorkspaceRuntime {
       project: { name: this.projects.length === 1 ? basename(path) : "Workspace", path },
       projects: this.projects,
       workspaceKey: workspaceIdentity(this.projects),
-      provider: { state: demo ? "demo" : "connecting" }, agents: [],
+      modelProvider: provider,
+      provider: { state: demo ? "demo" : "connecting" },
+      agents: [],
     };
     this.createAgent(coordinatorId, "Coordinator", "coordinator");
     if (demo) this.seedDemo();
@@ -249,7 +252,7 @@ export class WorkspaceRuntime {
     if (this.demo) return;
     let saved: SavedSession[] | undefined;
     try {
-      saved = this.store?.load();
+      saved = this.store?.load()?.filter(({ agent }) => !agent.simulation);
       if (saved) this.restore(saved);
       this.storageReady = true;
     } catch (error) {
@@ -258,7 +261,7 @@ export class WorkspaceRuntime {
       this.publish();
       return;
     }
-    const server = new AppServer(this.state.project.path, process.env, false, this.providerId !== "openai");
+    const server = new AppServer(this.state.project.path, process.env, false);
     this.server = server;
     server.onEvent = (event) => this.onEvent(event);
     server.onRequest = (event) => this.onRequest(event);
@@ -448,7 +451,8 @@ export class WorkspaceRuntime {
   private persist() {
     if (!this.store || !this.storageReady || this.storageFailed) return !this.storageFailed;
     try {
-      this.store.save([...this.sessions.values()].map(({ agent, threadId, freshThread, run, recovery, waitingFor, toolVersion }) => ({
+      const sessions = [...this.sessions.values()].filter(({ agent }) => !agent.simulation);
+      this.store.save(sessions.map(({ agent, threadId, freshThread, run, recovery, waitingFor, toolVersion }) => ({
         waitingFor,
         toolVersion,
         agent,
@@ -564,6 +568,7 @@ export class WorkspaceRuntime {
         initialTurnsPage?: { data: RecoveredTurn[] };
       }>("thread/resume", {
         threadId, cwd: this.sessionCwd(session), modelProvider: this.providerId,
+        model: process.env.CODEX_MODEL,
         ...this.threadPermissions(session),
         config: workspaceThreadConfig,
         developerInstructions: this.instructions(session),

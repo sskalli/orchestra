@@ -45,7 +45,7 @@ wire_api = "responses"
 env_key = "COMPANY_API_KEY"
 ```
 
-Set the named API-key environment variable in your shell and launch Orchestra with the configured provider ID:
+Use a dedicated API-key environment variable such as `COMPANY_API_KEY` and launch Orchestra with the configured provider ID. Orchestra removes `OPENAI_API_KEY` and `CODEX_API_KEY` before launching Codex.
 
 ```bash
 export COMPANY_API_KEY='your-api-key'
@@ -92,7 +92,7 @@ The interface uses locally bundled IBM Plex Mono, neutral terminal styling, and 
 
 ## Local state and shutdown
 
-Live agent identities, transcripts, queues, and Codex thread IDs are stored per workspace and provider under `${XDG_STATE_HOME:-~/.local/state}/orchestra`. Browser preferences are scoped to the workspace, mode, and local server origin. Run one live server per workspace, provider, and state directory.
+Live agent identities, transcripts, queues, and Codex thread IDs are stored per workspace and provider under `${XDG_STATE_HOME:-~/.local/state}/orchestra`. Browser preferences are scoped to the workspace, mode, local server origin, and Codex provider ID. Run one live server per workspace, provider, and state directory.
 
 Closing the browser tab leaves the Node server running. Stop it with Ctrl+C in its terminal. Restart recovery reconciles saved threads with Codex and keeps ordinary queued messages paused for review. Scheduled assignments interrupted while waiting on another agent must be scheduled again.
 
