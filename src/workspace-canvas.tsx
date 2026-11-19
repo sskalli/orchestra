@@ -15,6 +15,7 @@ export type CanvasAgent = {
   duty?: string;
   roleNumber?: number;
   goal?: string;
+  projectLabel?: string;
   status: string;
   activity?: string;
 };
@@ -477,7 +478,8 @@ export function WorkspaceCanvas({
           const showChildStatusIcon = Boolean(status) && selectedRevealed.has(agent.id) && !highlighted.has(agent.id);
           const describedRole = agent.goal ?? agent.duty ?? agent.activity ?? statuses[statusAgent.status]?.label ?? "Idle";
           const tooltipId = `swarm-node-tooltip-${agent.id}`;
-          const label = `${displayName}, ${agent.activity ?? statuses[statusAgent.status]?.label ?? "Idle"}`;
+          const accessibleName = `${displayName}${agent.projectLabel ? `, project ${agent.projectLabel}` : ""}`;
+          const label = `${accessibleName}, ${agent.activity ?? statuses[statusAgent.status]?.label ?? "Idle"}`;
           return (
             <div
               key={agent.id}
@@ -514,7 +516,7 @@ export function WorkspaceCanvas({
                     {status && <button
                       type="button"
                       className={`swarm-team-status-icon status-${statusAgent.status}`}
-                      aria-label={`${displayName}: ${statusLabel}`}
+                      aria-label={`${accessibleName}: ${statusLabel}`}
                       aria-describedby={tooltipId}
                       onClick={() => onStatus(lead &&
                         (statusAgent.status === "error" || statusAgent.status === "attention") ? agent.id : statusAgent.id)}
@@ -533,11 +535,13 @@ export function WorkspaceCanvas({
                     <span>{displayName}</span>
                   </strong>
                   <span title={describedRole}>{describedRole}</span>
+                  {agent.projectLabel && <span>Project: {agent.projectLabel}</span>}
                 </div>
               </div>
               {status && <div className="swarm-node-tooltip" id={tooltipId}>
                 <div className="swarm-node-tooltip-content">
                   <strong>{displayName}</strong>
+                  {agent.projectLabel && <span>Project: {agent.projectLabel}</span>}
                   <span>{agent.activity ?? statuses[statusAgent.status]?.label ?? "Idle"}</span>
                 </div>
               </div>}

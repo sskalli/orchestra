@@ -14,9 +14,10 @@
 .chat-header {
   display: flex;
   align-items: center;
-  flex: 0 0 51px;
+  flex: 0 0 auto;
+  min-height: 51px;
   gap: 12px;
-  padding: 0 16px 0 21px;
+  padding: 6px 16px 6px 21px;
   border-bottom: 1px solid var(--sw-line);
 }
 
@@ -43,6 +44,7 @@
   color: #a3a3a3;
   font-size: .69rem;
   line-height: 1.2;
+  overflow-wrap: anywhere;
 }
 
 .workspace-chat button {

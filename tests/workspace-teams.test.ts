@@ -9,8 +9,8 @@ import { WorkspaceRuntime } from "../src/workspace-runtime.ts";
 import { fingerprintCandidate, integrateCandidates } from "../src/workspace-integration.ts";
 import { createFeatureWorktree } from "../src/workspace-worktree.ts";
 
-function harness(cwd = process.cwd()) {
-  const runtime = new WorkspaceRuntime({ cwd, demo: true });
+function harness(cwd = process.cwd(), projects?: ConstructorParameters<typeof WorkspaceRuntime>[0]["projects"]) {
+  const runtime = new WorkspaceRuntime({ cwd, projects, demo: true });
   const internal = runtime as any;
   internal.restore([{ agent: { id: "coordinator", name: "Pilot", role: "coordinator", status: "idle",
     messages: [], queueDepth: 0, canSteer: false } }]);
@@ -344,8 +344,13 @@ test("check turns capture the exact candidate at begin and reject changes before
 test("integration acceptance needs fresh independent combined-snapshot testing and source changes invalidate it", async (t) => {
   const project = repository(t);
   if (!project) return;
-  const { runtime, internal, create, call } = harness(project);
+  const primary = repository(t);
+  if (!primary) return;
+  const { runtime, internal, create, call } = harness(primary, [
+    { id: "primary", path: primary }, { id: "secondary", path: project },
+  ]);
   const lead = create("lead");
+  lead.agent.projectId = "secondary";
   const first = create("coder-1", "coder", "lead");
   const second = create("coder-2", "coder", "lead");
   for (const [index, coder] of [first, second].entries()) {

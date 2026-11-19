@@ -8,6 +8,8 @@ import { checkClaudeCode, ClaudeCodeError, runClaudeCode } from "./claude-code.t
 import { createFeatureWorktree, describeWorktreePatch } from "./workspace-worktree.ts";
 import { fingerprintCandidate, integrateCandidates } from "./workspace-integration.ts";
 import type { SavedSession, workspaceStore } from "./workspace-store.ts";
+import { defaultProject, workspaceIdentity } from "./workspace-projects.ts";
+import type { WorkspaceProject } from "./workspace-projects.ts";
 
 export type AgentStatus = "idle" | "working" | "attention" | "awaiting-confirmation" | "done" | "error" | "notice";
 export type AgentRole = "coordinator" | "lead" | "worker";
@@ -29,6 +31,7 @@ export type WorkspaceAgent = {
   name: string;
   role: AgentRole;
   parentId?: string;
+  projectId?: string;
   goal?: string;
   duty?: Duty;
   candidate?: Candidate;
@@ -53,6 +56,8 @@ export type WorkspaceProvider = "codex" | "claude";
 export type WorkspaceSnapshot = {
   project: { name: string; path: string };
   modelProvider: string;
+  projects: WorkspaceProject[];
+  workspaceKey: string;
   provider: { name: WorkspaceProvider; state: "demo" | "connecting" | "ready" | "signed-out" | "error" | "usage-limit"; message?: string };
   agents: WorkspaceAgent[];
 };
@@ -90,7 +95,7 @@ type AgentSession = {
 };
 
 const coordinatorId = "coordinator";
-const managementToolVersion = 7;
+const managementToolVersion = 8;
 const workspaceThreadConfig = { "features.multi_agent": false, "features.multi_agent_v2": false };
 const input = (text: string) => [{ type: "text", text, text_elements: [] }];
 const hasSubmittedMessage = (agent: WorkspaceAgent) =>
@@ -99,11 +104,12 @@ const tool = {
   type: "function",
   deferLoading: false,
   name: "delegate_agent",
-  description: "Start an addressable team lead, coder, reviewer, tester, analyser, designer, or product adviser. The pilot can start teams or read-only tasks. Leads can start multiple coders in isolated worktrees. Set afterAgentId to attach a check to that coder and wait for its current submission. Coders can delegate reviewer, tester, or designer children for their own candidate.",
+  description: "Start an addressable team lead, coder, reviewer, tester, analyser, designer, or product adviser. The pilot can start teams or read-only tasks. Leads can start multiple coders in isolated worktrees. Set afterAgentId to attach a check to that coder and wait for its current submission. Coders can delegate reviewer, tester, or designer children for their own candidate. In a multi-repository workspace, the pilot must provide a configured projectId. Workers inherit their team’s project.",
   inputSchema: {
     type: "object",
     properties: { name: { type: "string" }, goal: { type: "string" },
       duty: { type: "string", enum: ["lead", "coder", "reviewer", "tester", "analyser", "designer", "pm"] },
+      projectId: { type: "string" },
       afterAgentId: { type: "string" } },
     required: ["name", "goal", "duty"],
     additionalProperties: false,
@@ -113,8 +119,8 @@ const inspectGitTool = {
   type: "function",
   deferLoading: false,
   name: "inspect_project_git",
-  description: "Read current local branches, HEAD, and worktree status. Use this for fresh Git facts when asked to recheck the project.",
-  inputSchema: { type: "object", properties: {}, additionalProperties: false },
+  description: "Read current local branches, HEAD, and worktree status. The pilot must specify projectId in a multi-repository workspace; leads inspect their assigned project.",
+  inputSchema: { type: "object", properties: { projectId: { type: "string" } }, additionalProperties: false },
 };
 
 function inspectGit(cwd: string) {
@@ -214,6 +220,7 @@ export class WorkspaceRuntime {
   private readonly state: WorkspaceSnapshot;
   private readonly demo: boolean;
   private readonly providerId: string;
+  private readonly projects: WorkspaceProject[];
   private readonly store?: ReturnType<typeof workspaceStore>;
   private storageFailed = false;
   private storageReady = false;
@@ -227,15 +234,34 @@ export class WorkspaceRuntime {
   private simulationRunning = false;
   private readonly simulationTimers = new Set<ReturnType<typeof setTimeout>>();
 
-  constructor({ cwd, demo = false, store, provider = "codex", modelProvider = "openai", claudeExecutable }: {
-    cwd: string; demo?: boolean; store?: ReturnType<typeof workspaceStore>; provider?: WorkspaceProvider; modelProvider?: string; claudeExecutable?: string;
+  constructor({ cwd, projects = [defaultProject(cwd)], demo = false, provider = "codex", modelProvider = "openai", store, claudeExecutable }: {
+    cwd: string;
+    projects?: WorkspaceProject[];
+    demo?: boolean;
+    provider?: WorkspaceProvider;
+    modelProvider?: string;
+    claudeExecutable?: string;
+    store?: ReturnType<typeof workspaceStore>;
   }) {
-    const path = resolve(cwd);
+    if (!projects.length || new Set(projects.map((project) => project.id)).size !== projects.length ||
+        new Set(projects.map((project) => resolve(project.path))).size !== projects.length) {
+      throw new Error("Workspace projects must have unique IDs and paths.");
+    }
+    this.projects = projects.map((project) => ({ id: project.id, path: resolve(project.path) }))
+      .sort((a, b) => a.id.localeCompare(b.id));
+    const path = this.projects[0].path;
     this.demo = demo;
     this.providerId = modelProvider;
     this.store = demo ? undefined : store;
     this.claudeExecutable = claudeExecutable;
-    this.state = { project: { name: basename(path), path }, modelProvider, provider: { name: provider, state: demo ? "demo" : "connecting" }, agents: [] };
+    this.state = {
+      project: { name: this.projects.length === 1 ? basename(path) : "Workspace", path },
+      projects: this.projects,
+      workspaceKey: workspaceIdentity(this.projects),
+      modelProvider,
+      provider: { name: provider, state: demo ? "demo" : "connecting" },
+      agents: [],
+    };
     const coordinator = this.createAgent(coordinatorId, "Coordinator", "coordinator");
     if (!demo && provider === "claude") coordinator.agent.messages.push(message("system",
       "Claude Code is available for chat. Project tools, team delegation, approval requests and steering are unavailable in this mode.", "notice"));
@@ -268,7 +294,7 @@ export class WorkspaceRuntime {
     if (this.demo) return;
     let saved: SavedSession[] | undefined;
     try {
-      saved = this.store?.load();
+      saved = this.store?.load()?.filter(({ agent }) => !agent.simulation);
       if (saved) this.restore(saved);
       this.storageReady = true;
     } catch (error) {
@@ -683,7 +709,8 @@ export class WorkspaceRuntime {
   private persist() {
     if (!this.store || !this.storageReady || this.storageFailed) return !this.storageFailed;
     try {
-      this.store.save([...this.sessions.values()].map(({ agent, threadId, freshThread, run, recovery, waitingFor, toolVersion }) => ({
+      const sessions = [...this.sessions.values()].filter(({ agent }) => !agent.simulation);
+      this.store.save(sessions.map(({ agent, threadId, freshThread, run, recovery, waitingFor, toolVersion }) => ({
         waitingFor,
         toolVersion,
         agent,
@@ -724,7 +751,9 @@ export class WorkspaceRuntime {
   }
 
   private createAgent(id: string, name: string, role: AgentRole, parentId?: string, goal?: string) {
-    const agent: WorkspaceAgent = { id, name, role, parentId, goal, status: "idle", messages: [], queueDepth: 0, canSteer: false };
+    const parent = parentId ? this.sessions.get(parentId) : undefined;
+    const agent: WorkspaceAgent = { id, name, role, parentId, goal, projectId: role === "coordinator" ? undefined : parent?.agent.projectId ?? (this.projects.length === 1 ? this.projects[0].id : undefined),
+      status: "idle", messages: [], queueDepth: 0, canSteer: false };
     const session: AgentSession = { agent, queue: [], stream: new Map(), approvals: new Map() };
     this.state.agents.push(agent);
     this.sessions.set(id, session);
@@ -732,6 +761,22 @@ export class WorkspaceRuntime {
   }
 
   private restore(saved: SavedSession[]) {
+    const entries = new Map(saved.map((entry) => [entry.agent.id, entry]));
+    if (this.projects.length === 1) {
+      for (const { agent } of saved) {
+        if (agent.role !== "coordinator") agent.projectId = this.projects[0].id;
+      }
+    }
+    for (const { agent } of saved) {
+      if (agent.role === "coordinator") continue;
+      if (!this.projects.some((project) => project.id === agent.projectId)) {
+        throw new Error(`Saved agent ${agent.name} has an unknown project.`);
+      }
+      const parent = agent.parentId && entries.get(agent.parentId)?.agent;
+      if (!parent || (parent.role !== "coordinator" && parent.projectId !== agent.projectId)) {
+        throw new Error(`Saved agent ${agent.name} has an invalid project assignment.`);
+      }
+    }
     this.sessions.clear();
     this.state.agents.length = 0;
     for (const { agent, threadId, run, waitingFor } of saved) {
@@ -852,7 +897,27 @@ export class WorkspaceRuntime {
   }
 
   private sessionCwd(session: AgentSession) {
-    return session.agent.candidate?.path ?? this.state.project.path;
+    if (session.agent.candidate) return session.agent.candidate.path;
+    if (session.agent.role === "coordinator") return this.projects[0].path;
+    return this.projectForAgent(session).path;
+  }
+
+  private projectForAgent(session: AgentSession) {
+    const project = this.projects.find((entry) => entry.id === session.agent.projectId);
+    if (!project) throw new Error("This agent has no configured project.");
+    return project;
+  }
+
+  private selectProject(session: AgentSession, requested: unknown) {
+    if (session.agent.role !== "coordinator") {
+      const project = this.projectForAgent(session);
+      if (requested !== undefined && requested !== project.id) throw new Error("A team cannot change its assigned project.");
+      return project;
+    }
+    if (requested === undefined && this.projects.length === 1) return this.projects[0];
+    const project = this.projects.find((entry) => entry.id === requested);
+    if (!project) throw new Error(`Choose a projectId from: ${this.projects.map((entry) => entry.id).join(", ")}.`);
+    return project;
   }
 
   private threadPermissions(session: AgentSession) {
@@ -871,8 +936,15 @@ export class WorkspaceRuntime {
   private instructions(session: AgentSession) {
     const role = session.agent.role === "worker" ? session.agent.duty ?? "analyser" : session.agent.role;
     const instructions = readFileSync(new URL(`../roles/${role}.md`, import.meta.url), "utf8");
-    return "Follow the project's AGENTS.md for coding conventions, commands, and local workflow. " +
-      "Use Orchestra's tools for delegation and product questions.\n\n" + instructions;
+    const projectContext = session.agent.role === "coordinator"
+      ? `Configured projects (ID and repository root): ${JSON.stringify(this.projects)}. ` +
+        (this.projects.length === 1
+          ? "Follow the project's AGENTS.md for coding conventions, commands, and local workflow."
+          : "Specify projectId when delegating or inspecting Git. Ask the user if the intended project is unclear. Never guess a project.")
+      : `Your assigned project is ${this.projectForAgent(session).id}; its source repository is ${this.projectForAgent(session).path}. ` +
+        `Your working directory is ${this.sessionCwd(session)}. Stay in that working directory and follow its AGENTS.md. ` +
+        (session.agent.candidate ? "Work on the candidate worktree, not the original checkout." : "");
+    return `${projectContext}\nUse Orchestra's tools for delegation and product questions.\n\n${instructions}`;
   }
 
   private async attachThread(session: AgentSession) {
@@ -907,7 +979,7 @@ export class WorkspaceRuntime {
     const reports = team.map(({ agent }) => {
       const recent = agent.messages.findLast((entry) => entry.role === "assistant" && !entry.state);
       return {
-        agentId: agent.id, parentId: agent.parentId, name: agent.name, duty: agent.duty,
+        agentId: agent.id, parentId: agent.parentId, projectId: agent.projectId, name: agent.name, duty: agent.duty,
         status: agent.status, submissionId: agent.submissionId,
         check: agent.check && { ...agent.check, summary: agent.check.summary.slice(0, 2400) },
         latestReply: recent?.text.slice(0, 2400),
@@ -1390,7 +1462,8 @@ export class WorkspaceRuntime {
       }
       if (session.agent.role === "worker" && session.agent.duty !== "coder") throw new Error("Workers can raise product decisions through their parent.");
       if (params.tool === inspectGitTool.name) {
-        reply(true, JSON.stringify(inspectGit(this.sessionCwd(session))));
+        const project = this.selectProject(session, params.arguments?.projectId);
+        reply(true, JSON.stringify(inspectGit(session.agent.role === "coordinator" ? project.path : this.sessionCwd(session))));
         return;
       }
       const reports = this.subtree(session).filter((entry) => entry !== session && this.isActive(entry));
@@ -1452,7 +1525,7 @@ export class WorkspaceRuntime {
           if (fingerprint !== coder.agent.submissionFingerprint) throw new Error("A coder candidate changed after acceptance. Resubmit and validate it first.");
           return { agentId: id, ...coder.agent.candidate, submissionId: coder.agent.submissionId, expectedFingerprint: fingerprint };
         });
-        const combined = integrateCandidates(this.state.project.path, sources);
+        const combined = integrateCandidates(this.projectForAgent(session).path, sources);
         session.agent.integration = { id: randomUUID(), ...combined };
         const notice = `Integration candidate created at ${combined.path}. Delegate an independent tester without afterAgentId, then confirm_integration. Project files and branch are unchanged.`;
         session.agent.messages.push(message("system", notice, "notice"));
@@ -1481,7 +1554,7 @@ export class WorkspaceRuntime {
       }
       if (params.tool === listTool.name) {
         reply(true, JSON.stringify(reports.map(({ agent }) => ({
-          id: agent.id, parentId: agent.parentId, name: agent.name, role: agent.role, duty: agent.duty, goal: agent.goal, status: agent.status,
+          id: agent.id, projectId: agent.projectId, parentId: agent.parentId, name: agent.name, role: agent.role, duty: agent.duty, goal: agent.goal, status: agent.status,
           submissionId: agent.submissionId, validationTargetId: agent.validationTargetId, candidate: agent.candidate?.path, check: agent.check,
         }))));
         return;
@@ -1510,11 +1583,12 @@ export class WorkspaceRuntime {
       if ((duty === "lead" && session.agent.role !== "coordinator") || (duty === "coder" && session.agent.role !== "lead")) {
         throw new Error("The pilot starts leads. A lead starts coders.");
       }
+      const project = this.selectProject(session, params.arguments?.projectId);
       const checkDuty = duty === "tester" || duty === "reviewer" || duty === "designer";
       if (session.agent.duty === "coder" && !checkDuty) throw new Error("Coders may delegate only reviewer, tester, or designer checks for their own work.");
       const after = params.arguments?.afterAgentId ?? (session.agent.duty === "coder" ? session.agent.id : undefined);
       const prerequisite = after === undefined ? undefined : session.agent.duty === "coder" && after === session.agent.id
-        ? session : reports.find((entry) => entry.agent.id === after && entry.agent.duty === "coder");
+        ? session : reports.find((entry) => entry.agent.id === after && entry.agent.duty === "coder" && entry.agent.projectId === project.id);
       if (after !== undefined && (!prerequisite || !checkDuty ||
           (!prerequisite.run && !coderIsReady(prerequisite.agent) && prerequisite.agent.status !== "working"))) {
         throw new Error("Schedule review, design review, or testing after an active or completed coder on your team.");
@@ -1523,10 +1597,11 @@ export class WorkspaceRuntime {
       if (!prerequisite && (duty === "reviewer" || duty === "tester") && session.agent.role === "lead" && !integrationCheck) {
         throw new Error("Set afterAgentId to the coder to validate, or create an integration candidate first.");
       }
-      const candidate = duty === "coder" ? createFeatureWorktree(this.state.project.path)
+      const candidate = duty === "coder" ? createFeatureWorktree(project.path)
         : prerequisite?.agent.candidate ?? (integrationCheck ? { path: integrationCheck.path, base: integrationCheck.base } : session.agent.candidate);
       const parentId = prerequisite?.agent.id ?? session.agent.id;
       const agent = this.createAgent(randomUUID(), name, duty === "lead" ? "lead" : "worker", parentId, goal);
+      agent.agent.projectId = project.id;
       agent.agent.duty = duty === "lead" ? undefined : duty;
       agent.agent.candidate = candidate;
       if (prerequisite || integrationCheck) agent.agent.validationTargetId = prerequisite?.agent.id ?? session.agent.id;
@@ -1555,7 +1630,7 @@ export class WorkspaceRuntime {
       }
       if (agent.agent.status !== "error") this.signal(session.agent.id, agent.agent.id);
       reply(agent.agent.status !== "error", JSON.stringify({
-        id: agent.agent.id, name, duty, waitingFor: agent.waitingFor, candidate: agent.agent.candidate?.path,
+        id: agent.agent.id, projectId: project.id, name, duty, waitingFor: agent.waitingFor, candidate: agent.agent.candidate?.path,
       }));
     } catch (error) {
       reply(false, errorText(error));
