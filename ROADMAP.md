@@ -4,7 +4,7 @@ The workspace is currently a local Node server and browser UI, not a packaged de
 
 ## 1. Prove the Codex workflow
 
-**Recorded status:** Accepted on November 11, 2026 for the terminal harness, including routed approval, queueing, and steering. See [CODEX-SPIKE.md](CODEX-SPIKE.md). This does not establish approval routing in the browser workspace.
+**Recorded status:** Accepted on November 11, 2026 for the terminal harness, including routed approval, queueing, and steering. See [CODEX-SPIKE.md](CODEX-SPIKE.md). This does not establish approval routing in the browser workspace. The [v1 capability spike](CODEX-CAPABILITY-SPIKE.md) records a separate live check of model selection, token events, reconnect and local skills.
 
 Run a real local Codex App Server session signed in with ChatGPT. Prove that a coordinator can create a lead with a goal, the lead can start two workers, and a user can independently message either worker and see the reply on its thread. Capture an approval from a real worker and route it to the correct conversation. Verify queueing a follow-up while busy and record whether steering works. A terminal harness is sufficient. Record runtime version, reproduction steps, and any unsupported behaviors.
 
