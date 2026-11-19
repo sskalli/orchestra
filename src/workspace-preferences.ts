@@ -4,15 +4,18 @@ export type ComposerSizes = { project?: number; agent?: number };
 
 type View = { leftOpen: boolean; selectedId: string | null; drafts: Record<string, string> };
 
-export function workspacePreferences(projectPath: string, mode: "demo" | "codex" | "claude") {
-  const key = `orchestra:workspace:v1:${mode}:${projectPath}`;
-
-  const legacyKey = `swarmer:workspace:v1:${mode}:${projectPath}`;
+export function workspacePreferences(projectPath: string, mode: "demo" | "codex" | "claude", modelProvider = "openai") {
+  const customProvider = mode === "codex" && modelProvider !== "openai";
+  const key = customProvider
+    ? `orchestra:workspace:v1:codex-provider:${modelProvider}:${projectPath}`
+    : `orchestra:workspace:v1:${mode}:${projectPath}`;
+  const legacyKey = customProvider || mode === "claude" ? undefined : `swarmer:workspace:v1:${mode}:${projectPath}`;
 
   function read(name: string): unknown {
     try {
-      const saved = localStorage.getItem(`${key}:${name}`);
-      return JSON.parse(saved ?? (mode === "claude" ? null : localStorage.getItem(`${legacyKey}:${name}`)) ?? "null");
+      const value = localStorage.getItem(`${key}:${name}`)
+        ?? (legacyKey ? localStorage.getItem(`${legacyKey}:${name}`) : null);
+      return JSON.parse(value ?? "null");
     } catch {
       return null;
     }

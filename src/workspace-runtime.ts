@@ -52,6 +52,7 @@ export type WorkspaceAgent = {
 export type WorkspaceProvider = "codex" | "claude";
 export type WorkspaceSnapshot = {
   project: { name: string; path: string };
+  modelProvider: string;
   provider: { name: WorkspaceProvider; state: "demo" | "connecting" | "ready" | "signed-out" | "error" | "usage-limit"; message?: string };
   agents: WorkspaceAgent[];
 };
@@ -212,6 +213,7 @@ function errorText(error: unknown) {
 export class WorkspaceRuntime {
   private readonly state: WorkspaceSnapshot;
   private readonly demo: boolean;
+  private readonly providerId: string;
   private readonly store?: ReturnType<typeof workspaceStore>;
   private storageFailed = false;
   private storageReady = false;
@@ -225,14 +227,15 @@ export class WorkspaceRuntime {
   private simulationRunning = false;
   private readonly simulationTimers = new Set<ReturnType<typeof setTimeout>>();
 
-  constructor({ cwd, demo = false, store, provider = "codex", claudeExecutable }: {
-    cwd: string; demo?: boolean; store?: ReturnType<typeof workspaceStore>; provider?: WorkspaceProvider; claudeExecutable?: string;
+  constructor({ cwd, demo = false, store, provider = "codex", modelProvider = "openai", claudeExecutable }: {
+    cwd: string; demo?: boolean; store?: ReturnType<typeof workspaceStore>; provider?: WorkspaceProvider; modelProvider?: string; claudeExecutable?: string;
   }) {
     const path = resolve(cwd);
     this.demo = demo;
+    this.providerId = modelProvider;
     this.store = demo ? undefined : store;
     this.claudeExecutable = claudeExecutable;
-    this.state = { project: { name: basename(path), path }, provider: { name: provider, state: demo ? "demo" : "connecting" }, agents: [] };
+    this.state = { project: { name: basename(path), path }, modelProvider, provider: { name: provider, state: demo ? "demo" : "connecting" }, agents: [] };
     const coordinator = this.createAgent(coordinatorId, "Coordinator", "coordinator");
     if (!demo && provider === "claude") coordinator.agent.messages.push(message("system",
       "Claude Code is available for chat. Project tools, team delegation, approval requests and steering are unavailable in this mode.", "notice"));
@@ -305,28 +308,31 @@ export class WorkspaceRuntime {
         capabilities: { experimentalApi: true, requestAttestation: false },
       });
       server.notify("initialized");
-      const { account } = await server.call<{ account?: { type: string } }>("account/read", { refreshToken: false });
-      if (account?.type !== "chatgpt") {
-        this.setProvider("signed-out", "Sign in to Codex with ChatGPT, then restart the workspace.");
-      } else {
-        const coordinator = this.sessions.get(coordinatorId)!;
-        if (!coordinator.threadId) await this.attachThread(coordinator);
-        for (const entry of saved ?? []) {
-          if (entry.agent.archivedAt) continue;
-          if (entry.threadId && this.sessions.get(entry.agent.id)?.threadId === entry.threadId) {
-            await this.resumeThread(entry);
-          } else if (entry.agent.role === "lead" && !this.sessions.get(entry.agent.id)?.threadId) {
-            const lead = this.sessions.get(entry.agent.id)!;
-            try {
-              await this.attachThread(lead);
-              delete lead.agent.unavailableReason;
-            } catch (error) {
-              lead.agent.unavailableReason = errorText(error);
-            }
+      if (this.providerId === "openai") {
+        const { account } = await server.call<{ account?: { type: string } }>("account/read", { refreshToken: false });
+        if (account?.type !== "chatgpt") {
+          this.setProvider("signed-out", "Sign in to Codex with ChatGPT, then restart the workspace.");
+          this.publish();
+          return;
+        }
+      }
+      const coordinator = this.sessions.get(coordinatorId)!;
+      if (!coordinator.threadId) await this.attachThread(coordinator);
+      for (const entry of saved ?? []) {
+        if (entry.agent.archivedAt) continue;
+        if (entry.threadId && this.sessions.get(entry.agent.id)?.threadId === entry.threadId) {
+          await this.resumeThread(entry);
+        } else if (entry.agent.role === "lead" && !this.sessions.get(entry.agent.id)?.threadId) {
+          const lead = this.sessions.get(entry.agent.id)!;
+          try {
+            await this.attachThread(lead);
+            delete lead.agent.unavailableReason;
+          } catch (error) {
+            lead.agent.unavailableReason = errorText(error);
           }
         }
-        if (!this.storageFailed && !this.closed) this.setProvider("ready");
       }
+      if (!this.storageFailed && !this.closed) this.setProvider("ready");
     } catch (error) {
       this.setProvider("error", errorText(error));
     }
@@ -777,14 +783,15 @@ export class WorkspaceRuntime {
         modelProvider: string;
         initialTurnsPage?: { data: RecoveredTurn[] };
       }>("thread/resume", {
-        threadId, cwd: this.sessionCwd(session), modelProvider: "openai",
+        threadId, cwd: this.sessionCwd(session), modelProvider: this.providerId,
+        model: process.env.CODEX_MODEL,
         ...this.threadPermissions(session),
         config: workspaceThreadConfig,
         developerInstructions: this.instructions(session),
         excludeTurns: true,
         initialTurnsPage: { limit: 8, itemsView: "full" },
       });
-      if (thread.id !== threadId || modelProvider !== "openai" || this.threadSessions.has(thread.id)) {
+      if (thread.id !== threadId || modelProvider !== this.providerId || this.threadSessions.has(thread.id)) {
         throw new Error("Codex returned an unexpected saved thread.");
       }
       const turn = run?.turnId && (initialTurnsPage?.data ?? thread.turns)?.find((entry) => entry.id === run.turnId);
@@ -874,7 +881,7 @@ export class WorkspaceRuntime {
     const { thread, modelProvider } = await this.server!.call<{ thread: Thread; modelProvider: string }>("thread/start", {
       cwd: this.sessionCwd(session),
       model: process.env.CODEX_MODEL,
-      modelProvider: "openai",
+      modelProvider: this.providerId,
       ...this.threadPermissions(session),
       config: workspaceThreadConfig,
       ephemeral: false,
@@ -885,7 +892,7 @@ export class WorkspaceRuntime {
           ...(session.agent.role === "lead" ? [confirmCoderTool, integrateTool, confirmIntegrationTool] : [])],
       developerInstructions: this.instructions(session),
     });
-    if (modelProvider !== "openai" || this.threadSessions.has(thread.id)) throw new Error("Codex returned an unexpected thread.");
+    if (modelProvider !== this.providerId || this.threadSessions.has(thread.id)) throw new Error("Codex returned an unexpected thread.");
     session.threadId = thread.id;
     session.freshThread = true;
     session.toolVersion = managementToolVersion;

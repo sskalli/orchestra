@@ -97,7 +97,7 @@ function Workspace() {
   }
 
   const mode = snapshot.provider.state === "demo" ? "demo" : snapshot.provider.name;
-  return <WorkspaceView key={JSON.stringify([snapshot.project.path, mode])} snapshot={snapshot} connected={connected} mode={mode} signals={signals} />;
+  return <WorkspaceView key={JSON.stringify([snapshot.project.path, mode, snapshot.modelProvider])} snapshot={snapshot} connected={connected} mode={mode} signals={signals} />;
 }
 
 function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snapshot; connected: boolean; mode: "demo" | Snapshot["provider"]["name"]; signals: AgentSignal[] }) {
@@ -109,7 +109,7 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
     return () => window.removeEventListener("orchestra-storage-unavailable", onFailure);
   }, []);
   const agents = numberAgentRoles(snapshot.agents.map((agent) => ({ ...agent, status: effectiveAgentStatus(agent) })));
-  const [preferences] = useState(() => workspacePreferences(project.path, mode));
+  const [preferences] = useState(() => workspacePreferences(project.path, mode, snapshot.modelProvider));
   const [saved] = useState(preferences.readView);
   const [savedCamera] = useState(preferences.readCamera);
   const [panelSizes, setPanelSizes] = useState(preferences.readPanels);

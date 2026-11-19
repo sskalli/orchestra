@@ -8,6 +8,59 @@ import { WorkspaceRuntime } from "../src/workspace-runtime.ts";
 import { workspaceStore } from "../src/workspace-store.ts";
 import { createFeatureWorktree } from "../src/workspace-worktree.ts";
 import { numberAgentRoles } from "../src/workspace-agent-appearance.ts";
+import { parseWorkspaceArgs } from "../src/workspace-options.ts";
+import { workspacePreferences } from "../src/workspace-preferences.ts";
+
+test("workspace launch options select a Codex provider only in live mode", () => {
+  assert.deepEqual(parseWorkspaceArgs([]), { live: false, projectPath: undefined, provider: "openai", feature: false });
+  assert.deepEqual(parseWorkspaceArgs(["--live", "/project", "--provider", "company-gateway"]), {
+    live: true, projectPath: "/project", provider: "company-gateway", feature: false,
+  });
+  assert.deepEqual(parseWorkspaceArgs(["--claude", "/project"]), {
+    live: true, projectPath: "/project", provider: "openai", feature: false, claude: true,
+  });
+  assert.throws(() => parseWorkspaceArgs(["--provider", "company-gateway"]), /Usage:/);
+  assert.throws(() => parseWorkspaceArgs(["--live", "--provider"]), /provider ID/);
+  assert.throws(() => parseWorkspaceArgs(["--claude", "/project", "--provider", "company-gateway"]));
+});
+
+test("browser drafts stay with their mode and Codex model provider", () => {
+  const original = Object.getOwnPropertyDescriptor(globalThis, "localStorage");
+  const state = new Map<string, string>();
+  Object.defineProperty(globalThis, "localStorage", {
+    configurable: true,
+    value: {
+      getItem: (key: string) => state.get(key) ?? null,
+      setItem: (key: string, value: string) => state.set(key, value),
+    },
+  });
+  try {
+    const project = "/example/project";
+    state.set("swarmer:workspace:v1:codex:/example/project:view", JSON.stringify({
+      drafts: { coordinator: "Default draft" },
+    }));
+
+    const company = workspacePreferences(project, "codex", "company-gateway");
+    assert.deepEqual(company.readView().drafts, {});
+    company.writeView({ leftOpen: true, selectedId: null, drafts: { coordinator: "Company draft" } });
+
+    const defaultProvider = workspacePreferences(project, "codex", "openai");
+    assert.deepEqual(defaultProvider.readView().drafts, { coordinator: "Default draft" });
+    defaultProvider.writeView({ ...defaultProvider.readView(), drafts: { coordinator: "Updated default draft" } });
+    const claude = workspacePreferences(project, "claude");
+    assert.deepEqual(claude.readView().drafts, {});
+    claude.writeView({ ...claude.readView(), drafts: { coordinator: "Claude draft" } });
+
+    assert.deepEqual(workspacePreferences(project, "codex").readView().drafts, { coordinator: "Updated default draft" });
+    assert.deepEqual(workspacePreferences(project, "codex", "company-gateway").readView().drafts, { coordinator: "Company draft" });
+    assert.deepEqual(workspacePreferences(project, "codex", "another-gateway").readView().drafts, {});
+    assert.deepEqual(workspacePreferences(project, "claude").readView().drafts, { coordinator: "Claude draft" });
+    assert.deepEqual(workspacePreferences(project, "demo").readView().drafts, {});
+  } finally {
+    if (original) Object.defineProperty(globalThis, "localStorage", original);
+    else Reflect.deleteProperty(globalThis, "localStorage");
+  }
+});
 
 test("simulation propagates designer failure and delivers all handoffs", async () => {
   const original = globalThis.setTimeout;
@@ -100,6 +153,22 @@ test("legacy saved workspaces migrate on save and new state takes precedence", (
       if (value === undefined) delete process.env[key];
       else process.env[key] = value;
     }
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("custom providers use separate saved workspaces from the default provider", () => {
+  const directory = mkdtempSync(join(tmpdir(), "orchestra-provider-state-"));
+  try {
+    const project = "/example/project";
+    const defaultStore = workspaceStore(project, directory);
+    const providerStore = workspaceStore(project, directory, "company-gateway");
+    const agent = new WorkspaceRuntime({ cwd: project, demo: true }).snapshot().agents[0];
+    defaultStore.save([{ agent }]);
+    providerStore.save([{ agent: { ...agent, name: "Company provider" } }]);
+    assert.equal(defaultStore.load()?.[0].agent.name, agent.name);
+    assert.equal(providerStore.load()?.[0].agent.name, "Company provider");
+  } finally {
     rmSync(directory, { recursive: true, force: true });
   }
 });

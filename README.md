@@ -35,6 +35,25 @@ CODEX_BIN=/usr/lib/chatgpt/resources/codex \
 
 Live model turns consume the signed-in account's Codex allowance. Account billing and credit settings determine whether additional usage can incur charges.
 
+To use a separately configured Codex custom provider instead, configure it in Codex's `config.toml` and pass its provider ID. For example:
+
+```toml
+[model_providers.company]
+name = "Company gateway"
+base_url = "https://gateway.example.com/v1"
+wire_api = "responses"
+env_key = "COMPANY_API_KEY"
+```
+
+Use a dedicated API-key environment variable such as `COMPANY_API_KEY` and launch Orchestra with the configured provider ID. Orchestra removes `OPENAI_API_KEY` and `CODEX_API_KEY` before launching Codex.
+
+```bash
+export COMPANY_API_KEY='your-api-key'
+npm run workspace -- --live /absolute/path/to/project --provider company
+```
+
+The endpoint must support the Responses API expected by Codex. Use a custom provider ID (not the built-in `openai` ID). The default `openai` mode continues to use ChatGPT sign-in. Custom-provider sessions have separate saved state from the default mode; they do not continue ChatGPT-authenticated threads. Configure the provider's model in Codex or set `CODEX_MODEL` when launching Orchestra.
+
 The coordinator appears as **Computer** in the project chat. You can refine a goal before delegating work, ask for an analysis or design review, or create a team with a lead, coder, reviewer, and tester.
 
 For example, ask the coordinator to implement a feature with acceptance criteria, arrange independent review, and schedule regression tests after the coder finishes. You can send follow-ups to the coordinator, lead, or individual workers throughout the workflow.
@@ -75,13 +94,14 @@ The interface uses locally bundled IBM Plex Mono, neutral terminal styling, and 
 
 ## Local state and shutdown
 
-Live agent identities, transcripts, queues, and Codex thread IDs are stored per project under `${XDG_STATE_HOME:-~/.local/state}/orchestra`. Browser preferences are scoped to the project, mode, and local server origin. Run one live server per project and state directory.
+Live agent identities, transcripts, queues, and Codex thread IDs are stored per project under `${XDG_STATE_HOME:-~/.local/state}/orchestra`. Browser preferences are scoped to the project, mode, local server origin, and Codex provider ID. Run one live server per project and state directory.
 
 Closing the browser tab leaves the Node server running. Stop it with Ctrl+C in its terminal. Restart recovery reconciles saved threads with Codex and keeps ordinary queued messages paused for review. Scheduled assignments interrupted while waiting on another agent must be scheduled again.
 
 | Setting | Purpose |
 | --- | --- |
 | `CODEX_BIN` | Codex executable, defaulting to `codex` on `PATH` |
+| `CODEX_MODEL` | Optional model override for Codex threads |
 | `CLAUDE_BIN` | Claude Code executable, defaulting to `claude` on `PATH` |
 | `ORCHESTRA_PORT` | Local server port, defaulting to `4317` |
 | `ORCHESTRA_STATE_DIR` | Override the directory for saved live workspace state |

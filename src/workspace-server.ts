@@ -5,17 +5,12 @@ import { extname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { WorkspaceRuntime } from "./workspace-runtime.ts";
 import { workspaceStore } from "./workspace-store.ts";
+import { parseWorkspaceArgs } from "./workspace-options.ts";
 
-const args = process.argv.slice(2);
-const provider = args[0] === "--claude" ? "claude" : "codex";
-const live = args[0] === "--live" || args[0] === "--claude";
-const feature = args.at(-1) === "--feature";
-if (feature) args.pop();
-if ((!live && (args.length || feature)) || args.length > 2 || args[1]?.startsWith("--")) {
-  throw new Error("Usage: npm run workspace -- [--live [project-path] | --claude [project-path]]");
-}
+const { live, projectPath, provider: modelProvider, claude } = parseWorkspaceArgs(process.argv.slice(2));
+const provider = claude ? "claude" : "codex";
 const cwd = live
-  ? execFileSync("git", ["rev-parse", "--show-toplevel"], { cwd: resolve(args[1] ?? "."), encoding: "utf8" }).trim()
+  ? execFileSync("git", ["rev-parse", "--show-toplevel"], { cwd: resolve(projectPath ?? "."), encoding: "utf8" }).trim()
   : process.cwd();
 const port = Number(process.env.ORCHESTRA_PORT ?? process.env.SWARMER_PORT ?? 4317);
 if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error("Invalid ORCHESTRA_PORT");
@@ -105,8 +100,15 @@ const server = createServer(async (request, response) => {
 });
 
 server.listen(port, "127.0.0.1", () => {
-  runtime = new WorkspaceRuntime({ cwd, demo: !live, provider, store: live ? workspaceStore(cwd, undefined, provider) : undefined });
-  console.log(`Orchestra (${live ? provider === "claude" ? "Claude Code" : "Codex" : "demo"}) is available at ${origin}`);
+  runtime = new WorkspaceRuntime({
+    cwd,
+    demo: !live,
+    provider,
+    modelProvider,
+    store: live ? workspaceStore(cwd, undefined, provider, claude ? undefined : modelProvider) : undefined,
+  });
+  const mode = live ? claude ? "Claude Code" : `Codex: ${modelProvider}` : "demo";
+  console.log(`Orchestra (${mode}) is available at ${origin}`);
   void runtime.start().catch((error) => console.error("Workspace startup failed:", error instanceof Error ? error.message : error));
 });
 server.on("error", (error) => {
