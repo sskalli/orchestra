@@ -17,7 +17,7 @@ const fs = require("node:fs");
 const assert = require("node:assert/strict");
 const args = process.argv.slice(2);
 if (args[0] === "auth" && args[1] === "status") {
-  console.log(JSON.stringify({ loggedIn: ${loggedIn} }));
+  console.log(JSON.stringify({ authMethod: ${JSON.stringify(loggedIn ? "claude.ai" : "none")} }));
   process.exit(${loggedIn ? 0 : 1});
 }
 assert.equal(process.cwd(), ${JSON.stringify(cwd)});
@@ -107,6 +107,11 @@ test("Claude Code reports an executable that fails to launch", { timeout: 5000 }
   await assert.rejects(runClaudeCode({
     ...options, executable: join(options.cwd, "missing"), prompt: "test", onText: () => {},
   }).completion, (error) => error instanceof ClaudeCodeError && error.kind === "failed");
+});
+
+test("Claude Code accepts a successful auth status without a loggedIn field", { timeout: 5000 }, async (context) => {
+  const { cwd, executable } = fixture(context, "");
+  await checkClaudeCode(cwd, executable);
 });
 
 test("Claude Code detects signed-out status during preflight", { timeout: 5000 }, async (context) => {

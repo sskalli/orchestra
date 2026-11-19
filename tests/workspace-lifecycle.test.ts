@@ -173,6 +173,29 @@ test("Codex stop and archive waits for terminal provider evidence and prevents q
   } finally { await runtime.close(); }
 });
 
+test("a Codex interruption cancels the active message and pauses queued follow-ups", async () => {
+  const { runtime, internal, pm } = fixture({ cwd: process.cwd() });
+  pm.threadId = "busy-thread";
+  const active = { id: "active", role: "user", text: "Work", state: "submitted" };
+  pm.run = { message: active, turn: { id: "busy-turn", status: "inProgress" } };
+  pm.agent.messages.push(active);
+  pm.agent.status = "working";
+  internal.threadSessions.set(pm.threadId, pm);
+  try {
+    await runtime.command({ type: "send", agentId: "pm", text: "Later" });
+    internal.onEvent({ method: "turn/completed", params: {
+      threadId: "busy-thread", turn: { id: "busy-turn", status: "interrupted" },
+    } });
+    const agent = runtime.snapshot().agents.find((entry) => entry.id === "pm")!;
+    assert.equal(pm.run, undefined);
+    assert.equal(agent.messages.find((entry) => entry.id === active.id)?.state, "cancelled");
+    assert.equal(agent.status, "idle");
+    assert.equal(agent.queuePaused, true);
+    assert.equal(agent.queueDepth, 1);
+    assert.equal(pm.queue[0].state, "queued");
+  } finally { await runtime.close(); }
+});
+
 test("a resumed provider thread with an active turn remains protected even without saved run metadata", async () => {
   const { runtime, internal, pm } = fixture({ cwd: process.cwd() });
   pm.threadId = "active-thread";
@@ -221,6 +244,40 @@ for (const action of ["archive", "restore", "delete"] as const) {
     } finally { await runtime.close(); }
   });
 }
+
+test("archive save failure restores queued assignments both inside and outside the subtree", async () => {
+  const { runtime, internal, pm, researcher, sibling } = fixture({
+    cwd: process.cwd(),
+    store: {
+      load: () => undefined,
+      save: (sessions) => {
+        if (sessions.some(({ agent }) => agent.archivedAt)) throw new Error("Fixture disk full");
+      },
+    },
+  });
+  internal.storageReady = true;
+  for (const [session, prerequisite] of [[researcher, pm], [sibling, researcher]]) {
+    session.waitingFor = prerequisite.agent.id;
+    const queued = { id: `${session.agent.id}-assignment`, role: "user", text: "Check result", state: "queued" };
+    session.queue.push(queued);
+    session.agent.messages.push(queued);
+    session.agent.queueDepth = 1;
+    session.agent.queuePaused = true;
+    session.agent.status = "attention";
+  }
+  const assignmentState = () => [researcher, sibling].map(({ agent, queue, waitingFor }) => ({
+    archivedAt: agent.archivedAt, status: agent.status, queueDepth: agent.queueDepth, queuePaused: agent.queuePaused,
+    messages: agent.messages, queue, waitingFor,
+  }));
+  const before = structuredClone(assignmentState());
+  try {
+    await assert.rejects(runtime.command({ type: "archive", agentId: "pm" }), /could not be saved/i);
+    assert.deepEqual(assignmentState(), before);
+    for (const session of [researcher, sibling]) {
+      assert.equal(session.queue[0], session.agent.messages.find((entry) => entry.id === session.queue[0].id));
+    }
+  } finally { await runtime.close(); }
+});
 
 test("archived queues stay paused and archived agents disappear from pilot recovery context", async () => {
   const { runtime, internal, pm } = fixture();

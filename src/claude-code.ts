@@ -60,19 +60,11 @@ function turnError(detail: string, category?: string) {
 
 export function checkClaudeCode(cwd: string, executable = process.env.CLAUDE_BIN ?? "claude") {
   return new Promise<void>((resolve, reject) => {
-    const child = execFile(executable, ["auth", "status"], { cwd, timeout: 10_000, killSignal: "SIGKILL", maxBuffer: diagnosticLimit }, (error, stdout, stderr) => {
-      if (error?.code === "ENOENT") {
-        reject(missingExecutable());
-        return;
-      }
-      let loggedIn: unknown;
-      try {
-        loggedIn = JSON.parse(stdout)?.loggedIn;
-      } catch {
-        // Never surface raw auth stdout, which can contain account details.
-      }
-      if (!error && loggedIn === true) resolve();
-      else if ((!error || error.code === 1) && loggedIn === false) reject(new ClaudeCodeError("signed-out", signInMessage));
+    const child = execFile(executable, ["auth", "status"], { cwd, timeout: 10_000, killSignal: "SIGKILL", maxBuffer: diagnosticLimit }, (error, _stdout, stderr) => {
+      // The CLI reports authentication via its exit code. Stdout may contain account details.
+      if (!error) resolve();
+      else if (error.code === 1) reject(new ClaudeCodeError("signed-out", signInMessage));
+      else if (error.code === "ENOENT") reject(missingExecutable());
       else reject(turnError(stderr.trim() || "Claude Code could not report authentication status. Run `claude auth status` to diagnose."));
     });
     child.stdin?.end();

@@ -477,7 +477,15 @@ export class WorkspaceRuntime {
         if (failed?.status === "rejected") throw failed.reason;
         if (affected.some((entry) => entry.run || entry.recovery || entry.approvals.size)) throw new Error("Unresolved work remains. The team has not been archived.");
         const now = Date.now();
-        const archiveDates = affected.map((entry) => entry.agent.archivedAt);
+        const archivedIds = new Set(affected.map((entry) => entry.agent.id));
+        const dependents = [...this.sessions.values()].filter((entry) =>
+          entry.waitingFor && archivedIds.has(entry.waitingFor) && !archivedIds.has(entry.agent.id));
+        const previous = [...affected, ...dependents].map((entry) => {
+          const { archivedAt, canSteer, canCancel, queuePaused, queueDepth, status, messages } = entry.agent;
+          return { entry, agent: { archivedAt, canSteer, canCancel, queuePaused, queueDepth, status },
+            messageCount: messages.length, waitingFor: entry.waitingFor,
+            queue: entry.queue.map((queued) => ({ queued, state: queued.state })) };
+        });
         for (const entry of affected) {
           entry.agent.archivedAt ??= now;
           entry.agent.canSteer = false;
@@ -490,18 +498,24 @@ export class WorkspaceRuntime {
             entry.agent.queuePaused = false;
           }
         }
-        const archivedIds = new Set(affected.map((entry) => entry.agent.id));
-        for (const entry of this.sessions.values()) {
-          if (entry.waitingFor && archivedIds.has(entry.waitingFor)) {
-            delete entry.waitingFor;
-            for (const queued of entry.queue.splice(0)) queued.state = "cancelled";
-            entry.agent.queueDepth = 0;
-            entry.agent.status = "error";
-            entry.agent.messages.push(message("system", "The prerequisite agent was archived. Request a new assignment after restoring it.", "action"));
-          }
+        for (const entry of dependents) {
+          delete entry.waitingFor;
+          for (const queued of entry.queue.splice(0)) queued.state = "cancelled";
+          entry.agent.queueDepth = 0;
+          entry.agent.status = "error";
+          entry.agent.messages.push(message("system", "The prerequisite agent was archived. Request a new assignment after restoring it.", "action"));
         }
         if (!this.persist()) {
-          affected.forEach((entry, index) => { entry.agent.archivedAt = archiveDates[index]; });
+          for (const saved of previous) {
+            const { entry } = saved;
+            Object.assign(entry.agent, saved.agent);
+            entry.agent.messages.length = saved.messageCount;
+            entry.waitingFor = saved.waitingFor;
+            entry.queue = saved.queue.map(({ queued, state }) => {
+              queued.state = state;
+              return queued;
+            });
+          }
           throw new Error("Archiving could not be saved. The team remains visible; resolve the storage failure before trying again.");
         }
       } else if (command.type === "delete") {
@@ -1229,6 +1243,7 @@ export class WorkspaceRuntime {
     }
     if (method === "turn/completed" && params.turn && (!session.run.turn || params.turn.id === session.run.turn.id)) {
       const completed = params.turn.status === "completed";
+      const cancelled = params.turn.status === "interrupted";
       if (completed && this.state.provider.state === "connecting") this.setProvider("ready");
       else if (!completed && this.state.provider.state === "connecting") {
         this.setProvider("error", errorText(params.turn.error?.message ?? "Codex connection failed."));
@@ -1241,7 +1256,9 @@ export class WorkspaceRuntime {
         catch (error) { check = { ...check, outcome: "blocked", summary: `Validation became stale: ${errorText(error)}` }; }
         session.agent.check = check;
       }
-      const finalized = this.finish(session, completed, completed ? undefined : errorText(params.turn.error?.message ?? "The turn did not complete."));
+      if (cancelled) session.agent.queuePaused = session.queue.length > 0;
+      const detail = params.turn.error?.message ?? (cancelled ? "The turn was interrupted." : "The turn did not complete.");
+      const finalized = this.finish(session, completed, completed ? undefined : errorText(detail), cancelled);
       check = session.agent.check ?? check;
       this.reportDelegation(session, finalized, params.turn, check ? `**${check.outcome}**\n\n${check.summary}` : result, check?.outcome);
       return;
