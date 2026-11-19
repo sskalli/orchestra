@@ -9,6 +9,7 @@ import { workspaceStore } from "../src/workspace-store.ts";
 import { createFeatureWorktree } from "../src/workspace-worktree.ts";
 import { numberAgentRoles } from "../src/workspace-agent-appearance.ts";
 import { parseWorkspaceArgs } from "../src/workspace-options.ts";
+import { workspacePreferences } from "../src/workspace-preferences.ts";
 
 test("workspace launch options select a Codex provider only in live mode", () => {
   assert.deepEqual(parseWorkspaceArgs([]), { live: false, projectPath: undefined, provider: "openai", feature: false });
@@ -17,6 +18,38 @@ test("workspace launch options select a Codex provider only in live mode", () =>
   });
   assert.throws(() => parseWorkspaceArgs(["--provider", "company-gateway"]), /Usage:/);
   assert.throws(() => parseWorkspaceArgs(["--live", "--provider"]), /provider ID/);
+});
+
+test("browser drafts stay with their Codex provider and preserve default legacy drafts", () => {
+  const original = Object.getOwnPropertyDescriptor(globalThis, "localStorage");
+  const state = new Map<string, string>();
+  Object.defineProperty(globalThis, "localStorage", {
+    configurable: true,
+    value: {
+      getItem: (key: string) => state.get(key) ?? null,
+      setItem: (key: string, value: string) => state.set(key, value),
+    },
+  });
+  try {
+    const project = "/example/project";
+    state.set("swarmer:workspace:v1:codex:/example/project:view", JSON.stringify({
+      drafts: { coordinator: "Default draft" },
+    }));
+
+    const company = workspacePreferences(project, false, "company-gateway");
+    assert.deepEqual(company.readView().drafts, {});
+    company.writeView({ leftOpen: true, selectedId: null, drafts: { coordinator: "Company draft" } });
+
+    const defaultProvider = workspacePreferences(project, false, "openai");
+    assert.deepEqual(defaultProvider.readView().drafts, { coordinator: "Default draft" });
+    defaultProvider.writeView({ ...defaultProvider.readView(), drafts: { coordinator: "Updated default draft" } });
+    assert.deepEqual(workspacePreferences(project, false).readView().drafts, { coordinator: "Updated default draft" });
+    assert.deepEqual(workspacePreferences(project, false, "company-gateway").readView().drafts, { coordinator: "Company draft" });
+    assert.deepEqual(workspacePreferences(project, false, "another-gateway").readView().drafts, {});
+  } finally {
+    if (original) Object.defineProperty(globalThis, "localStorage", original);
+    else Reflect.deleteProperty(globalThis, "localStorage");
+  }
 });
 
 test("simulation propagates designer failure and delivers all handoffs", async () => {

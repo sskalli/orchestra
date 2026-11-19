@@ -41,6 +41,7 @@ export type WorkspaceAgent = {
 };
 export type WorkspaceSnapshot = {
   project: { name: string; path: string };
+  modelProvider: string;
   provider: { state: "demo" | "connecting" | "ready" | "signed-out" | "error" | "usage-limit"; message?: string };
   agents: WorkspaceAgent[];
 };
@@ -205,7 +206,12 @@ export class WorkspaceRuntime {
     this.demo = demo;
     this.providerId = provider;
     this.store = demo ? undefined : store;
-    this.state = { project: { name: basename(path), path }, provider: { state: demo ? "demo" : "connecting" }, agents: [] };
+    this.state = {
+      project: { name: basename(path), path },
+      modelProvider: provider,
+      provider: { state: demo ? "demo" : "connecting" },
+      agents: [],
+    };
     this.createAgent(coordinatorId, "Coordinator", "coordinator");
     if (demo) this.seedDemo();
   }
@@ -239,7 +245,7 @@ export class WorkspaceRuntime {
       this.publish();
       return;
     }
-    const server = new AppServer(this.state.project.path, process.env, false, this.providerId !== "openai");
+    const server = new AppServer(this.state.project.path, process.env, false);
     this.server = server;
     server.onEvent = (event) => this.onEvent(event);
     server.onRequest = (event) => this.onRequest(event);
@@ -527,6 +533,7 @@ export class WorkspaceRuntime {
         initialTurnsPage?: { data: RecoveredTurn[] };
       }>("thread/resume", {
         threadId, cwd: this.sessionCwd(session), modelProvider: this.providerId,
+        model: process.env.CODEX_MODEL,
         ...this.threadPermissions(session),
         config: workspaceThreadConfig,
         developerInstructions: this.instructions(session),
