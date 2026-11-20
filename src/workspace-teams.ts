@@ -76,3 +76,36 @@ export function isWorkspaceTeam(value: unknown): value is WorkspaceTeam {
   return (value.archivedAt === undefined || (typeof value.archivedAt === "number" && Number.isSafeInteger(value.archivedAt) && value.archivedAt > 0)) &&
     (value.handoff === undefined || isHandoff(value.handoff, value.projectIds));
 }
+
+export function resolveTeamReuseRequest(text: string, teams: WorkspaceTeam[]) {
+  const commands = /(?:^|[.!?\n]\s*)(?:(?:(?:can|could|would|will)\s+you|i(?:['’]d|\s+would)\s+like\s+you\s+to|let['’]s)\s+)?(?:please\s+)?(use|reuse|reactivate)\s+(?:the\s+)?/gi;
+  const suffix = /\s+(?:team|squad)$/i;
+  const exact = (label: string) => {
+    const normalized = label.toLowerCase();
+    const id = teams.find((team) => team.id.toLowerCase() === normalized);
+    return id ? [id] : teams.filter((team) => team.name.toLowerCase() === normalized);
+  };
+  const source = text.trim();
+  for (const command of source.matchAll(commands)) {
+    const phrase = source.slice(command.index + command[0].length).split("\n", 1)[0];
+    const marker = /^(?:archived\s+)?(?:team|squad)\s+/i.exec(phrase)?.[0];
+    const target = marker ? phrase.slice(marker.length) : phrase;
+    const quoted = /^(?:"([^"]+)"|“([^”]+)”)/.exec(target);
+    const labels = quoted ? [quoted[1] ?? quoted[2]] : [
+      ...[...target.matchAll(/\s+(?:to|for)\s+|[:,]/gi)].map((delimiter) => target.slice(0, delimiter.index)),
+      target,
+    ].map((label) => label.trim().replace(/[.!?,]+$/, ""));
+    const matchesFor = (label: string) => {
+      const full = exact(label);
+      const alias = !quoted && suffix.test(label) && !full.length ? exact(label.replace(suffix, "")) : [];
+      // An unquoted leading "team" may belong to the name instead of introducing it.
+      const literal = marker && !quoted ? exact(marker + label) : [];
+      return [...new Set([...full, ...alias, ...literal])];
+    };
+    // A delimiter word can itself be part of the name. Prefer the longest complete match.
+    const matchingLabel = labels.findLast((label) => matchesFor(label).length);
+    const reference = matchingLabel ?? labels[0];
+    if (!marker && !(!quoted && suffix.test(reference)) && (command[1].toLowerCase() === "use" || !matchingLabel)) continue;
+    return { reference, teamIds: matchesFor(reference).filter((team) => team.archivedAt).map((team) => team.id) };
+  }
+}

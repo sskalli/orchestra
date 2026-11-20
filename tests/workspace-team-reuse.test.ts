@@ -161,3 +161,59 @@ test("archived team reuse migrates legacy identity, starts a fresh coder, and su
   assert.notEqual(newest?.candidate?.path, fresh.candidate.path);
   assert.equal(runtime.usageExport()?.byTeam["legacy-lead"].tokens?.totalTokens, 40);
 });
+
+test("full archived team name wins across repositories and blocks both premature tool orders", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "orchestra-team-order-"));
+  const project = join(root, "project");
+  const other = join(root, "other");
+  mkdirSync(project);
+  mkdirSync(other);
+  const trace = join(root, "trace.jsonl");
+  process.env.ORCHESTRA_TEST_TEAM_TRACE = trace;
+  const projects = [{ id: "project", path: project }, { id: "other", path: other }];
+  const store = workspaceStore(project, join(root, "state"));
+  const archivedAt = Date.now() - 10_000;
+  store.save([
+    savedAgent("coordinator", "coordinator"),
+    savedAgent("contact", "lead", { name: "Contact", teamId: "contact", parentId: "coordinator", projectId: "other", archivedAt }),
+    savedAgent("contact-form", "lead", { name: "Contact Form", teamId: "contact-form", parentId: "coordinator", projectId: "project", archivedAt }),
+  ], [
+    { id: "contact", name: "Contact", scope: "Directory", projectIds: ["other"], archivedAt },
+    { id: "contact-form", name: "Contact Form", scope: "Form", projectIds: ["project"], archivedAt,
+      handoff: { summary: "The form validates email addresses." } },
+  ]);
+  const runtime = new WorkspaceRuntime({ cwd: project, projects, store });
+  t.after(async () => {
+    await runtime.close();
+    rmSync(root, { recursive: true, force: true });
+    delete process.env.ORCHESTRA_TEST_TEAM_TRACE;
+  });
+
+  await runtime.start();
+  assert.equal(runtime.snapshot().provider.state, "ready", runtime.snapshot().provider.message);
+  const events = () => readFileSync(trace, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+  async function send(text: string) {
+    await runtime.command({ type: "send", agentId: "coordinator", text });
+    await waitFor(() => runtime.snapshot().agents.find((agent) => agent.id === "coordinator")?.status === "done");
+  }
+  await send("Reuse team Contact Form to check README");
+  assert.equal(runtime.snapshot().agents.length, 3);
+  await send("Reuse Contact Form to check README");
+  const toolResults = events().filter((event) => event.type === "tool-result");
+  assert.deepEqual(toolResults.map(({ tool, result }) => [tool, result.success]), [
+    ["delegate_agent", false], ["find_archived_team", false],
+    ["find_archived_team", false], ["delegate_agent", false],
+    ["find_archived_team", true], ["delegate_agent", true],
+  ]);
+  const specialist = runtime.snapshot().agents.find((agent) => agent.name === "Contact analyser");
+  assert.equal(specialist?.projectId, "project");
+  assert.equal(specialist?.teamId, "contact-form");
+  assert.equal(runtime.snapshot().agents.length, 4);
+  const turn = events().find((event) => event.type === "turn/start" && event.text === "Read the handoff");
+  assert.equal(turn?.context.orchestra_reused_team.kind, "untrusted");
+  assert.equal(JSON.parse(turn.context.orchestra_reused_team.value).handoff.summary, "The form validates email addresses.");
+  assert.equal(turn.context.orchestra_team_reports, undefined);
+  await runtime.command({ type: "archive", agentId: specialist.id });
+  await runtime.command({ type: "delete", agentId: "contact-form" });
+  assert.equal(runtime.snapshot().teams?.find((team) => team.id === "contact-form")?.name, "Contact Form");
+});

@@ -597,13 +597,23 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
           }}>
             <header><strong>Archived agents</strong><button type="button" aria-label="Close archived agents" onClick={() => { setArchiveOpen(false); archivedToggle.current?.focus(); }}>×</button></header>
             {!archivedAgents.length && <p>No archived agents.</p>}
-            {archivedAgents.map((agent) => <article key={agent.id}>
-              <button type="button" onClick={() => { select(agent.id); setArchiveOpen(false); }}>{agentAppearance(agent).displayName}</button>
-              <small>Parent: {agents.find((parent) => parent.id === agent.parentId) ? agentAppearance(agents.find((parent) => parent.id === agent.parentId)!).displayName : "Project"}</small>
-              <small>Archived {new Date(agent.archivedAt!).toLocaleString()}</small>
-              <div><button type="button" disabled={!connected || agent.lifecycleBusy} onClick={() => requestLifecycle("restore", agent.id)}>Restore</button>
-                <button type="button" disabled={!connected || agent.lifecycleBusy} onClick={() => requestLifecycle("delete", agent.id)}>Delete permanently…</button></div>
-            </article>)}
+            {archivedAgents.map((agent) => {
+              const team = snapshot.teams?.find((entry) => entry.id === agent.teamId);
+              const parent = agents.find((entry) => entry.id === agent.parentId);
+              return <article key={agent.id}>
+                <button type="button" onClick={() => { select(agent.id); setArchiveOpen(false); }}>{agentAppearance(agent).displayName}</button>
+                <small>Parent: {parent ? agentAppearance(parent).displayName : "Project"}</small>
+                {team && <>
+                  <small>Team: {team.name}</small>
+                  <label className="sw-archived-team-id">Team ID
+                    <input value={team.id} readOnly onFocus={(event) => event.currentTarget.select()} />
+                  </label>
+                </>}
+                <small>Archived {new Date(agent.archivedAt!).toLocaleString()}</small>
+                <div><button type="button" disabled={!connected || agent.lifecycleBusy} onClick={() => requestLifecycle("restore", agent.id)}>Restore</button>
+                  <button type="button" disabled={!connected || agent.lifecycleBusy} onClick={() => requestLifecycle("delete", agent.id)}>Delete permanently…</button></div>
+              </article>;
+            })}
           </section>}
           {chooser && <div className="sw-activity" role="dialog" aria-label="Events needing attention" onKeyDown={(event) => {
             if (event.key === "Escape") { event.stopPropagation(); setChooser(undefined); }

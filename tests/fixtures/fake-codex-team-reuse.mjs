@@ -30,7 +30,11 @@ createInterface({ input: process.stdin }).on("line", (line) => {
     const state = pending.get(id);
     pending.delete(id);
     record({ type: "tool-result", tool: state.tool, result });
-    if (state.tool === "find_archived_team" && result.success) {
+    if (state.steps) {
+      const [step, ...steps] = state.steps;
+      if (step) callTool({ ...state, steps }, ...step);
+      else complete(state);
+    } else if (state.tool === "find_archived_team" && result.success) {
       callTool(state, "delegate_agent", {
         name: "Fresh coder", duty: "coder", goal: "Implement the next task",
         ...(state.wrongProject && { projectId: "other" }),
@@ -74,7 +78,17 @@ createInterface({ input: process.stdin }).on("line", (line) => {
   });
   emit("thread/tokenUsage/updated", { threadId, turnId: turn.id, tokenUsage: { total: counts(total), last: counts(20) } });
 
-  if (text.includes("Legacy squad") || text.includes("legacy-lead")) {
+  if (text.startsWith("Reuse team Contact Form to")) {
+    callTool({ ...state, steps: [
+      ["find_archived_team", { name: "Contact" }],
+    ] }, "delegate_agent", { name: "Premature analyser", duty: "analyser", goal: "Premature", projectId: "other" });
+  } else if (text.startsWith("Reuse Contact Form to")) {
+    callTool({ ...state, steps: [
+      ["delegate_agent", { name: "Premature analyser", duty: "analyser", goal: "Premature", projectId: "other" }],
+      ["find_archived_team", { name: "Contact Form" }],
+      ["delegate_agent", { name: "Contact analyser", duty: "analyser", goal: "Read the handoff" }],
+    ] }, "find_archived_team", { name: "Contact" });
+  } else if (text.includes("Legacy squad") || text.includes("legacy-lead")) {
     const name = text.includes("legacy-lead") ? "legacy-lead" : "Legacy squad";
     callTool({ ...state, wrongProject: text.includes("in the other repository") }, "find_archived_team", { name });
   } else if (text === "Implement the next task") {

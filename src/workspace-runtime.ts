@@ -1,4 +1,4 @@
-import { boundedTeamHandoff, type WorkspaceTeam } from "./workspace-teams.ts";
+import { boundedTeamHandoff, resolveTeamReuseRequest, type WorkspaceTeam } from "./workspace-teams.ts";
 import { WorkspaceUsage, type DelegationDecision } from "./workspace-usage.ts";
 import { readFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
@@ -89,7 +89,7 @@ const legacyRequiredChecks: readonly CheckDuty[] = ["reviewer", "tester"];
 type Duty = "coder" | "reviewer" | "tester" | "analyser" | "designer" | "pm";
 
 type Run = {
-  turn?: Turn; delegated?: boolean; reuseSelectionRequired?: boolean; messageOffset?: number; message: WorkspaceMessage; check?: WorkspaceAgent["check"];
+  turn?: Turn; delegated?: boolean; reuseRequest?: ReturnType<typeof resolveTeamReuseRequest>; messageOffset?: number; message: WorkspaceMessage; check?: WorkspaceAgent["check"];
   demoTimer?: ReturnType<typeof setTimeout>; claude?: ReturnType<typeof runClaudeCode>;
   patches?: Map<string, FileUpdate[]>;
   checkTarget?: { agentId: string; submissionId: string; fingerprint: string };
@@ -141,13 +141,6 @@ const findTeamTool = {
   description: "Select an archived team by exact name or team ID when the user explicitly asks to reuse it. Returns a compact handoff. New delegates in this turn use that team.",
   inputSchema: { type: "object", properties: { name: { type: "string" } }, required: ["name"], additionalProperties: false },
 };
-function explicitlyRequestsTeam(text: string, name: string) {
-  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const label = `(?:"${escaped}"|“${escaped}”|${escaped})`;
-  const namedTeam = `(?:(?:archived\\s+)?(?:team|squad)\\s+${label}|${label}\\s+(?:team|squad)${/\s(?:team|squad)$/i.test(name) ? `|${label}` : ""})`;
-  return new RegExp(`(?:^|[.!?\\n]\\s*)(?:(?:(?:can|could|would|will)\\s+you|i(?:['’]d|\\s+would)\\s+like\\s+you\\s+to|let['’]s)\\s+)?(?:please\\s+)?(?:use|reuse|reactivate)\\s+(?:the\\s+)?${namedTeam}(?=$|[\\s:,.!?])`, "i")
-    .test(text.trim());
-}
 const inspectGitTool = {
   type: "function",
   deferLoading: false,
@@ -1193,8 +1186,11 @@ export class WorkspaceRuntime {
   }
 
   private teamReportContext(session: AgentSession, entry?: WorkspaceMessage) {
-    if (session.agent.role === "worker" && session.agent.duty !== "coder") return undefined;
     const reusedTeam = entry?.reuseTeamId && this.teams.get(entry.reuseTeamId);
+    const handoff = reusedTeam ? {
+      orchestra_reused_team: { kind: "untrusted", name: "orchestra_reused_team", value: JSON.stringify(reusedTeam) },
+    } : undefined;
+    if (session.agent.role === "worker" && session.agent.duty !== "coder") return handoff;
     const team = this.availableReports(session, entry);
     const reports = team.map(({ agent }) => {
       const recent = agent.messages.findLast((entry) => entry.role === "assistant" && !entry.state);
@@ -1206,13 +1202,7 @@ export class WorkspaceRuntime {
       };
     });
     return {
-      ...(reusedTeam && {
-        orchestra_reused_team: {
-          kind: "untrusted",
-          name: "orchestra_reused_team",
-          value: JSON.stringify(reusedTeam),
-        },
-      }),
+      ...handoff,
       ...(session.freshThread && {
         orchestra_previous_chat: {
           kind: "untrusted",
@@ -1233,6 +1223,9 @@ export class WorkspaceRuntime {
   private async begin(session: AgentSession, next: WorkspaceMessage, parent?: Turn) {
     if (!this.isActive(session)) return;
     const run: Run = { message: next, messageOffset: session.agent.messages.length };
+    if (session.agent.role === "coordinator" && this.state.provider.name === "codex" && !this.demo) {
+      run.reuseRequest = resolveTeamReuseRequest(next.text, this.teamRecords());
+    }
     try {
       if (next.reuseTeamId && !this.teams.has(next.reuseTeamId)) {
         throw new Error("This team's saved handoff is no longer available. Select a team again.");
@@ -1704,22 +1697,22 @@ export class WorkspaceRuntime {
         return;
       }
       if (params.tool === findTeamTool.name) {
-        const entry = session.run!.message;
+        const { message: entry, reuseRequest, delegated } = session.run!;
         const name = typeof params.arguments?.name === "string" ? params.arguments.name.trim().toLowerCase() : "";
-        if (session.agent.role !== "coordinator" || !name || !explicitlyRequestsTeam(entry.text, name) ||
-            session.run!.delegated || entry.reuseTeamId) {
+        if (session.agent.role !== "coordinator" || !reuseRequest || !name || delegated || entry.reuseTeamId) {
           throw new Error("Select an archived team only when the user explicitly names it, before delegating.");
         }
-        session.run!.reuseSelectionRequired = true;
-        const archived = this.teamRecords().filter((team) => team.archivedAt);
-        const exactId = archived.find((team) => team.id.toLowerCase() === name);
-        const matches = exactId ? [exactId] : archived.filter((team) => team.name.toLowerCase() === name);
-        if (!matches.length) throw new Error("No archived team has that exact name or ID.");
+        const matches = this.teamRecords().filter((team) => team.archivedAt && reuseRequest.teamIds.includes(team.id));
+        if (!matches.length) throw new Error(`No archived team matches "${reuseRequest.reference}". Ask the user to check the name or ID.`);
         if (matches.length > 1) {
           const options = matches.map((team) => ({ teamId: team.id, projects: team.projectIds, scope: team.scope.slice(0, 160) }));
-          throw new Error(`Several archived teams have that name. Ask the user to reply with Reuse team <ID> for the intended team. ${JSON.stringify(options)}`);
+          throw new Error(`Several archived teams match that request. Ask the user to reply with Reuse team <ID> for the intended team. ${JSON.stringify(options)}`);
         }
-        entry.reuseTeamId = matches[0].id;
+        const [team] = matches;
+        if (name !== team.name.toLowerCase() && name !== team.id.toLowerCase()) {
+          throw new Error(`The user requested "${reuseRequest.reference}". Look up the complete team name or ID for that request.`);
+        }
+        entry.reuseTeamId = team.id;
         this.publish();
         reply(true, JSON.stringify(matches[0]));
         return;
@@ -1864,6 +1857,9 @@ export class WorkspaceRuntime {
       const goal = typeof params.arguments?.goal === "string" ? params.arguments.goal.trim() : "";
       if (!goal || goal.length > 24_000) throw new Error("Provide a goal of up to 24,000 characters.");
       if (params.tool === relayTool.name) {
+        if (session.run!.reuseRequest && !session.run!.message.reuseTeamId) {
+          throw new Error("Resolve the requested archived team before sending assignments.");
+        }
         const recipient = reports.find((entry) => entry.agent.id === params.arguments?.agentId);
         if (!recipient?.threadId) throw new Error("Choose an open descendant on your team.");
         this.checkCandidateAccess(recipient);
@@ -1897,7 +1893,7 @@ export class WorkspaceRuntime {
         throw new Error("Only the pilot can start leads. Only the pilot or a lead can assign coders.");
       }
       const reuseTeamId = session.run!.message.reuseTeamId;
-      if (session.run!.reuseSelectionRequired && !reuseTeamId) {
+      if (session.run!.reuseRequest && !reuseTeamId) {
         throw new Error("Resolve the requested archived team before delegating.");
       }
       const reusedTeam = reuseTeamId && this.teams.get(reuseTeamId);
