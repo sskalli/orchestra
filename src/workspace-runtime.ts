@@ -89,7 +89,7 @@ const legacyRequiredChecks: readonly CheckDuty[] = ["reviewer", "tester"];
 type Duty = "coder" | "reviewer" | "tester" | "analyser" | "designer" | "pm";
 
 type Run = {
-  turn?: Turn; delegated?: boolean; reuseRequest?: ReturnType<typeof resolveTeamReuseRequest>; messageOffset?: number; message: WorkspaceMessage; check?: WorkspaceAgent["check"];
+  turn?: Turn; delegated?: boolean; reuseRequest?: ReturnType<typeof resolveTeamReuseRequest>; reuseLookupAttempted?: boolean; messageOffset?: number; message: WorkspaceMessage; check?: WorkspaceAgent["check"];
   demoTimer?: ReturnType<typeof setTimeout>; claude?: ReturnType<typeof runClaudeCode>;
   patches?: Map<string, FileUpdate[]>;
   checkTarget?: { agentId: string; submissionId: string; fingerprint: string };
@@ -1697,7 +1697,9 @@ export class WorkspaceRuntime {
         return;
       }
       if (params.tool === findTeamTool.name) {
-        const { message: entry, reuseRequest, delegated } = session.run!;
+        const run = session.run!;
+        const { message: entry, reuseRequest, delegated } = run;
+        if (session.agent.role === "coordinator") run.reuseLookupAttempted = true;
         const name = typeof params.arguments?.name === "string" ? params.arguments.name.trim().toLowerCase() : "";
         if (session.agent.role !== "coordinator" || !reuseRequest || !name || delegated || entry.reuseTeamId) {
           throw new Error("Select an archived team only when the user explicitly names it, before delegating.");
@@ -1857,7 +1859,7 @@ export class WorkspaceRuntime {
       const goal = typeof params.arguments?.goal === "string" ? params.arguments.goal.trim() : "";
       if (!goal || goal.length > 24_000) throw new Error("Provide a goal of up to 24,000 characters.");
       if (params.tool === relayTool.name) {
-        if (session.run!.reuseRequest && !session.run!.message.reuseTeamId) {
+        if ((session.run!.reuseRequest || session.run!.reuseLookupAttempted) && !session.run!.message.reuseTeamId) {
           throw new Error("Resolve the requested archived team before sending assignments.");
         }
         const recipient = reports.find((entry) => entry.agent.id === params.arguments?.agentId);
@@ -1893,7 +1895,7 @@ export class WorkspaceRuntime {
         throw new Error("Only the pilot can start leads. Only the pilot or a lead can assign coders.");
       }
       const reuseTeamId = session.run!.message.reuseTeamId;
-      if (session.run!.reuseRequest && !reuseTeamId) {
+      if ((session.run!.reuseRequest || session.run!.reuseLookupAttempted) && !reuseTeamId) {
         throw new Error("Resolve the requested archived team before delegating.");
       }
       const reusedTeam = reuseTeamId && this.teams.get(reuseTeamId);

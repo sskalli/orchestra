@@ -78,7 +78,17 @@ createInterface({ input: process.stdin }).on("line", (line) => {
   });
   emit("thread/tokenUsage/updated", { threadId, turnId: turn.id, tokenUsage: { total: counts(total), last: counts(20) } });
 
-  if (text.startsWith("Reuse team Contact Form to")) {
+  if (text === "I want to reuse the Contact Form team to edit README" || text === "Reuse Contact Form and edit README") {
+    const args = { name: "Premature analyser", duty: "analyser", goal: "Premature", projectId: "other" };
+    callTool({ ...state, steps: [
+      ["find_archived_team", { name: "Contact" }],
+      ["delegate_agent", args],
+    ] }, "delegate_agent", args);
+  } else if (text === "For the README edit, reuse Contact Form") {
+    callTool({ ...state, steps: [
+      ["delegate_agent", { name: "Premature analyser", duty: "analyser", goal: "Premature", projectId: "other" }],
+    ] }, "find_archived_team", { name: "Contact Form" });
+  } else if (text.startsWith("Reuse team Contact Form to")) {
     callTool({ ...state, steps: [
       ["find_archived_team", { name: "Contact" }],
     ] }, "delegate_agent", { name: "Premature analyser", duty: "analyser", goal: "Premature", projectId: "other" });

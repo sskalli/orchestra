@@ -196,10 +196,31 @@ test("full archived team name wins across repositories and blocks both premature
     await runtime.command({ type: "send", agentId: "coordinator", text });
     await waitFor(() => runtime.snapshot().agents.find((agent) => agent.id === "coordinator")?.status === "done");
   }
+  for (const prompt of [
+    "I want to reuse the Contact Form team to edit README",
+    "Reuse Contact Form and edit README",
+  ]) {
+    const start = events().length;
+    await send(prompt);
+    const results = events().slice(start).filter((event) => event.type === "tool-result");
+    assert.deepEqual(results.map(({ tool, result }) => [tool, result.success]), [
+      ["delegate_agent", false], ["find_archived_team", false], ["delegate_agent", false],
+    ], prompt);
+    assert.equal(runtime.snapshot().agents.length, 3, prompt);
+  }
+  const fallbackStart = events().length;
+  await send("For the README edit, reuse Contact Form");
+  assert.deepEqual(events().slice(fallbackStart).filter((event) => event.type === "tool-result")
+    .map(({ tool, result }) => [tool, result.success]), [
+    ["find_archived_team", false], ["delegate_agent", false],
+  ]);
+  assert.equal(runtime.snapshot().agents.length, 3);
+
+  const start = events().length;
   await send("Reuse team Contact Form to check README");
   assert.equal(runtime.snapshot().agents.length, 3);
   await send("Reuse Contact Form to check README");
-  const toolResults = events().filter((event) => event.type === "tool-result");
+  const toolResults = events().slice(start).filter((event) => event.type === "tool-result");
   assert.deepEqual(toolResults.map(({ tool, result }) => [tool, result.success]), [
     ["delegate_agent", false], ["find_archived_team", false],
     ["find_archived_team", false], ["delegate_agent", false],

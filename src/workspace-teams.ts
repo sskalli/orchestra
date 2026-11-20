@@ -78,7 +78,7 @@ export function isWorkspaceTeam(value: unknown): value is WorkspaceTeam {
 }
 
 export function resolveTeamReuseRequest(text: string, teams: WorkspaceTeam[]) {
-  const commands = /(?:^|[.!?\n]\s*)(?:(?:(?:can|could|would|will)\s+you|i(?:['’]d|\s+would)\s+like\s+you\s+to|let['’]s)\s+)?(?:please\s+)?(use|reuse|reactivate)\s+(?:the\s+)?/gi;
+  const commands = /(?:^|[.!?\n]\s*)(?:(?:(?:can|could|would|will)\s+you|i\s+want\s+(?:you\s+)?to|i(?:['’]d|\s+would)\s+like\s+(?:you\s+)?to|let['’]s)\s+)?(?:please\s+)?(use|reuse|reactivate)\s+(?:the\s+)?/gi;
   const suffix = /\s+(?:team|squad)$/i;
   const exact = (label: string) => {
     const normalized = label.toLowerCase();
@@ -92,7 +92,7 @@ export function resolveTeamReuseRequest(text: string, teams: WorkspaceTeam[]) {
     const target = marker ? phrase.slice(marker.length) : phrase;
     const quoted = /^(?:"([^"]+)"|“([^”]+)”)/.exec(target);
     const labels = quoted ? [quoted[1] ?? quoted[2]] : [
-      ...[...target.matchAll(/\s+(?:to|for)\s+|[:,]/gi)].map((delimiter) => target.slice(0, delimiter.index)),
+      ...[...target.matchAll(/\s+(?:to|for|and)\s+|[:,;]/gi)].map((delimiter) => target.slice(0, delimiter.index)),
       target,
     ].map((label) => label.trim().replace(/[.!?,]+$/, ""));
     const matchesFor = (label: string) => {
