@@ -123,6 +123,8 @@ test("cross-repo delivery pins the API and UI, enforces repo scope and requires 
   assert(!testRequest.runtimeWorkspaceRoots.includes(projects[0].path));
   const apiPath = manifest.members.find(({ projectId }: { projectId: string }) => projectId === "api").path;
   const uiPath = manifest.members.find(({ projectId }: { projectId: string }) => projectId === "ui").path;
+  assert.notEqual(apiPath, api.agent.candidate.path);
+  assert.notEqual(uiPath, ui.agent.candidate.path);
   execFileSync(process.execPath, ["--input-type=module", "-e", "import assert from 'node:assert/strict'; import { pathToFileURL } from 'node:url'; const [api, ui] = await Promise.all(process.argv.slice(1).map(path => import(pathToFileURL(path).href))); assert.equal(ui.default(api.default), 'READY');", join(apiPath, "index.mjs"), join(uiPath, "index.mjs")]);
   assert.equal((await call(tester, "submit_check_result", { outcome: "passed", summary: "Pinned API output renders as READY" })).success, true);
   complete(tester);

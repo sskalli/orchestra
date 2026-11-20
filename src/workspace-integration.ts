@@ -78,6 +78,10 @@ export function integrateCandidates(project: string, candidates: IntegrationSour
   if (candidates.length < 2 || new Set(candidates.map((source) => source.agentId)).size !== candidates.length) {
     throw new Error("Choose at least two distinct accepted coder submissions to integrate.");
   }
+  return materializeCandidates(project, candidates);
+}
+
+function materializeCandidates(project: string, candidates: IntegrationSource[]) {
   const target = repository(project);
   const baseline = git(target.root, ["rev-parse", "--verify", "HEAD^{commit}"]);
   const snapshots = candidates.map((source) => captureSource(target, baseline, source));
@@ -153,19 +157,10 @@ export function integrateProjectCandidates(
   try {
     for (const { id: projectId, path: project } of selected) {
       const group = groups.get(projectId)!;
-      if (group.length > 1) {
-        const combined = integrateCandidates(project, group);
-        created.push({ project, path: combined.path });
-        members.push({ projectId, path: combined.path, base: combined.base, fingerprint: combined.fingerprint });
-        submissions.push(...combined.sources.map((source) => ({ ...source, projectId })));
-      } else {
-        const [source] = group;
-        const target = repository(project);
-        const baseline = git(target.root, ["rev-parse", "--verify", "HEAD^{commit}"]);
-        const { path, head, fingerprint } = captureSource(target, baseline, source);
-        members.push({ projectId, path, base: source.base, fingerprint });
-        submissions.push({ projectId, agentId: source.agentId, submissionId: source.submissionId, head, fingerprint });
-      }
+      const combined = materializeCandidates(project, group);
+      created.push({ project, path: combined.path });
+      members.push({ projectId, path: combined.path, base: combined.base, fingerprint: combined.fingerprint });
+      submissions.push(...combined.sources.map((source) => ({ ...source, projectId })));
     }
     const fingerprint = integrationFingerprint(members);
     if (fingerprintIntegrationMembers(members) !== fingerprint ||

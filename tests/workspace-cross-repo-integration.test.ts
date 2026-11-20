@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test, type TestContext } from "node:test";
@@ -42,23 +42,40 @@ function candidate(project: { id: string; path: string }, name: string) {
   return { ...tree, projectId: project.id, agentId: name, submissionId: name, expectedFingerprint: fingerprintCandidate(tree.path) };
 }
 
-test("cross-repo integration combines same-repo coders and pins a singleton without changing source checkouts", (t) => {
+test("cross-repo integration materializes clean delivery worktrees for combined and singleton candidates", (t) => {
   const configured = projects(t);
   const [api, ui] = configured;
   const apiA = candidate(api, "api-a");
   const apiB = candidate(api, "api-b");
+  writeFileSync(join(ui.path, ".gitignore"), "generated.txt\n");
+  writeFileSync(join(ui.path, "tracked.txt"), "baseline");
+  git(ui.path, "add", ".gitignore", "tracked.txt");
+  git(ui.path, "-c", "user.name=Fixture", "-c", "user.email=fixture@localhost",
+    "-c", "commit.gpgsign=false", "commit", "-qm", "UI baseline");
   const uiA = candidate(ui, "ui-a");
+  writeFileSync(join(uiA.path, "tracked.txt"), "updated");
+  writeFileSync(join(uiA.path, "generated.txt"), "coder-only artifact");
+  uiA.expectedFingerprint = fingerprintCandidate(uiA.path);
+  const sourceStatus = git(uiA.path, "status", "--porcelain", "--ignored");
   const manifest = integrateProjectCandidates(configured, [apiA, uiA, apiB]);
   const [apiMember, uiMember] = manifest.members!;
   assert.notEqual(apiMember.path, apiA.path);
   assert.notEqual(apiMember.path, apiB.path);
-  assert.equal(uiMember.path, uiA.path);
+  assert.notEqual(uiMember.path, uiA.path);
+  assert.equal(readFileSync(join(uiMember.path, "tracked.txt"), "utf8"), "updated");
+  assert.equal(readFileSync(join(uiMember.path, "ui-a.txt"), "utf8"), "ui-a");
+  assert(!existsSync(join(uiMember.path, "generated.txt")));
+  assert.equal(readFileSync(join(uiA.path, "generated.txt"), "utf8"), "coder-only artifact");
+  assert.equal(git(uiA.path, "status", "--porcelain", "--ignored"), sourceStatus);
+  assert.equal(fingerprintCandidate(uiA.path), uiA.expectedFingerprint);
   assert.equal(manifest.fingerprint, fingerprintIntegrationMembers(manifest.members!.slice().reverse()));
   assert.equal(git(apiMember.path, "ls-files"), "api-a.txt\napi-b.txt");
   assert.deepEqual(manifest.sources.map(({ projectId }) => projectId), ["api", "api", "ui"]);
   assert.equal(git(api.path, "status", "--porcelain"), "");
   assert.equal(git(ui.path, "status", "--porcelain"), "");
-  writeFileSync(join(uiA.path, "changed.txt"), "stale");
+  writeFileSync(join(uiA.path, "changed.txt"), "source-only change");
+  assert.equal(manifest.fingerprint, fingerprintIntegrationMembers(manifest.members!));
+  writeFileSync(join(uiMember.path, "tracked.txt"), "changed delivery");
   assert.notEqual(manifest.fingerprint, fingerprintIntegrationMembers(manifest.members!));
 });
 

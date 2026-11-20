@@ -122,7 +122,7 @@ The candidate remains on disk for inspection, and merging is manual. Tests that 
 
 Name the participating repositories in the pilot chat. A lead can be assigned several configured repository IDs, and each coder receives one repository and its own worktree. When several repositories are eligible for a repository-scoped assignment, the lead specifies the repository. A check attached to a coder uses the same worktree.
 
-After accepting the relevant submissions, the lead prepares a delivery from all participating repositories. Orchestra combines multiple candidates within each repository and pins repositories with a single candidate. The joint tester receives the pinned worktree paths and tests their behavior together. Changes to a pinned candidate or its source submission require fresh validation. The lead chat lists the candidate paths and recorded joint result. Review and merge each repository separately.
+After accepting the relevant submissions, the lead prepares a delivery from all participating repositories. Orchestra prepares a fresh delivery worktree for each repository and combines its accepted submissions there. Ignored files from coder worktrees stay out of delivery. The joint tester receives the pinned worktree paths and tests their behavior together. Changes to a pinned candidate or its source submission require fresh validation. The lead chat lists the candidate paths and recorded joint result. Review and merge each repository separately.
 
 ## Reusing an archived team
 

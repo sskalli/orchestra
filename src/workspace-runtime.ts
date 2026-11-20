@@ -1480,6 +1480,10 @@ export class WorkspaceRuntime {
       }
       for (const source of integration.sources) {
         const coder = this.sessions.get(source.agentId);
+        const sourcePath = coder?.agent.candidate?.path;
+        if (sourcePath && integration.members?.some((member) => member.path === sourcePath)) {
+          throw new Error("A delivery worktree shares a coder's worktree. Rebuild the delivery and rerun joint tests.");
+        }
         if (!coder || !this.isActive(coder) || coder.run || coder.recovery || coder.queue.length || coder.agent.status !== "done" ||
             (source.projectId && coder.agent.projectId !== source.projectId) ||
             coder.agent.submissionId !== source.submissionId || !source.fingerprint || !coder.agent.candidate ||
