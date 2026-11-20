@@ -1,3 +1,4 @@
+import { boundedTeamHandoff, resolveTeamReuseRequest, type WorkspaceTeam } from "./workspace-teams.ts";
 import { WorkspaceUsage, type DelegationDecision } from "./workspace-usage.ts";
 import { readFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
@@ -27,6 +28,7 @@ export type WorkspaceMessage = {
   reportLabel?: string;
   providerItemId?: string;
   orchestrationRunId?: string;
+  reuseTeamId?: string;
   state?: "queued" | "streaming" | "failed" | "cancelled";
   approval?: { id: string; state: "pending" | "accepted" | "declined" | "expired"; canAccept?: boolean };
 };
@@ -36,6 +38,7 @@ export type WorkspaceAgent = {
   role: AgentRole;
   parentId?: string;
   projectId?: string;
+  teamId?: string;
   goal?: string;
   duty?: Duty;
   modelSettings?: ModelSettings;
@@ -68,6 +71,7 @@ export type WorkspaceSnapshot = {
   workspaceKey: string;
   provider: { name: WorkspaceProvider; state: "demo" | "connecting" | "ready" | "signed-out" | "error" | "usage-limit"; message?: string };
   agents: WorkspaceAgent[];
+  teams?: WorkspaceTeam[];
   usage?: Omit<ReturnType<WorkspaceUsage["summary"]>, "byRun"> & { issue?: string };
 };
 export type AgentSignal = { id: string; senderId: string; recipientId: string };
@@ -85,7 +89,7 @@ const legacyRequiredChecks: readonly CheckDuty[] = ["reviewer", "tester"];
 type Duty = "coder" | "reviewer" | "tester" | "analyser" | "designer" | "pm";
 
 type Run = {
-  turn?: Turn; delegated?: boolean; messageOffset?: number; message: WorkspaceMessage; check?: WorkspaceAgent["check"];
+  turn?: Turn; delegated?: boolean; reuseRequest?: ReturnType<typeof resolveTeamReuseRequest>; reuseLookupAttempted?: boolean; messageOffset?: number; message: WorkspaceMessage; check?: WorkspaceAgent["check"];
   demoTimer?: ReturnType<typeof setTimeout>; claude?: ReturnType<typeof runClaudeCode>;
   patches?: Map<string, FileUpdate[]>;
   checkTarget?: { agentId: string; submissionId: string; fingerprint: string };
@@ -109,6 +113,7 @@ type AgentSession = {
 
 const coordinatorId = "coordinator";
 const managementToolVersion = 9;
+const coordinatorToolVersion = 10;
 const workspaceThreadConfig = { "features.multi_agent": false, "features.multi_agent_v2": false };
 const input = (text: string) => [{ type: "text", text, text_elements: [] }];
 const hasSubmittedMessage = (agent: WorkspaceAgent) =>
@@ -129,6 +134,12 @@ const tool = {
     required: ["name", "goal", "duty"],
     additionalProperties: false,
   },
+};
+const findTeamTool = {
+  type: "function",
+  name: "find_archived_team",
+  description: "Select an archived team by exact name or team ID when the user explicitly asks to reuse it. Returns a compact handoff. New delegates in this turn use that team.",
+  inputSchema: { type: "object", properties: { name: { type: "string" } }, required: ["name"], additionalProperties: false },
 };
 const inspectGitTool = {
   type: "function",
@@ -245,6 +256,7 @@ export class WorkspaceRuntime {
   private readonly listeners = new Set<(snapshot: WorkspaceSnapshot) => void>();
   private readonly signalListeners = new Set<(signal: AgentSignal) => void>();
   private server?: AppServer;
+  private readonly teams = new Map<string, WorkspaceTeam>();
   private usage?: WorkspaceUsage;
   private usageIssue?: string;
   private started = false;
@@ -294,10 +306,11 @@ export class WorkspaceRuntime {
 
   snapshot(): WorkspaceSnapshot {
     const usage = this.usage ?? (this.usageIssue ? new WorkspaceUsage() : undefined);
-    if (!usage) return structuredClone(this.state);
+    const state = { ...this.state, teams: this.teamRecords() };
+    if (!usage) return structuredClone(state);
     const { total, byAgent, byTeam, unattributedTokens } = usage.summary();
     return structuredClone({
-      ...this.state, usage: { total, byAgent, byTeam, unattributedTokens, issue: this.usageIssue },
+      ...state, usage: { total, byAgent, byTeam, unattributedTokens, issue: this.usageIssue },
     });
   }
 
@@ -316,7 +329,46 @@ export class WorkspaceRuntime {
     }
   }
 
+  private teamRecords() {
+    const latest = new Map<string, number | undefined>();
+    for (const { agent } of this.sessions.values()) {
+      if (!agent.teamId) continue;
+      if (!latest.has(agent.teamId)) latest.set(agent.teamId, agent.archivedAt);
+      else {
+        const previous = latest.get(agent.teamId);
+        latest.set(agent.teamId, previous && agent.archivedAt ? Math.max(previous, agent.archivedAt) : undefined);
+      }
+    }
+    return [...this.teams.values()].filter((team) => latest.has(team.id))
+      .map((team) => ({ ...team, archivedAt: latest.get(team.id) }));
+  }
+
+  private updateTeamHandoff(agent: WorkspaceAgent) {
+    const team = agent.teamId && this.teams.get(agent.teamId);
+    if (!team || !agent.candidate || !agent.projectId) return;
+    const report = agent.messages.findLast((entry) => entry.role === "assistant" && !entry.state)?.text;
+    const paths = [...(team.handoff?.paths ?? [])];
+    const revisions = team.handoff?.sourceRevisions?.filter((entry) => entry.projectId !== agent.projectId) ?? [];
+    try {
+      const { path, base } = agent.candidate;
+      const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith("GIT_")));
+      const git = (...args: string[]) => execFileSync("git", ["--no-optional-locks", ...args],
+        { cwd: path, env, encoding: "utf8", timeout: 5000 });
+      const changed = git("diff", "--name-only", "-z", base, "--").split("\0");
+      const untracked = git("ls-files", "--others", "--exclude-standard", "-z").split("\0");
+      paths.unshift(...changed, ...untracked);
+      revisions.push({ projectId: agent.projectId, revision: base });
+    } catch { /* Acceptance is already verified. Keep the report if enrichment fails. */ }
+    team.handoff = boundedTeamHandoff({
+      summary: report ?? team.handoff?.summary,
+      decisions: [agent.goal ?? agent.name, ...(team.handoff?.decisions ?? [])],
+      paths,
+      sourceRevisions: revisions,
+    });
+  }
+
   private usageTeam(agent: WorkspaceAgent) {
+    if (agent.teamId) return agent.teamId;
     let root = agent;
     const visited = new Set<string>();
     while (root.parentId && root.parentId !== coordinatorId) {
@@ -354,8 +406,9 @@ export class WorkspaceRuntime {
     if (this.demo) return;
     let saved: SavedSession[] | undefined;
     try {
-      saved = this.store?.load()?.filter(({ agent }) => !agent.simulation);
-      if (saved) this.restore(saved);
+      const workspace = this.store?.loadWorkspace();
+      saved = workspace?.sessions.filter(({ agent }) => !agent.simulation);
+      if (saved) this.restore(saved, workspace?.teams);
       this.storageReady = true;
     } catch (error) {
       this.storageFailed = true;
@@ -663,6 +716,8 @@ export class WorkspaceRuntime {
           }
           throw new Error("Deletion could not be saved. The conversations were kept; resolve the storage failure before trying again.");
         }
+        const remainingTeams = new Set(this.teamRecords().map((team) => team.id));
+        for (const teamId of this.teams.keys()) if (!remainingTeams.has(teamId)) this.teams.delete(teamId);
         this.trackUsage((usage) => usage.removeAgents([...ids]));
       } else {
         const archiveDates = affected.map((entry) => entry.agent.archivedAt);
@@ -791,7 +846,7 @@ export class WorkspaceRuntime {
         agent,
         threadId: agent.archivedAt || run || recovery || (!freshThread && hasSubmittedMessage(agent)) ? threadId : undefined,
         run: run ? { messageId: run.message.id, turnId: run.turn?.id } : recovery,
-      })));
+      })), this.teamRecords());
       return true;
     } catch (error) {
       this.storageFailed = true;
@@ -835,7 +890,7 @@ export class WorkspaceRuntime {
     return session;
   }
 
-  private restore(saved: SavedSession[]) {
+  private restore(saved: SavedSession[], savedTeams: WorkspaceTeam[] = []) {
     const entries = new Map(saved.map((entry) => [entry.agent.id, entry]));
     if (this.projects.length === 1) {
       for (const { agent } of saved) {
@@ -851,6 +906,50 @@ export class WorkspaceRuntime {
       if (!parent || (parent.role !== "coordinator" && parent.projectId !== agent.projectId)) {
         throw new Error(`Saved agent ${agent.name} has an invalid project assignment.`);
       }
+    }
+    this.teams.clear();
+    for (const team of savedTeams) {
+      if (this.projects.length === 1) {
+        const projectId = this.projects[0].id;
+        team.projectIds = [projectId];
+        if (team.handoff?.sourceRevisions) {
+          team.handoff.sourceRevisions = team.handoff.sourceRevisions.map(({ revision }) => ({ projectId, revision }));
+        }
+      }
+      if (team.projectIds.some((id) => !this.projects.some((project) => project.id === id))) {
+        throw new Error(`Saved team ${team.name} has an unknown project.`);
+      }
+      this.teams.set(team.id, team);
+    }
+    const migratedTeams = new Set<string>();
+    for (const { agent } of saved) {
+      if (agent.role !== "lead" || agent.teamId) continue;
+      agent.teamId = agent.id;
+      this.teams.set(agent.id, { id: agent.id, name: agent.name, scope: agent.goal?.trim().slice(0, 2000) || agent.name,
+        projectIds: [agent.projectId!] });
+      migratedTeams.add(agent.id);
+    }
+    for (const { agent } of saved) {
+      const visited = new Set([agent.id]);
+      let parent = agent.parentId && entries.get(agent.parentId)?.agent;
+      while (!agent.teamId && parent && parent.role !== "coordinator" && !visited.has(parent.id)) {
+        visited.add(parent.id);
+        agent.teamId = parent.teamId;
+        parent = parent.parentId && entries.get(parent.parentId)?.agent;
+      }
+      if (agent.teamId && !this.teams.get(agent.teamId)?.projectIds.includes(agent.projectId!)) {
+        throw new Error(`Saved agent ${agent.name} has an invalid team assignment.`);
+      }
+    }
+    for (const { agent } of saved) {
+      if (agent.duty !== "coder" || agent.status !== "done" || !agent.submissionId || !agent.submissionFingerprint ||
+          !agent.teamId || !migratedTeams.has(agent.teamId)) continue;
+      const team = this.teams.get(agent.teamId)!;
+      team.handoff = boundedTeamHandoff({
+        summary: agent.messages.findLast((entry) => entry.role === "assistant" && !entry.state)?.text ?? team.handoff?.summary,
+        decisions: [agent.goal ?? agent.name, ...(team.handoff?.decisions ?? [])],
+        sourceRevisions: agent.candidate && agent.projectId ? [{ projectId: agent.projectId, revision: agent.candidate.base }] : undefined,
+      });
     }
     this.sessions.clear();
     this.state.agents.length = 0;
@@ -924,8 +1023,8 @@ export class WorkspaceRuntime {
         throw new Error("Codex returned an unexpected saved thread.");
       }
       const turn = run?.turnId && (initialTurnsPage?.data ?? thread.turns)?.find((entry) => entry.id === run.turnId);
-      const refreshTools = session.agent.role !== "worker" || session.agent.duty === "coder"
-        ? toolVersion !== managementToolVersion
+      const refreshTools = session.agent.role === "coordinator" ? toolVersion !== coordinatorToolVersion
+        : session.agent.role === "lead" || session.agent.duty === "coder" ? toolVersion !== managementToolVersion
         : (session.agent.duty === "reviewer" || session.agent.duty === "tester") && (toolVersion ?? 0) < 8;
       if (thread.status?.type === "active" || turn && turn.status === "inProgress") {
         throw new Error("Codex still reports an active turn. Check again after restarting the workspace.");
@@ -1062,7 +1161,8 @@ export class WorkspaceRuntime {
         ? [decisionTool, ...(session.agent.duty === "reviewer" || session.agent.duty === "tester" ? [checkTool] : [])]
         : [tool, relayTool, listTool, inspectGitTool, reportTool, decisionTool,
           ...((session.agent.role === "coordinator" || session.agent.role === "lead") ? [confirmCoderTool] : []),
-          ...(session.agent.role === "lead" ? [integrateTool, confirmIntegrationTool] : [])],
+          ...(session.agent.role === "lead" ? [integrateTool, confirmIntegrationTool] : []),
+          ...(session.agent.role === "coordinator" ? [findTeamTool] : [])],
       developerInstructions: this.instructions(session),
     });
     const { thread, modelProvider } = response;
@@ -1071,25 +1171,38 @@ export class WorkspaceRuntime {
     session.threadId = thread.id;
     this.trackUsage((usage) => usage.registerThread(thread.id, true, session.agent.id));
     session.freshThread = true;
-    session.toolVersion = managementToolVersion;
+    session.toolVersion = session.agent.role === "coordinator" ? coordinatorToolVersion : managementToolVersion;
     this.threadSessions.set(thread.id, session);
     this.publish();
     } finally { session.opening = false; }
   }
 
-  private teamReportContext(session: AgentSession) {
-    if (session.agent.role === "worker" && session.agent.duty !== "coder") return undefined;
-    const team = this.subtree(session).filter((entry) => entry !== session && this.isActive(entry));
+  private availableReports(session: AgentSession, message?: WorkspaceMessage) {
+    const reports = this.subtree(session).filter((entry) => entry !== session && this.isActive(entry));
+    if (!message?.reuseTeamId) return reports;
+    const runId = message.orchestrationRunId ?? message.id;
+    return reports.filter(({ agent }) => agent.teamId === message.reuseTeamId &&
+      agent.messages.some((entry) => entry.orchestrationRunId === runId));
+  }
+
+  private teamReportContext(session: AgentSession, entry?: WorkspaceMessage) {
+    const reusedTeam = entry?.reuseTeamId && this.teams.get(entry.reuseTeamId);
+    const handoff = reusedTeam ? {
+      orchestra_reused_team: { kind: "untrusted", name: "orchestra_reused_team", value: JSON.stringify(reusedTeam) },
+    } : undefined;
+    if (session.agent.role === "worker" && session.agent.duty !== "coder") return handoff;
+    const team = this.availableReports(session, entry);
     const reports = team.map(({ agent }) => {
       const recent = agent.messages.findLast((entry) => entry.role === "assistant" && !entry.state);
       return {
         agentId: agent.id, parentId: agent.parentId, projectId: agent.projectId, name: agent.name, duty: agent.duty,
-        status: agent.status, submissionId: agent.submissionId,
+        status: agent.status, submissionId: agent.submissionId, teamId: agent.teamId,
         check: agent.check && { ...agent.check, summary: agent.check.summary.slice(0, 2400) },
         latestReply: recent?.text.slice(0, 2400),
       };
     });
     return {
+      ...handoff,
       ...(session.freshThread && {
         orchestra_previous_chat: {
           kind: "untrusted",
@@ -1110,7 +1223,13 @@ export class WorkspaceRuntime {
   private async begin(session: AgentSession, next: WorkspaceMessage, parent?: Turn) {
     if (!this.isActive(session)) return;
     const run: Run = { message: next, messageOffset: session.agent.messages.length };
+    if (session.agent.role === "coordinator" && this.state.provider.name === "codex" && !this.demo) {
+      run.reuseRequest = resolveTeamReuseRequest(next.text, this.teamRecords());
+    }
     try {
+      if (next.reuseTeamId && !this.teams.has(next.reuseTeamId)) {
+        throw new Error("This team's saved handoff is no longer available. Select a team again.");
+      }
       this.checkCandidateAccess(session);
       if (session.agent.duty === "reviewer" || session.agent.duty === "tester") run.checkTarget = this.captureCheckTarget(session);
     } catch (error) {
@@ -1165,7 +1284,7 @@ export class WorkspaceRuntime {
             : { type: "readOnly", networkAccess: false },
         }),
         input: input(next.text),
-        additionalContext: this.teamReportContext(session),
+        additionalContext: this.teamReportContext(session, next),
         effort: session.agent.modelSettings?.effort,
         parentTurnId: parent?.id,
         rootTurnId: parent ? parent.rootTurnId ?? parent.id : undefined,
@@ -1464,7 +1583,7 @@ export class WorkspaceRuntime {
       if (completed && !session.run.delegated && (session.agent.role === "coordinator" || session.agent.role === "lead")) {
         const entry = session.run.message;
         this.trackUsage((usage) => usage.recordDecision({
-          id: entry.id, at: Date.now(), agentId: session.agent.id, runId: entry.orchestrationRunId ?? entry.id,
+          id: `direct:${entry.id}`, at: Date.now(), agentId: session.agent.id, runId: entry.orchestrationRunId ?? entry.id,
           teamId: this.usageTeam(session.agent), reason: "Completed the turn without delegating.",
           model: session.agent.modelSettings?.reportedModel,
         }));
@@ -1577,6 +1696,29 @@ export class WorkspaceRuntime {
         reply(false, "This tool is unavailable for the current turn.");
         return;
       }
+      if (params.tool === findTeamTool.name) {
+        const run = session.run!;
+        const { message: entry, reuseRequest, delegated } = run;
+        if (session.agent.role === "coordinator") run.reuseLookupAttempted = true;
+        const name = typeof params.arguments?.name === "string" ? params.arguments.name.trim().toLowerCase() : "";
+        if (session.agent.role !== "coordinator" || !reuseRequest || !name || delegated || entry.reuseTeamId) {
+          throw new Error("Select an archived team only when the user explicitly names it, before delegating.");
+        }
+        const matches = this.teamRecords().filter((team) => team.archivedAt && reuseRequest.teamIds.includes(team.id));
+        if (!matches.length) throw new Error(`No archived team matches "${reuseRequest.reference}". Ask the user to check the name or ID.`);
+        if (matches.length > 1) {
+          const options = matches.map((team) => ({ teamId: team.id, projects: team.projectIds, scope: team.scope.slice(0, 160) }));
+          throw new Error(`Several archived teams match that request. Ask the user to reply with Reuse team <ID> for the intended team. ${JSON.stringify(options)}`);
+        }
+        const [team] = matches;
+        if (name !== team.name.toLowerCase() && name !== team.id.toLowerCase()) {
+          throw new Error(`The user requested "${reuseRequest.reference}". Look up the complete team name or ID for that request.`);
+        }
+        entry.reuseTeamId = team.id;
+        this.publish();
+        reply(true, JSON.stringify(matches[0]));
+        return;
+      }
       if (params.tool === decisionTool.name) {
         const question = typeof params.arguments?.question === "string" ? params.arguments.question.trim() : "";
         if (!question || question.length > 4000) throw new Error("Provide a product question of up to 4,000 characters.");
@@ -1612,7 +1754,7 @@ export class WorkspaceRuntime {
         reply(true, JSON.stringify(inspectGit(session.agent.role === "coordinator" ? project.path : this.sessionCwd(session))));
         return;
       }
-      const reports = this.subtree(session).filter((entry) => entry !== session && this.isActive(entry));
+      const reports = this.availableReports(session, session.run!.message);
       if (params.tool === reportTool.name) {
         const target = [...this.sessions.values()].find((entry) => entry.agent.id === params.arguments?.agentId);
         if (!target || !reports.includes(target)) {
@@ -1653,6 +1795,7 @@ export class WorkspaceRuntime {
         }
         coder.agent.submissionFingerprint = fingerprint;
         coder.agent.status = "done";
+        this.updateTeamHandoff(coder.agent);
         const notice = `${session.agent.name} confirmed ${coder.agent.name}'s implementation.`;
         for (const recipient of new Set([coder, session, this.sessions.get(coordinatorId)])) {
           recipient?.agent.messages.push(message("system", notice, "success",
@@ -1708,7 +1851,7 @@ export class WorkspaceRuntime {
       }
       if (params.tool === listTool.name) {
         reply(true, JSON.stringify(reports.map(({ agent }) => ({
-          id: agent.id, projectId: agent.projectId, parentId: agent.parentId, name: agent.name, role: agent.role, duty: agent.duty, goal: agent.goal, status: agent.status,
+          id: agent.id, projectId: agent.projectId, teamId: agent.teamId, parentId: agent.parentId, name: agent.name, role: agent.role, duty: agent.duty, goal: agent.goal, status: agent.status,
           submissionId: agent.submissionId, acceptanceOwnerId: agent.acceptanceOwnerId, requiredChecks: agent.requiredChecks, validationTargetId: agent.validationTargetId, candidate: agent.candidate?.path, check: agent.check,
         }))));
         return;
@@ -1716,12 +1859,16 @@ export class WorkspaceRuntime {
       const goal = typeof params.arguments?.goal === "string" ? params.arguments.goal.trim() : "";
       if (!goal || goal.length > 24_000) throw new Error("Provide a goal of up to 24,000 characters.");
       if (params.tool === relayTool.name) {
+        if ((session.run!.reuseRequest || session.run!.reuseLookupAttempted) && !session.run!.message.reuseTeamId) {
+          throw new Error("Resolve the requested archived team before sending assignments.");
+        }
         const recipient = reports.find((entry) => entry.agent.id === params.arguments?.agentId);
         if (!recipient?.threadId) throw new Error("Choose an open descendant on your team.");
         this.checkCandidateAccess(recipient);
         const instruction = message("user", goal);
         const run = session.run!;
-        instruction.orchestrationRunId = run.message.orchestrationRunId ?? run.message.id;
+        const runId = run.message.orchestrationRunId ?? run.message.id;
+        instruction.orchestrationRunId = runId;
         recipient.agent.messages.push(instruction);
         await this.enqueue(recipient, instruction);
         const outcome = this.delegationOutcome(recipient, instruction);
@@ -1747,7 +1894,18 @@ export class WorkspaceRuntime {
       if ((duty === "lead" && session.agent.role !== "coordinator") || (duty === "coder" && session.agent.role !== "lead" && session.agent.role !== "coordinator")) {
         throw new Error("Only the pilot can start leads. Only the pilot or a lead can assign coders.");
       }
-      const project = this.selectProject(session, params.arguments?.projectId);
+      const reuseTeamId = session.run!.message.reuseTeamId;
+      if ((session.run!.reuseRequest || session.run!.reuseLookupAttempted) && !reuseTeamId) {
+        throw new Error("Resolve the requested archived team before delegating.");
+      }
+      const reusedTeam = reuseTeamId && this.teams.get(reuseTeamId);
+      if (reuseTeamId && !reusedTeam) throw new Error("The selected team is no longer available.");
+      const requestedProject = params.arguments?.projectId;
+      const project = this.selectProject(session, requestedProject ??
+        (reusedTeam && reusedTeam.projectIds.length === 1 ? reusedTeam.projectIds[0] : undefined));
+      if (reusedTeam && !reusedTeam.projectIds.includes(project.id)) {
+        throw new Error("Choose a project assigned to the selected team.");
+      }
       const modelSettings = this.selectModelSettings(params.arguments?.complexity);
       const checkPlan = params.arguments?.requiredChecks;
       const requiredChecks = checkPlan === undefined ? [] : checkPlan;
@@ -1774,6 +1932,7 @@ export class WorkspaceRuntime {
       const parentId = prerequisite?.agent.id ?? session.agent.id;
       const agent = this.createAgent(randomUUID(), name, duty === "lead" ? "lead" : "worker", parentId, goal);
       agent.agent.projectId = project.id;
+      agent.agent.teamId = reusedTeam ? reusedTeam.id : prerequisite?.agent.teamId ?? session.agent.teamId;
       agent.agent.duty = duty === "lead" ? undefined : duty;
       agent.agent.candidate = candidate;
       agent.agent.modelSettings = modelSettings;
@@ -1797,7 +1956,12 @@ export class WorkspaceRuntime {
           !prerequisite.agent.requiredChecks.includes(duty)) {
         prerequisite.agent.requiredChecks.push(duty);
       }
+      if (duty === "lead" && !agent.agent.teamId) {
+        agent.agent.teamId = agent.agent.id;
+        this.teams.set(agent.agent.id, { id: agent.agent.id, name, scope: goal.slice(0, 2000), projectIds: [project.id] });
+      }
       const assignment = message("user", goal);
+      assignment.reuseTeamId = reuseTeamId;
       const run = session.run!;
       assignment.orchestrationRunId = run.message.orchestrationRunId ?? run.message.id;
       assignment.state = "queued";
@@ -1816,13 +1980,14 @@ export class WorkspaceRuntime {
         id: assignment.id, at: Date.now(), agentId: session.agent.id, delegateId: agent.agent.id,
         runId: assignment.orchestrationRunId, teamId: this.usageTeam(agent.agent),
         duty, complexity: modelSettings.complexity, model: modelSettings.requestedModel, outcome,
-        reason: duty === "lead" ? "Lead for coordinated work."
+        reason: reusedTeam && session.agent.role === "coordinator" ? "Fresh assignment for an explicitly selected team."
+          : duty === "lead" ? "Lead for coordinated work."
           : duty === "coder" ? session.agent.role === "coordinator" ? "Direct assignment to a coder." : "Implementation in an isolated candidate."
           : prerequisite || integrationCheck ? "Independent candidate check." : "Specialist assignment.",
       }));
       if (outcome !== "failed") this.signal(session.agent.id, agent.agent.id);
       reply(outcome !== "failed", JSON.stringify({
-        id: agent.agent.id, projectId: project.id, name, duty, modelSettings: agent.agent.modelSettings, waitingFor: agent.waitingFor, candidate: agent.agent.candidate?.path,
+        id: agent.agent.id, projectId: project.id, teamId: agent.agent.teamId, name, duty, modelSettings: agent.agent.modelSettings, waitingFor: agent.waitingFor, candidate: agent.agent.candidate?.path,
       }));
     } catch (error) {
       reply(false, errorText(error));

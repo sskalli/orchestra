@@ -42,8 +42,9 @@ test("workspace attributes early and late usage to the root run across delegatio
   assert.equal(exported?.byRun[rootMessage.id].tokens?.inputTokens, 200);
   assert.equal(exported?.byAgent.coordinator.tokens?.inputTokens, 160);
   assert.equal(exported?.byTeam[lead.id].tokens?.inputTokens, 40);
-  assert.equal(exported?.decisions.length, 1);
-  assert.equal(exported?.decisions[0].outcome, "started");
+  assert.equal(exported?.decisions.length, 2);
+  assert.equal(exported?.decisions.find((decision) => decision.delegateId === lead.id)?.outcome, "started");
+  assert.match(exported?.decisions.find((decision) => decision.agentId === lead.id)?.reason ?? "", /without delegating/);
 
   await send(lead.id, "unreported");
   await waitFor(() => total()?.unknownTurns === 1);
