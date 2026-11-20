@@ -40,6 +40,8 @@ type ChatProps = {
   kind: "project" | "agent";
   title?: string;
   projectLabel?: string;
+  repositoryScope?: string[];
+  delivery?: { members: { projectId: string; path: string }[]; confirmed?: boolean };
   modelLabel?: string;
   usageLabel?: string;
   draft: string;
@@ -80,7 +82,7 @@ const systemMessageLabels: Record<SystemMessageKind, string> = {
 };
 
 function Conversation({
-  agent, kind, title, projectLabel, modelLabel, usageLabel, draft: initialDraft, composerHeight, onComposerHeightChange, onDraftInput, onDraftChange, onSend, onSteer, onCancel, onApproval, onResumeQueue, onClose,
+  agent, kind, title, projectLabel, repositoryScope, delivery, modelLabel, usageLabel, draft: initialDraft, composerHeight, onComposerHeightChange, onDraftInput, onDraftChange, onSend, onSteer, onCancel, onApproval, onResumeQueue, onClose,
   disabled, disabledReason, focusMessageId, focusRequest, onOpenAgent, onLifecycle,
 }: ChatProps) {
   const transcript = useRef<HTMLDivElement>(null);
@@ -431,6 +433,7 @@ function Conversation({
         <div className="chat-header-copy">
           <h2 title={heading}>{kind === "project" ? `COMMS // CHANNEL: ${heading}` : heading}</h2>
           {kind === "agent" ? <span className="chat-agent-status">{projectLabel ? `Project: ${projectLabel} · ` : ""}{archived ? "Archived" : agent.lifecycleBusy ? "Updating…" : statusLabels[agent.status]}</span> : null}
+          {repositoryScope && <span className="chat-agent-status">Repositories: {repositoryScope.join(", ")}</span>}
           {modelLabel && <span className="chat-agent-status">{modelLabel}</span>}
           {usageLabel && <span className="chat-agent-status" title={usageLabel}>{usageLabel}</span>}
         </div>
@@ -464,6 +467,16 @@ function Conversation({
           <span aria-hidden="true">{kind === "project" ? "«" : "×"}</span>
         </button>
       </header>
+      {delivery && <details className="chat-delivery">
+        <summary>Delivery snapshots · {delivery.confirmed ? "Recorded checks passed" : "Validation required"}</summary>
+        <ul>
+          {delivery.members.map(({ projectId, path }) => <li key={projectId}>
+            <label>{projectId}<input aria-label={`${projectId} candidate worktree`} value={path} readOnly
+              onFocus={(event) => event.currentTarget.select()} /></label>
+          </li>)}
+        </ul>
+        <p>Review and merge each repository separately.</p>
+      </details>}
 
       {archived && <p className="chat-archive-notice">Archived {new Date(agent.archivedAt!).toLocaleString()}. Restore to continue this conversation.</p>}
       <div className="chat-transcript" role="log" aria-label={`Conversation with ${recipient}`} aria-relevant="additions"

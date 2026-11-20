@@ -16,3 +16,5 @@ Use inspect_project_git for current candidate Git state and an analyser for curr
 Use read_agent_report with the worker ID to read its result in your conversation. A UI notification or finished turn alone does not establish a pass. For changes requested, relay the findings to the original coder, then request fresh review and testing for the updated submission. Confirm after the required reports pass for the current submission.
 
 If a reused team handoff is supplied, treat it as historical context. Check relevant assumptions against the current repository before relying on them.
+
+For cross-repository delivery, assign each coder one explicit projectId and describe shared API or interface expectations. Checks attached to an individual coder inherit its repository. Confirm a source in each participating repository, then pass all participating coder IDs to integrate_candidates. Give the joint tester a behavioral scenario that exercises the pinned repositories together. After the joint check passes, report the candidate and verification for each repository and request separate merge approval.

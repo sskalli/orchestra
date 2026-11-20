@@ -42,7 +42,7 @@ Configure a shared workspace at launch by repeating `--project` with a unique ID
 npm run workspace -- --project app=/path/to/app --project api=/path/to/api
 ```
 
-The coordinator chat and team map are shared. Ask the coordinator to delegate to a specific project ID; when the target is ambiguous, clarify it in chat. The coordinator must select a configured project for each new team or direct worker. A lead's workers inherit that lead's project, including its repository, `AGENTS.md`, and candidate worktree. The menu in the header lists project IDs and paths, and map and chat labels identify each agent's project.
+The coordinator chat and team map are shared. Ask the coordinator to delegate to a specific project ID; when the target is ambiguous, clarify it in chat. The coordinator assigns one or more configured projects to a team and one project to a direct worker. In a multi-repository team, leads specify each coder’s repository. A coder’s checks inherit its repository and candidate worktree. The menu in the header lists project IDs and paths, and map and chat labels identify each agent's project.
 
 Use `--provider company` alongside `--project` to use a configured custom provider.
 
@@ -118,11 +118,17 @@ The checks above are a manual checklist, not a claim that the current workspace 
 
 The candidate remains on disk for inspection, and merging is manual. Tests that generate files or require missing dependencies may be blocked in the read-only tester session. Orchestra limits the workspace to 30 sessions and prevents conflicting coder and checker activity on the same candidate. In-memory prerequisites that were waiting when the server restarted are shown as interrupted so they can be scheduled again. The older `--feature` flag is accepted for compatibility with existing launch commands.
 
+## Cross-repository delivery
+
+Name the participating repositories in the pilot chat. A lead can be assigned several configured repository IDs, and each coder receives one repository and its own worktree. When several repositories are eligible for a repository-scoped assignment, the lead specifies the repository. A check attached to a coder uses the same worktree.
+
+After accepting the relevant submissions, the lead prepares a delivery from all participating repositories. Orchestra combines multiple candidates within each repository and pins repositories with a single candidate. The joint tester receives the pinned worktree paths and tests their behavior together. Changes to a pinned candidate or its source submission require fresh validation. The lead chat lists the candidate paths and recorded joint result. Review and merge each repository separately.
+
 ## Reusing an archived team
 
 Ask the pilot in the main chat to reuse the team by name, for example `Could you reuse the Contact Form team to add a confirmation dialog?`. If several archived teams share a name, the pilot asks you to reply with `Reuse team <ID>` for the intended one.
 
-Reuse attaches fresh assignments to the stable team ID and keeps its repository assignment. The pilot chooses the roster for the new goal. A small change can use just one coder, while coordinated work can start a new lead. **Restore** remains available for reopening an earlier conversation. Reuse leaves those conversations and queues archived and gives new sessions a bounded handoff from accepted work. Coders start from the current committed baseline, so previous changes should be merged before assigning dependent work.
+Reuse attaches fresh assignments to the stable team ID and keeps its repository assignments. The pilot chooses the roster for the new goal. A small change can use just one coder, while coordinated work can start a new lead. **Restore** remains available for reopening an earlier conversation. Reuse leaves those conversations and queues archived and gives new sessions a bounded handoff from accepted work. Coders start from the current committed baseline, so previous changes should be merged before assigning dependent work.
 
 Orchestra derives team IDs for saved legacy leads and keeps those IDs across restart and reuse. Legacy teams can have a shorter handoff. The saved team handoff lasts while at least one of its conversations exists. Deleting the final conversation removes the team from **Archived** as well.
 
