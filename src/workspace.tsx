@@ -483,6 +483,11 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
     const team = kind === "agent" && agent.role !== "lead"
       ? agents.find((item) => item.role === "lead" && (item.id === agent.parentId || belongsTo(agent, item.id)))
       : undefined;
+    const integration = team?.integration;
+    const repositoryIds = agent.role === "lead" ? teamIdentity?.projectIds
+      : integration && agent.validationIntegrationId === integration.id ? integration.members?.map(({ projectId }) => projectId)
+      : undefined;
+    const repositoryScope = repositoryIds && repositoryIds.length > 1 ? repositoryIds : undefined;
 
     function belongsTo(child: Agent, id: string) {
       const visited = new Set<string>();
@@ -529,7 +534,9 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
         ? `${agentAppearance(team).displayName} / ${agentAppearance(agent).displayName}`
         : `${agentAppearance(agent).displayName}${team ? ` / ${agentAppearance(team).displayName}`
           : teamIdentity && teamIdentity.name !== agent.name ? ` / ${teamIdentity.name}` : ""}`}
-      projectLabel={kind === "agent" && snapshot.projects.length > 1 ? agent.projectId : undefined}
+      projectLabel={kind === "agent" && snapshot.projects.length > 1 && !repositoryScope ? agent.projectId : undefined}
+      repositoryScope={repositoryScope}
+      delivery={agent.integration?.members?.length ? { members: agent.integration.members, confirmed: agent.integration.confirmed } : undefined}
       modelLabel={modelLabel}
       usageLabel={[usage, teamTokens].filter(Boolean).join(" · ")}
       draft={drafts[agent.id] ?? ""}

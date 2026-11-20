@@ -47,6 +47,29 @@
   overflow-wrap: anywhere;
 }
 
+.chat-delivery {
+  flex: 0 0 auto;
+  max-height: 40%;
+  overflow: auto;
+  padding: 8px 16px 8px 21px;
+  border-bottom: 1px solid var(--sw-line);
+  color: #b3b3b3;
+  font-size: .69rem;
+}
+
+.chat-delivery summary { cursor: pointer; color: var(--sw-text); }
+.chat-delivery ul { display: grid; gap: 6px; margin: 8px 0; padding: 0; list-style: none; }
+.chat-delivery label { display: grid; gap: 3px; overflow-wrap: anywhere; }
+.chat-delivery input {
+  min-width: 0;
+  padding: 3px 5px;
+  border: 1px solid var(--sw-line);
+  background: var(--sw-terminal);
+  color: var(--sw-text);
+  font: inherit;
+}
+.chat-delivery p { margin: 0; }
+
 .workspace-chat button {
   color: inherit;
   font: inherit;

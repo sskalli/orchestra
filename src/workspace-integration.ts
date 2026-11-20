@@ -6,6 +6,12 @@ import { dirname, join, resolve } from "node:path";
 import { createFeatureWorktree } from "./workspace-worktree.ts";
 
 export type IntegrationSource = { agentId: string; path: string; base: string; submissionId: string; expectedFingerprint: string };
+export type IntegrationMember = { projectId: string; path: string; base: string; fingerprint: string };
+type ProjectSource = IntegrationSource & { projectId: string };
+type ProjectIntegration = Omit<IntegrationMember, "projectId"> & {
+  members?: IntegrationMember[];
+  sources: { agentId: string; submissionId: string; head: string; fingerprint: string; projectId?: string }[];
+};
 
 // Git operates only on app-owned candidate metadata. Never inherit a caller's
 // GIT_INDEX_FILE/GIT_DIR, and never run repository hooks or signing programs.
@@ -46,27 +52,39 @@ export function fingerprintCandidate(path: string) {
   return snapshot(repository(path).root).fingerprint;
 }
 
+function captureSource(target: ReturnType<typeof repository>, baseline: string, source: IntegrationSource) {
+  const candidate = repository(source.path);
+  if (candidate.root === target.root || candidate.common !== target.common) {
+    throw new Error("Every integration source must be an isolated worktree of this project.");
+  }
+  if (!/^[a-f0-9]{40,64}$/i.test(source.base) || !source.submissionId) throw new Error("Invalid candidate baseline or submission.");
+  git(candidate.root, ["merge-base", "--is-ancestor", source.base, "HEAD"]);
+  git(target.root, ["merge-base", "--is-ancestor", source.base, baseline]);
+  const captured = snapshot(candidate.root);
+  if (!source.expectedFingerprint || source.expectedFingerprint !== captured.fingerprint) {
+    throw new Error(`Candidate ${source.agentId} changed since acceptance. Revalidate it before integration.`);
+  }
+  return { source, path: candidate.root, ...captured };
+}
+
+function removeIntegrationWorktree(project: string, path: string) {
+  // This is only called for worktrees created by the current integration attempt.
+  try { git(project, ["worktree", "remove", "--force", path]); rmdirSync(dirname(path)); }
+  catch { /* Preserve partial state if Git cannot remove it. */ }
+}
+
 /** Combine accepted submissions in a new detached worktree; never merge the project branch. */
 export function integrateCandidates(project: string, candidates: IntegrationSource[]) {
   if (candidates.length < 2 || new Set(candidates.map((source) => source.agentId)).size !== candidates.length) {
     throw new Error("Choose at least two distinct accepted coder submissions to integrate.");
   }
+  return materializeCandidates(project, candidates);
+}
+
+function materializeCandidates(project: string, candidates: IntegrationSource[]) {
   const target = repository(project);
   const baseline = git(target.root, ["rev-parse", "--verify", "HEAD^{commit}"]);
-  const snapshots = candidates.map((source) => {
-    const candidate = repository(source.path);
-    if (candidate.root === target.root || candidate.common !== target.common) {
-      throw new Error("Every integration source must be an isolated worktree of this project.");
-    }
-    if (!/^[a-f0-9]{40,64}$/i.test(source.base) || !source.submissionId) throw new Error("Invalid candidate baseline or submission.");
-    git(candidate.root, ["merge-base", "--is-ancestor", source.base, "HEAD"]);
-    git(target.root, ["merge-base", "--is-ancestor", source.base, baseline]);
-    const captured = snapshot(candidate.root);
-    if (!source.expectedFingerprint || source.expectedFingerprint !== captured.fingerprint) {
-      throw new Error(`Candidate ${source.agentId} changed since acceptance. Revalidate it before integration.`);
-    }
-    return { source, path: candidate.root, ...captured };
-  });
+  const snapshots = candidates.map((source) => captureSource(target, baseline, source));
   if (new Set(snapshots.map((source) => source.path)).size !== snapshots.length) {
     throw new Error("Each integrated coder must have a distinct isolated worktree.");
   }
@@ -99,9 +117,60 @@ export function integrateCandidates(project: string, candidates: IntegrationSour
       sources: snapshots.map(({ source, head, fingerprint }) => ({ agentId: source.agentId, submissionId: source.submissionId, head, fingerprint })),
     };
   } catch (error) {
-    // Only remove the worktree created by this call. Keep any cleanup failure
-    // available for inspection instead of recursively deleting an arbitrary path.
-    try { git(target.root, ["worktree", "remove", "--force", integration.path]); rmdirSync(dirname(integration.path)); } catch { /* Preserve partial state if Git cannot remove it. */ }
+    removeIntegrationWorktree(target.root, integration.path);
+    throw error;
+  }
+}
+
+function integrationFingerprint(members: readonly IntegrationMember[]) {
+  const ordered = [...members].sort((a, b) => a.projectId < b.projectId ? -1 : a.projectId > b.projectId ? 1 : 0);
+  const descriptors = ordered.map(({ projectId, path, base, fingerprint }) => [projectId, path, base, fingerprint]);
+  return createHash("sha256").update(JSON.stringify(descriptors)).digest("hex");
+}
+
+/** Recompute the manifest fingerprint from current checked-out contents. */
+export function fingerprintIntegrationMembers(members: readonly IntegrationMember[]) {
+  return integrationFingerprint(members.map((member) => ({ ...member, fingerprint: fingerprintCandidate(member.path) })));
+}
+
+/** Prepare independent candidates per repository and pin them as a single testable delivery. */
+export function integrateProjectCandidates(
+  projects: readonly { id: string; path: string }[],
+  sources: ProjectSource[],
+): ProjectIntegration {
+  if (sources.length < 2 || new Set(sources.map((source) => source.agentId)).size !== sources.length) {
+    throw new Error("Choose at least two distinct accepted coder submissions to integrate.");
+  }
+  const groups = new Map<string, ProjectSource[]>();
+  for (const source of sources) {
+    const group = groups.get(source.projectId) ?? [];
+    group.push(source);
+    groups.set(source.projectId, group);
+  }
+  const selected = projects.filter(({ id }) => groups.has(id));
+  if (selected.length !== groups.size) throw new Error("Every integration source needs a configured project.");
+  if (selected.length === 1) return integrateCandidates(selected[0].path, sources);
+
+  const created: { project: string; path: string }[] = [];
+  const members: IntegrationMember[] = [];
+  const submissions: ProjectIntegration["sources"] = [];
+  try {
+    for (const { id: projectId, path: project } of selected) {
+      const group = groups.get(projectId)!;
+      const combined = materializeCandidates(project, group);
+      created.push({ project, path: combined.path });
+      members.push({ projectId, path: combined.path, base: combined.base, fingerprint: combined.fingerprint });
+      submissions.push(...combined.sources.map((source) => ({ ...source, projectId })));
+    }
+    const fingerprint = integrationFingerprint(members);
+    if (fingerprintIntegrationMembers(members) !== fingerprint ||
+        sources.some((source) => fingerprintCandidate(source.path) !== source.expectedFingerprint)) {
+      throw new Error("An integration candidate changed during preparation. Revalidate it before retrying.");
+    }
+    const [{ path, base }] = members;
+    return { path, base, fingerprint, members, sources: submissions };
+  } catch (error) {
+    for (const { project, path } of created.reverse()) removeIntegrationWorktree(project, path);
     throw error;
   }
 }
