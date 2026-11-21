@@ -86,6 +86,7 @@ const implementationLabels = {
   implementing: "Implementation in progress",
   blocked: "Implementation blocked",
   "ready-for-review": "Ready for review",
+  confirmed: "Implementation confirmed",
 };
 
 const systemMessageLabels: Record<SystemMessageKind, string> = {
@@ -443,7 +444,7 @@ function Conversation({
                     <p>Repository <code>{implementation.projectId}</code></p>
                     <p className="chat-implementation-brief">{implementation.brief}</p>
                     {implementation.detail && <p>{implementation.detail}</p>}
-                    {implementation.status === "ready-for-review" && implementation.verification &&
+                    {(implementation.status === "ready-for-review" || implementation.status === "confirmed") && implementation.verification &&
                       <p className="chat-implementation-brief">Coder-reported checks: {implementation.verification.summary}</p>}
                     {implementation.candidateRevision && <p>Revision <code>{implementation.candidateRevision}</code></p>}
                     {implementation.candidatePath && <p>Worktree <code>{implementation.candidatePath}</code></p>}

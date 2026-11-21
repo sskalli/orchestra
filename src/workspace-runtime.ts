@@ -37,7 +37,7 @@ export type ImplementationProposal = {
   id: string;
   projectId: string;
   brief: string;
-  status: "awaiting-approval" | "implementing" | "blocked" | "ready-for-review";
+  status: "awaiting-approval" | "implementing" | "blocked" | "ready-for-review" | "confirmed";
   coderId?: string;
   candidatePath?: string;
   candidateRevision?: string;
@@ -814,6 +814,15 @@ export class WorkspaceRuntime {
           for (const historical of entry.agent.messages) {
             if (historical.sourceAgentId && ids.has(historical.sourceAgentId)) {
               historical.sourceAgentName ??= this.sessions.get(historical.sourceAgentId)?.agent.name;
+            }
+          }
+          const proposal = entry.agent.implementationProposal;
+          if (!ids.has(entry.agent.id) && proposal?.coderId && ids.has(proposal.coderId)) {
+            delete proposal.coderId;
+            if (proposal.status !== "confirmed") {
+              proposal.status = "blocked";
+              if (!proposal.candidateRevision) delete proposal.verification;
+              proposal.detail = "The implementation coder was deleted. Request a fresh proposal in this investigation.";
             }
           }
           if (entry.waitingFor && ids.has(entry.waitingFor)) {
@@ -2085,6 +2094,8 @@ export class WorkspaceRuntime {
         }
         coder.agent.submissionFingerprint = fingerprint;
         coder.agent.status = "done";
+        const proposal = this.approvedProposal(coder);
+        if (proposal?.status === "ready-for-review") proposal.status = "confirmed";
         this.updateTeamHandoff(coder.agent);
         const deliveryLocations = directMembers && coder.agent.integration?.members?.map(
           ({ projectId, path, revision }) => `${projectId} at ${revision}: ${path}`).join("\n");

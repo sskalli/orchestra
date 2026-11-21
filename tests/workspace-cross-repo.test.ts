@@ -436,15 +436,72 @@ test("one approval continues the stale-status investigation in an isolated adapt
   assert.equal(delivery.candidateRevision, git(delivery.candidatePath, "rev-parse", "HEAD"));
   assert.equal(git(delivery.candidatePath, "status", "--porcelain"), "");
   check(delivery.candidatePath, "pass");
+  const confirmation = await call(coordinator, "confirm_implementation", { agentId: coder.agent.id });
+  assert.equal(confirmation.success, true, confirmation.text);
+  const confirmed = getTask().implementationProposal;
+  assert.deepEqual(confirmed, { ...delivery, status: "confirmed" });
+  assert.equal(runtime.snapshot().agents.find((agent) => agent.id === coder.agent.id)?.status, "done");
   const savedDelivery = store.loadWorkspace();
   assert(savedDelivery);
   const reopened = new WorkspaceRuntime({ cwd: dashboard.path, projects, store });
   t.after(() => reopened.close());
   (reopened as any).restore(savedDelivery.sessions, savedDelivery.teams);
   assert.deepEqual(reopened.snapshot().agents.find((agent) => agent.id === investigation.agent.id)?.implementationProposal,
-    delivery);
+    confirmed);
+
+  await runtime.command({ type: "archive", agentId: coder.agent.id });
+  await runtime.command({ type: "delete", agentId: coder.agent.id });
+  const retainedDelivery = getTask().implementationProposal;
+  assert.equal(retainedDelivery?.status, "confirmed");
+  assert.equal(retainedDelivery.coderId, undefined);
+  assert.equal(retainedDelivery.candidatePath, delivery.candidatePath);
+  assert.equal(retainedDelivery.candidateRevision, delivery.candidateRevision);
+  check(delivery.candidatePath, "pass");
+
   for (const [index, { path }] of projects.entries()) {
     assert.equal(git(path, "rev-parse", "HEAD"), baseline[index]);
     assert.equal(git(path, "status", "--porcelain"), "");
   }
+});
+
+test("deleting a blocked approved coder allows a new proposal on the same investigation", async (t) => {
+  const fixture = crossRepoFixture(t);
+  if (!fixture) return;
+  const { runtime, coordinator, internal, call, complete, delegate, sessionFrom } = fixture;
+  const investigation = sessionFrom(await delegate(coordinator, "analyser", { projectId: "api" }));
+  const getProposal = () => runtime.snapshot().agents.find(({ id }) => id === investigation.agent.id)?.implementationProposal;
+  const propose = async (brief: string) => {
+    const response = await call(investigation, "raise_product_decision", {
+      question: "Approve implementation?",
+      implementation: { projectId: "api", brief },
+    });
+    assert.equal(response.success, true, response.text);
+    complete(investigation);
+    const proposal = getProposal();
+    assert.equal(proposal?.status, "awaiting-approval");
+    return proposal.id;
+  };
+  const approve = (proposalId: string) =>
+    runtime.command({ type: "approveImplementation", agentId: investigation.agent.id, proposalId });
+
+  const original = await propose("Make the original change.");
+  await approve(original);
+  const blockedCoderId = getProposal()?.coderId;
+  assert(blockedCoderId);
+  complete(internal.sessions.get(blockedCoderId));
+  assert.equal(getProposal()?.status, "blocked");
+
+  await runtime.command({ type: "archive", agentId: blockedCoderId });
+  await runtime.command({ type: "delete", agentId: blockedCoderId });
+  assert.equal(getProposal()?.status, "blocked");
+  assert.equal(getProposal()?.coderId, undefined);
+  assert.equal(runtime.snapshot().agents.some(({ id }) => id === blockedCoderId), false);
+
+  const replacement = await propose("Make the replacement change.");
+  assert.notEqual(replacement, original);
+  await assert.rejects(approve(original));
+  await approve(replacement);
+  assert.equal(getProposal()?.status, "implementing");
+  assert.deepEqual(runtime.snapshot().agents.filter(({ duty }) => duty === "coder").map(({ id, parentId }) => [id, parentId]),
+    [[getProposal()?.coderId, investigation.agent.id]]);
 });

@@ -54,7 +54,7 @@ The live workspace opens a coordinator conversation, labeled **Computer** in the
 
 ### From investigation to implementation
 
-Ask the coordinator to investigate a bug and wait for approval before editing. An analyser can leave a scoped implementation proposal with the target repository, intended change, and verification steps. Review it in the main or task chat and select **Approve implementation** to start a coder in an isolated worktree under the investigation. The original task shows whether implementation is running, blocked, or ready for review. Project branches still require a separate merge decision.
+Ask the coordinator to investigate a bug and wait for approval before editing. An analyser can leave a scoped implementation proposal with the target repository, intended change, and verification steps. Review it in the main or task chat and select **Approve implementation** to start a coder in an isolated worktree under the investigation. The original task shows whether implementation is running, blocked, ready for review, or confirmed. Project branches still require a separate merge decision.
 
 ## Claude Code mode
 

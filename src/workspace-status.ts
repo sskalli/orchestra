@@ -7,6 +7,7 @@ const implementationStatuses = {
   implementing: "working",
   blocked: "error",
   "ready-for-review": "awaiting-confirmation",
+  confirmed: "done",
 } as const;
 
 // A finished provider turn is not necessarily a successful validation.
