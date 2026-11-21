@@ -24,6 +24,7 @@ type Point = { x: number; y: number };
 type Node = Point & { agent: CanvasAgent; taskRoot: boolean };
 type Team = Point & { depth: number };
 type Layout = { nodes: Node[]; teams: Team[] };
+type TaskDrag = { id: string; pointerId: number; start: Point; center: Point; scale: number; moved: boolean };
 type Gesture = { start: Point; previous: Point; dragged: boolean };
 type Pinch = { center: Point; distance: number };
 
@@ -53,7 +54,7 @@ function teamCenters(count: number): Point[] {
   return centers;
 }
 
-export function radialLayout(agents: CanvasAgent[]): Layout {
+export function radialLayout(agents: CanvasAgent[], taskPositions: ReadonlyMap<string, Point> = new Map()): Layout {
   const teamAgents = agents.filter((agent) => agent.role !== "coordinator");
   const ids = new Set(teamAgents.map((agent) => agent.id));
   const children = new Map<string, CanvasAgent[]>();
@@ -73,7 +74,7 @@ export function radialLayout(agents: CanvasAgent[]): Layout {
   const visited = new Set<string>();
   const centers = teamCenters(roots.length);
   roots.forEach((root, index) => {
-    const team = { ...centers[index], depth: 0 };
+    const team = { ...(taskPositions.get(root.id) ?? centers[index]), depth: 0 };
     const walk = (agent: CanvasAgent, depth: number, angle: number, sector: number) => {
       if (visited.has(agent.id)) return;
       visited.add(agent.id);
@@ -203,7 +204,10 @@ export function WorkspaceCanvas({
   initialCamera?: Camera;
   onCameraChange?: (camera: Camera) => void;
 }) {
-  const layout = useMemo(() => radialLayout(agents), [agents]);
+  const [taskPositions, setTaskPositions] = useState(() => new Map<string, Point>());
+  const layout = useMemo(() => radialLayout(agents, taskPositions), [agents, taskPositions]);
+  const taskDrag = useRef<TaskDrag | null>(null);
+  const suppressTaskClick = useRef<string | null>(null);
   const viewport = useRef<HTMLDivElement>(null);
   const nodes = useRef(new Map<string, HTMLButtonElement>());
   const pointers = useRef(new Map<number, Point>());
@@ -268,6 +272,7 @@ export function WorkspaceCanvas({
     if (!element) return;
     const handleWheel = (event: WheelEvent) => {
       event.preventDefault();
+      if (taskDrag.current) return;
       const units = event.deltaMode === WheelEvent.DOM_DELTA_LINE ? 16 : event.deltaMode === WheelEvent.DOM_DELTA_PAGE ? element.clientHeight : 1;
       const factor = Math.exp(-Math.max(-110, Math.min(110, event.deltaY * units)) * 0.0035);
       setCamera((value) => zoom(value, { x: event.clientX, y: event.clientY }, factor));
@@ -335,8 +340,36 @@ export function WorkspaceCanvas({
     }
   }
 
+  function taskPointerDown(event: PointerEvent<HTMLButtonElement>, id: string, center: Point) {
+    if (event.button !== 0 || taskDrag.current || pointers.current.size) return;
+    suppressTaskClick.current = null;
+    taskDrag.current = {
+      id, pointerId: event.pointerId, center, scale: camera.scale,
+      start: { x: event.clientX, y: event.clientY }, moved: false,
+    };
+    event.currentTarget.setPointerCapture(event.pointerId);
+  }
+
+  function taskPointerMove(event: PointerEvent<HTMLButtonElement>) {
+    const drag = taskDrag.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    const dx = event.clientX - drag.start.x;
+    const dy = event.clientY - drag.start.y;
+    if (!drag.moved && Math.hypot(dx, dy) < DRAG_THRESHOLD) return;
+    drag.moved = true;
+    suppressTaskClick.current = drag.id;
+    setTaskPositions((previous) => new Map(previous).set(drag.id, {
+      x: drag.center.x + dx / drag.scale,
+      y: drag.center.y + dy / drag.scale,
+    }));
+  }
+
+  function taskPointerEnd(event: PointerEvent<HTMLButtonElement>) {
+    if (taskDrag.current?.pointerId === event.pointerId) taskDrag.current = null;
+  }
+
   function pointerDown(event: PointerEvent<HTMLDivElement>) {
-    if (event.button !== 0 || (event.target as Element).closest("button, .swarm-canvas-controls")) return;
+    if (event.button !== 0 || taskDrag.current || (event.target as Element).closest("button, .swarm-canvas-controls")) return;
     const point = { x: event.clientX, y: event.clientY };
     pointers.current.set(event.pointerId, point);
     event.currentTarget.setPointerCapture(event.pointerId);
@@ -473,7 +506,7 @@ export function WorkspaceCanvas({
             .find((member) => member !== undefined) ?? agent;
           const status = taskRoot || revealed.has(agent.id) ? statuses[statusAgent.status] : undefined;
           const statusLabel = status?.label ?? statuses[statusAgent.status]?.label ?? "Idle";
-          const { color, displayName } = agentAppearance(agent);
+          const { color, displayName, prefix, topic } = agentAppearance(agent);
           const selected = agent.id === selectedId;
           const showChildStatusIcon = Boolean(status) && selectedRevealed.has(agent.id) && !highlighted.has(agent.id);
           const describedRole = agent.goal ?? agent.duty ?? agent.activity ?? statuses[statusAgent.status]?.label ?? "Idle";
@@ -507,7 +540,18 @@ export function WorkspaceCanvas({
                 data-agent-id={agent.id}
                 data-world-x={x}
                 data-world-y={y}
-                onClick={() => onSelect(agent.id)}
+                onPointerDown={taskRoot ? (event) => taskPointerDown(event, agent.id, { x, y }) : undefined}
+                onPointerMove={taskRoot ? taskPointerMove : undefined}
+                onPointerUp={taskRoot ? taskPointerEnd : undefined}
+                onPointerCancel={taskRoot ? taskPointerEnd : undefined}
+                onLostPointerCapture={taskRoot ? taskPointerEnd : undefined}
+                onClick={(event) => {
+                  if (event.detail > 0 && suppressTaskClick.current === agent.id) {
+                    suppressTaskClick.current = null;
+                    return;
+                  }
+                  onSelect(agent.id);
+                }}
                 onFocus={(event) => { if (event.currentTarget.matches(":focus-visible")) setFocused(agent.id); }}
               ><span className="swarm-node-disc" /></button>
               <div className="swarm-team-label">
@@ -532,16 +576,17 @@ export function WorkspaceCanvas({
                         setStatusHovered((id) => id === agent.id ? null : id);
                       }}
                     ><status.Icon aria-hidden="true" focusable="false" /></button>}
-                    <span>{displayName}</span>
+                    <span>{prefix}{topic && <> | <span className="swarm-label-topic">{topic}</span></>}</span>
                   </strong>
-                  <span title={describedRole}>{describedRole}</span>
-                  {agent.projectLabel && <span>Project: {agent.projectLabel}</span>}
+                  <div className="swarm-label-subtitle">
+                    <span title={describedRole}>{describedRole}</span>
+                    {agent.projectLabel && <span>Project: {agent.projectLabel}</span>}
+                  </div>
                 </div>
               </div>
               {status && <div className="swarm-node-tooltip" id={tooltipId}>
                 <div className="swarm-node-tooltip-content">
                   <strong>{displayName}</strong>
-                  {agent.projectLabel && <span>Project: {agent.projectLabel}</span>}
                   <span>{agent.activity ?? statuses[statusAgent.status]?.label ?? "Idle"}</span>
                 </div>
               </div>}

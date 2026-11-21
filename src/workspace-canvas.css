@@ -81,7 +81,8 @@
   transition: transform .14s ease-out;
 }
 
-.swarm-node.is-task-root .swarm-node-target { width: 52px; height: 52px; }
+.swarm-node.is-task-root .swarm-node-target { width: 52px; height: 52px; cursor: grab; }
+.swarm-node.is-task-root .swarm-node-target:active { cursor: grabbing; }
 .swarm-node-target:focus-visible,
 .swarm-node-status:focus-visible { outline: 2px solid #dedede; outline-offset: 2px; }
 
@@ -155,7 +156,7 @@
   position: absolute;
   top: -8px;
   left: 34px;
-  width: 210px;
+  width: 180px;
   transform: translateY(-50%);
   pointer-events: none;
 }
@@ -171,7 +172,7 @@
 }
 
 .swarm-node.is-subtree-only .swarm-team-label strong > span,
-.swarm-node.is-subtree-only .swarm-team-label-content > span {
+.swarm-node.is-subtree-only .swarm-label-subtitle {
   visibility: hidden;
 }
 
@@ -237,10 +238,10 @@
 
 .swarm-team-label-content {
   --swarm-label-icon-box: 20px;
-  --swarm-label-row: 12px;
+  --swarm-label-row: 11px;
   position: relative;
   min-height: var(--swarm-label-icon-box);
-  transform: scale(calc(var(--swarm-overlay-scale, 1) * 1.25));
+  transform: scale(var(--swarm-overlay-scale, 1));
   transform-origin: left center;
 }
 
@@ -256,19 +257,21 @@
 }
 
 .swarm-team-label strong { color: var(--sw-text); font-size: 11px; font-weight: 500; letter-spacing: .02em; }
+.swarm-team-label .swarm-label-topic { display: inline; font-size: 10px; }
 .swarm-node.is-subtree-only .swarm-team-label strong {
   padding-left: 0;
 }
-.swarm-team-label-content > span {
-  display: flex;
-  align-items: center;
-  min-height: var(--swarm-label-row);
+.swarm-label-subtitle {
+  position: absolute;
+  top: 100%;
+  left: calc(var(--swarm-label-icon-box) + 4px);
+  right: 0;
   line-height: var(--swarm-label-row);
   color: var(--sw-muted);
-  margin-top: 0;
-  margin-left: calc(var(--swarm-label-icon-box) + 4px);
-  font-size: 11px;
+  font-size: 9px;
 }
+
+.swarm-node:not(:hover):not(.is-selected) .swarm-label-subtitle { display: none; }
 
 .swarm-node-tooltip {
   display: none;
@@ -281,17 +284,17 @@
 
 .swarm-node-tooltip-content {
   width: max-content;
-  min-width: 130px;
-  max-width: 260px;
-  transform: scale(calc(var(--swarm-overlay-scale, 1) * 1.25));
+  min-width: 110px;
+  max-width: 220px;
+  transform: scale(var(--swarm-overlay-scale, 1));
   transform-origin: top center;
-  padding: 7px calc(var(--sw-popover-padding) + 2px);
+  padding: 5px var(--sw-popover-padding);
   border: 1px solid var(--sw-line);
   border-radius: var(--sw-popover-radius);
   color: #ebebeb;
   background: var(--sw-popover-bg);
-  font-size: 11px;
-  line-height: 1.5;
+  font-size: 10px;
+  line-height: 1.4;
   overflow-wrap: anywhere;
 }
 

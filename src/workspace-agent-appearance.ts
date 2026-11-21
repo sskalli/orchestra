@@ -54,5 +54,5 @@ export function agentAppearance(agent: AgentIdentity) {
     .replace(/\s+/g, " ")
     .trim();
   const prefix = `${role}-${agent.roleNumber ?? 1}`;
-  return { color, displayName: topic ? `${prefix} | ${topic}` : prefix };
+  return { color, prefix, topic, displayName: topic ? `${prefix} | ${topic}` : prefix };
 }
