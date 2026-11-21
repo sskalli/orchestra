@@ -6,6 +6,7 @@ import { basename, dirname, join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { WorkspaceRuntime } from "../src/workspace-runtime.ts";
 import { workspaceStore } from "../src/workspace-store.ts";
+import { WorkspaceUsage } from "../src/workspace-usage.ts";
 import { resolveTeamReuseRequest } from "../src/workspace-teams.ts";
 
 function git(cwd: string, ...args: string[]) {
@@ -612,4 +613,113 @@ test("one direct task plans and delivers an isolated cross-repo change in the sa
   complete(task);
   assert.equal(getTask().directTask.phase, "ready-for-review");
   assert.equal(getTask().integration?.id, delivery.integration?.id);
+});
+
+test("direct tasks observe only their native children and recover their history without reopening them", async (t) => {
+  const fixture = crossRepoFixture(t);
+  if (!fixture) return;
+  const { root, projects, runtime, internal, requests, coordinator, complete } = fixture;
+  const store = workspaceStore(root, join(root, "state"));
+  internal.store = store;
+  internal.storageReady = true;
+  internal.usage = new WorkspaceUsage(store.usagePath);
+  const parentId = String(await runtime.command({ type: "createTask", name: "Release note", projectIds: [] }));
+  const soloId = String(await runtime.command({ type: "createTask", name: "Solo draft", projectIds: [] }));
+  const parent = internal.sessions.get(parentId);
+  const solo = internal.sessions.get(soloId);
+  await runtime.command({ type: "send", agentId: parentId, text: "Ask one child to check the release note." });
+  await runtime.command({ type: "send", agentId: soloId, text: "Draft a release headline." });
+  const threadStarts = requests.filter(({ method }) => method === "thread/start");
+  assert.equal(threadStarts.length, 2);
+  assert.equal(threadStarts[0].params.config["features.multi_agent_v2"], true);
+  assert.deepEqual(requests.filter(({ method }) => method === "turn/start").map(({ params }) => params.threadId),
+    [parent.threadId, solo.threadId]);
+  const childThreadId = "provider-child-thread";
+  const activity = (threadId: string, turnId: string, agentThreadId: string, kind: "started" | "completed") =>
+    internal.onEvent({ method: "item/completed", params: { threadId, turnId, item: {
+      type: "subAgentActivity", id: `${agentThreadId}-${kind}`, agentThreadId, agentPath: "/note-check",
+      agentNickname: "Note check", kind,
+    } } });
+  const finishMessage = (threadId: string, turnId: string, id: string, text: string) =>
+    internal.onEvent({ method: "item/completed", params: {
+      threadId, turnId, item: { type: "agentMessage", id, text },
+    } });
+  finishMessage("unrelated-thread", "outside-turn", "outside-message", "Ignore unrelated provider data.");
+  activity(coordinator.threadId, "pilot-turn", "foreign-child", "started");
+  assert.equal(runtime.snapshot().agents.length, 3);
+
+  activity(parent.threadId, parent.run.turn.id, childThreadId, "started");
+  activity(parent.threadId, parent.run.turn.id, childThreadId, "started");
+  const child = () => runtime.snapshot().agents.find(({ nativeChild }) => nativeChild);
+  const observed = child();
+  assert(observed);
+  assert.equal(observed.parentId, parentId);
+  assert.equal(observed.status, "working");
+  assert.equal(runtime.snapshot().agents.filter(({ nativeChild }) => nativeChild).length, 1);
+  await assert.rejects(runtime.command({ type: "send", agentId: observed.id, text: "Do work outside the parent." }));
+  const childTurnId = "provider-child-turn";
+  let approvalResult: unknown;
+  const originalReply = internal.server.reply;
+  internal.server.reply = (id: string, result: unknown) => {
+    if (id === "child-file-approval") approvalResult = result;
+    else originalReply(id, result);
+  };
+  await internal.onRequest({ id: "child-file-approval", method: "item/fileChange/requestApproval", params: {
+    threadId: childThreadId, turnId: childTurnId, itemId: "child-patch",
+  } });
+  assert.deepEqual(approvalResult, { decision: "decline" });
+  internal.onEvent({ method: "turn/started", params: {
+    threadId: childThreadId, turn: { id: childTurnId, status: "inProgress" },
+  } });
+  finishMessage(childThreadId, childTurnId, "child-answer", "The release code is ORBIT-42.");
+  const tokens = { totalTokens: 20, inputTokens: 18, cachedInputTokens: 4, outputTokens: 2,
+    cacheWriteInputTokens: 0, reasoningOutputTokens: 0 };
+  internal.onEvent({ method: "thread/tokenUsage/updated", params: {
+    threadId: childThreadId, turnId: childTurnId, tokenUsage: { total: tokens, last: tokens, modelContextWindow: 1000 },
+  } });
+  assert.deepEqual(runtime.snapshot().usage?.byAgent[observed.id]?.tokens, tokens);
+  internal.onEvent({ method: "turn/completed", params: {
+    threadId: childThreadId, turn: { id: childTurnId, status: "completed" },
+  } });
+  activity(parent.threadId, parent.run.turn.id, childThreadId, "completed");
+  finishMessage(parent.threadId, parent.run.turn.id, "parent-answer", "Child verified ORBIT-42.");
+  finishMessage(solo.threadId, solo.run.turn.id, "solo-answer", "A release headline.");
+  complete(parent);
+  complete(solo);
+  assert.equal(child()?.status, "done");
+  assert(child()?.messages.some(({ text }) => text.includes("ORBIT-42")));
+  assert(runtime.snapshot().agents.find(({ id }) => id === parentId)?.messages.some(({ text }) =>
+    text.includes("Child verified ORBIT-42.")));
+  assert(runtime.snapshot().agents.find(({ id }) => id === soloId)?.messages.every(({ text }) => !text.includes("ORBIT-42")));
+
+  const saved = store.loadWorkspace();
+  assert(saved);
+  assert.equal(saved.sessions.find(({ agent }) => agent.id === observed.id)?.threadId, childThreadId);
+  const reopened = new WorkspaceRuntime({ cwd: projects[0].path, projects, store });
+  t.after(() => reopened.close());
+  const recovered = reopened as any;
+  recovered.restore(saved.sessions, saved.teams);
+  const childSession = recovered.sessions.get(observed.id);
+  assert(childSession);
+  const recoveryCalls: { method: string; params: any }[] = [];
+  recovered.server = {
+    call: async (method: string, params: any) => {
+      recoveryCalls.push({ method, params });
+      assert.equal(method, "thread/read");
+      return { thread: {
+        id: childThreadId, parentThreadId: parent.threadId, status: { type: "idle" },
+        turns: [{ id: childTurnId, status: "completed", items: [
+          { type: "agentMessage", id: "child-answer", text: "The release code is ORBIT-42." },
+          { type: "agentMessage", id: "after-restart", text: "Recovered a later note." },
+        ] }],
+      } };
+    },
+    close: async () => {},
+  };
+  await recovered.resumeNativeChild(childSession);
+  assert.deepEqual(recoveryCalls, [{ method: "thread/read", params: { threadId: childThreadId, includeTurns: true } }]);
+  const restored = reopened.snapshot().agents.find(({ id }) => id === observed.id);
+  assert.equal(restored?.parentId, parentId);
+  assert.equal(restored?.messages.filter(({ text }) => text.includes("ORBIT-42")).length, 1);
+  assert(restored?.messages.some(({ text }) => text === "Recovered a later note."));
 });

@@ -413,9 +413,13 @@
   background: transparent; text-align: left; font-size: .68rem;
 }
 .chat-lifecycle-menu button:not(:disabled):hover { background: var(--sw-control-hover); color: #fff; }
+.chat-native-child,
 .chat-archive-notice {
   flex: none; margin: 0; padding: 10px 16px; border-bottom: 1px solid var(--sw-line);
   color: var(--sw-muted); font-size: .648rem; line-height: 1.6;
+}
+.chat-native-child {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px;
 }
 .chat-agent-update-heading button:disabled { text-decoration: none; }
 

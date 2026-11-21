@@ -600,7 +600,7 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
       }) }}
       kind={kind}
       onOpenAgent={(id) => select(id)}
-      onLifecycle={(action) => requestLifecycle(action, agent.id)}
+      onLifecycle={agent.nativeChild ? undefined : (action) => requestLifecycle(action, agent.id)}
       title={kind === "project" ? projectName : team && snapshot.projects.length === 1
         ? `${agentAppearance(team).displayName} / ${agentAppearance(agent).displayName}`
         : `${agentAppearance(agent).displayName}${team ? ` / ${agentAppearance(team).displayName}`
@@ -704,8 +704,8 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
                   </label>
                 </>}
                 <small>Archived {new Date(agent.archivedAt!).toLocaleString()}</small>
-                <div><button type="button" disabled={!connected || agent.lifecycleBusy} onClick={() => requestLifecycle("restore", agent.id)}>Restore</button>
-                  <button type="button" disabled={!connected || agent.lifecycleBusy} onClick={() => requestLifecycle("delete", agent.id)}>Delete permanently…</button></div>
+                {!agent.nativeChild && <div><button type="button" disabled={!connected || agent.lifecycleBusy} onClick={() => requestLifecycle("restore", agent.id)}>Restore</button>
+                  <button type="button" disabled={!connected || agent.lifecycleBusy} onClick={() => requestLifecycle("delete", agent.id)}>Delete permanently…</button></div>}
               </article>;
             })}
           </section>}

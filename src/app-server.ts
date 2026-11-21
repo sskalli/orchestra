@@ -7,10 +7,13 @@ export type Thread = { id: string };
 export type FileUpdate = { path: string; kind: { type: "add" | "delete" } | { type: "update"; move_path: string | null }; diff: string };
 type Params = {
   threadId?: string;
+  thread?: Thread & { parentThreadId?: string | null; agentNickname?: string | null; agentRole?: string | null };
   turnId?: string;
   tokenUsage?: unknown;
   turn?: Turn;
-  item?: { id?: string; type: string; text?: string; changes?: FileUpdate[] };
+  item?: { id?: string; type: string; text?: string; changes?: FileUpdate[];
+    agentThreadId?: string; agentPath?: string; agentNickname?: string | null; agentRole?: string | null;
+    kind?: string; model?: string | null };
   itemId?: string;
   changes?: FileUpdate[];
   grantRoot?: string | null;

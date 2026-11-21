@@ -56,6 +56,8 @@ The live workspace opens a coordinator conversation, labeled **Computer** in the
 
 Use the map’s **+** control to open a top-level task chat. Choose the repositories the task should work with, or leave the list empty for a general conversation. A task with repositories can inspect them while you discuss the plan. Use **Start implementation** when you are ready. The same Codex conversation continues in isolated worktrees for the selected repositories. Orchestra can then show the pinned candidate and its checks in the task chat. Discuss any feedback there and use **Revise candidate** to approve another implementation turn.
 
+A direct task can delegate to Codex-native children. Orchestra shows each child below its parent on the map and keeps the child's transcript available for inspection. Send feedback and follow-up instructions to the parent task. The parent controls its Codex children.
+
 ### From investigation to implementation
 
 Ask the coordinator to investigate a bug and wait for approval before editing. An analyser can leave a scoped implementation proposal with the target repository, intended change, and verification steps. Review it in the main or task chat and select **Approve implementation** to start a coder in an isolated worktree under the investigation. The original task shows whether implementation is running, blocked, ready for review, or confirmed. Project branches still require a separate merge decision.

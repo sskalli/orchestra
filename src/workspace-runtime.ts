@@ -57,6 +57,7 @@ export type WorkspaceAgent = {
   modelSettings?: ModelSettings;
   candidate?: Candidate;
   implementationProposal?: ImplementationProposal;
+  nativeChild?: true;
   directTask?: { projectIds: string[]; phase: "planning" | "implementing" | "blocked" | "ready-for-review"; detail?: string };
   directCandidates?: (Candidate & { projectId: string })[];
   acceptanceOwnerId?: string;
@@ -136,7 +137,9 @@ const coordinatorId = "coordinator";
 const managementToolVersion = 12;
 const analysisToolVersion = 12;
 const coordinatorToolVersion = 13;
-const workspaceThreadConfig = { "features.multi_agent": false, "features.multi_agent_v2": false };
+const workspaceThreadConfig = (directTask: boolean) => ({
+  "features.multi_agent": directTask, "features.multi_agent_v2": directTask,
+});
 const input = (text: string) => [{ type: "text", text, text_elements: [] }];
 const hasSubmittedMessage = (agent: WorkspaceAgent) =>
   agent.messages.some((entry) => entry.role === "user" && entry.state !== "queued");
@@ -505,6 +508,10 @@ export class WorkspaceRuntime {
       if (!coordinator.threadId) await this.attachThread(coordinator);
       for (const entry of saved ?? []) {
         if (entry.agent.archivedAt) continue;
+        if (entry.agent.nativeChild) {
+          await this.resumeNativeChild(this.sessions.get(entry.agent.id)!);
+          continue;
+        }
         if (entry.threadId && this.sessions.get(entry.agent.id)?.threadId === entry.threadId) {
           await this.resumeThread(entry);
         } else if (this.approvedProposal(this.sessions.get(entry.agent.id)!)?.status === "implementing") {
@@ -551,6 +558,7 @@ export class WorkspaceRuntime {
     if (command.type === "createTask") return this.createDirectTask(command.name, command.projectIds);
     const session = this.sessions.get(command.agentId);
     if (!session) throw new Error("This conversation no longer exists.");
+    if (session.agent.nativeChild) throw new Error("Use the owning task to interact with this Codex subagent.");
     if (command.type === "archive" || command.type === "restore" || command.type === "delete") {
       await this.lifecycle(session, command);
       return;
@@ -644,6 +652,9 @@ export class WorkspaceRuntime {
         task.phase === "implementing") {
       throw new Error("Wait for the task to finish its current turn before approving implementation.");
     }
+    if (this.hasRunningNativeChildren(session)) {
+      throw new Error("Wait for this task's Codex subagents to finish before approving implementation.");
+    }
     if (!session.agent.messages.some((entry) => entry.role === "assistant" && !entry.state)) {
       throw new Error("Discuss the task in this chat before approving implementation.");
     }
@@ -672,7 +683,7 @@ export class WorkspaceRuntime {
       (text?.trim() || "Implement the plan we agreed in this chat.") +
       "\n\nImplementation is explicitly approved for this turn. Write only in these isolated worktrees: " +
       JSON.stringify(roots.map(({ projectId, path }) => ({ projectId, path }))) +
-      ". Run the agreed verification and call submit_check_result before ending the turn.");
+      ". Keep implementation edits in this session. Wait for any subagents to finish, then run the agreed verification and call submit_check_result before ending the turn.");
     task.phase = "implementing";
     delete task.detail;
     delete session.agent.integration;
@@ -689,6 +700,7 @@ export class WorkspaceRuntime {
     const task = session.agent.directTask!;
     try {
       if (detail) throw new Error(detail);
+      if (this.hasRunningNativeChildren(session)) throw new Error("A Codex subagent is still running. Wait for it to finish and verify the candidate again.");
       if (check?.outcome !== "passed") throw new Error(check?.summary ?? "No passing verification was recorded for this turn.");
       const candidates = this.directTaskCandidates(session);
       const members = candidates.map((candidate) => ({ ...candidate, fingerprint: fingerprintCandidate(candidate.path) }));
@@ -839,6 +851,10 @@ export class WorkspaceRuntime {
     return [...this.sessions.values()].filter((entry) => ids.has(entry.agent.id));
   }
 
+  private hasRunningNativeChildren(root: AgentSession) {
+    return this.subtree(root).some(({ agent }) => agent.nativeChild && agent.status === "working" && !agent.archivedAt);
+  }
+
   private async lifecycle(root: AgentSession, command: Extract<WorkspaceCommand, { type: "archive" }> | { type: "restore" | "delete"; agentId: string }) {
     if (root.agent.role === "coordinator") throw new Error("The pilot conversation cannot be archived or deleted.");
     if (this.storageFailed) throw new Error("Resolve the workspace storage failure before changing teams.");
@@ -855,6 +871,9 @@ export class WorkspaceRuntime {
     if (affected.some((entry) => entry.agent.lifecycleBusy || entry.opening)) throw new Error("Wait for the current lifecycle or conversation-opening operation to finish.");
     if (command.type !== "restore" && affected.some((entry) => entry.recovery || /active (?:writer|turn)|still be running|unresolved|not acknowledged/i.test(entry.agent.unavailableReason ?? ""))) {
       throw new Error("This team has unresolved provider work. Restart and reconcile it before archiving or deleting.");
+    }
+    if (command.type !== "restore" && affected.some((entry) => entry.agent.nativeChild && entry.agent.status === "working")) {
+      throw new Error("Wait for the Codex subagents to finish before archiving or deleting this task.");
     }
     const running = affected.filter((entry) => entry.run || entry.agent.status === "working" || (entry.agent.simulation && this.simulationRunning));
     if (command.type === "delete" && (running.length || affected.some((entry) => entry.approvals.size))) {
@@ -896,7 +915,10 @@ export class WorkspaceRuntime {
         }));
         const failed = stopped.find((result) => result.status === "rejected");
         if (failed?.status === "rejected") throw failed.reason;
-        if (affected.some((entry) => entry.run || entry.recovery || entry.approvals.size)) throw new Error("Unresolved work remains. The team has not been archived.");
+        if (affected.some((entry) => entry.run || entry.recovery || entry.approvals.size) ||
+            this.subtree(root).some((entry) => entry.agent.nativeChild && (!affected.includes(entry) || entry.agent.status === "working"))) {
+          throw new Error("Unresolved work remains. The team has not been archived.");
+        }
         const now = Date.now();
         const archivedIds = new Set(affected.map((entry) => entry.agent.id));
         const dependents = [...this.sessions.values()].filter((entry) =>
@@ -997,7 +1019,8 @@ export class WorkspaceRuntime {
           delete entry.agent.archivedAt;
           if (!this.demo && this.state.provider.name === "codex" && this.available) {
             if (entry.threadId && !this.threadSessions.has(entry.threadId)) {
-              await this.resumeThread({ agent: entry.agent, threadId: entry.threadId, toolVersion: entry.toolVersion });
+              if (entry.agent.nativeChild) await this.resumeNativeChild(entry);
+              else await this.resumeThread({ agent: entry.agent, threadId: entry.threadId, toolVersion: entry.toolVersion });
             } else if (!entry.threadId && !entry.agent.simulation) {
               try { await this.attachThread(entry); delete entry.agent.unavailableReason; }
               catch (error) { entry.agent.unavailableReason = errorText(error); }
@@ -1115,7 +1138,7 @@ export class WorkspaceRuntime {
         waitingFor,
         toolVersion,
         agent,
-        threadId: agent.archivedAt || run || recovery || (!freshThread && hasSubmittedMessage(agent)) ? threadId : undefined,
+        threadId: agent.nativeChild || agent.archivedAt || run || recovery || (!freshThread && hasSubmittedMessage(agent)) ? threadId : undefined,
         run: run ? { messageId: run.message.id, turnId: run.turn?.id } : recovery,
       })), this.teamRecords());
       return true;
@@ -1173,7 +1196,7 @@ export class WorkspaceRuntime {
               member.projectId = agent.projectId;
             }
           }
-        } else if (agent.role !== "coordinator") agent.projectId = this.projects[0].id;
+        } else if (agent.role !== "coordinator" && !agent.nativeChild) agent.projectId = this.projects[0].id;
         if (agent.implementationProposal) agent.implementationProposal.projectId = this.projects[0].id;
       }
     }
@@ -1185,6 +1208,14 @@ export class WorkspaceRuntime {
             new Set(ids).size !== ids.length || ids.some((id) => !this.projects.some((project) => project.id === id))) {
           throw new Error(`Saved task ${agent.name} has an invalid repository scope.`);
         }
+        continue;
+      }
+      if (agent.nativeChild) {
+        const parent = agent.parentId ? entries.get(agent.parentId)?.agent : undefined;
+        if (agent.role !== "worker" || (!parent?.directTask && !parent?.nativeChild) || parent === agent) {
+          throw new Error(`Saved subagent ${agent.name} has an invalid task parent.`);
+        }
+        agent.projectId = parent.projectId;
         continue;
       }
       if (!this.projects.some((project) => project.id === agent.projectId)) {
@@ -1278,17 +1309,17 @@ export class WorkspaceRuntime {
     for (const { agent, threadId, run, waitingFor } of saved) {
       const session = this.createAgent(agent.id, agent.name, agent.role, agent.parentId, agent.goal);
       Object.assign(session.agent, agent, { canSteer: false, canCancel: undefined, lifecycleBusy: undefined });
-      if ((session.agent.duty === "reviewer" || session.agent.duty === "tester") && session.agent.status === "done" && session.agent.check?.outcome !== "passed") {
+      if (!session.agent.nativeChild && (session.agent.duty === "reviewer" || session.agent.duty === "tester") && session.agent.status === "done" && session.agent.check?.outcome !== "passed") {
         session.agent.status = session.agent.check?.outcome === "changes-requested" ? "error" : "attention";
       }
-      if (session.agent.duty === "coder" && session.agent.status === "done" && !session.agent.submissionId) {
+      if (!session.agent.nativeChild && session.agent.duty === "coder" && session.agent.status === "done" && !session.agent.submissionId) {
         session.agent.status = "awaiting-confirmation";
         session.agent.messages.push(message("system", "This earlier confirmation did not record review and test results. Ask the lead to recheck the submission.", "action"));
       }
-      if (session.agent.duty === "coder" && session.agent.status === "awaiting-confirmation" && !session.agent.submissionId) {
+      if (!session.agent.nativeChild && session.agent.duty === "coder" && session.agent.status === "awaiting-confirmation" && !session.agent.submissionId) {
         session.agent.submissionId = randomUUID();
       }
-      session.threadId = agent.archivedAt || run || hasSubmittedMessage(agent) ? threadId : undefined;
+      session.threadId = agent.nativeChild || agent.archivedAt || run || hasSubmittedMessage(agent) ? threadId : undefined;
       session.recovery = this.state.provider.name === "codex" ? run : undefined;
       session.queue = agent.messages.filter((entry) => entry.state === "queued");
       agent.messages.forEach((entry) => {
@@ -1339,7 +1370,7 @@ export class WorkspaceRuntime {
         threadId, cwd: this.sessionCwd(session), modelProvider: this.providerId,
         model: settings.reportedModel ?? settings.requestedModel,
         ...this.threadPermissions(session),
-        config: workspaceThreadConfig,
+        config: workspaceThreadConfig(Boolean(session.agent.directTask)),
         developerInstructions: this.instructions(session),
         excludeTurns: true,
         initialTurnsPage: { limit: 8, itemsView: "full" },
@@ -1541,7 +1572,7 @@ export class WorkspaceRuntime {
       model: settings.reportedModel ?? settings.requestedModel,
       modelProvider: this.providerId,
       ...this.threadPermissions(session),
-      config: workspaceThreadConfig,
+      config: workspaceThreadConfig(Boolean(session.agent.directTask)),
       ephemeral: false,
       ...(session.agent.role !== "worker" && { environments: [] }),
       dynamicTools: session.agent.directTask || this.approvedProposal(session) ? [decisionTool, checkTool]
@@ -1567,7 +1598,8 @@ export class WorkspaceRuntime {
   }
 
   private availableReports(session: AgentSession, message?: WorkspaceMessage) {
-    const reports = this.subtree(session).filter((entry) => entry !== session && this.isActive(entry));
+    const reports = this.subtree(session).filter((entry) =>
+      entry !== session && this.isActive(entry) && !entry.agent.nativeChild);
     if (!message?.reuseTeamId) return reports;
     const runId = message.orchestrationRunId ?? message.id;
     return reports.filter(({ agent }) => agent.teamId === message.reuseTeamId &&
@@ -1990,8 +2022,148 @@ export class WorkspaceRuntime {
     return true;
   }
 
+  private async resumeNativeChild(session: AgentSession) {
+    const threadId = session.threadId;
+    const parent = session.agent.parentId ? this.sessions.get(session.agent.parentId) : undefined;
+    if (!threadId || !parent?.threadId) return;
+    try {
+      const { thread } = await this.server!.call<{ thread: Thread & {
+        parentThreadId?: string; status?: { type: string };
+        turns?: (Turn & { items?: { id: string; type: string; text?: string }[] })[];
+      } }>("thread/read", { threadId, includeTurns: true });
+      if (thread.id !== threadId || thread.parentThreadId !== parent.threadId) {
+        throw new Error("Codex reported a different parent for this subagent.");
+      }
+      this.threadSessions.set(threadId, session);
+      this.trackUsage((usage) => usage.registerThread(threadId, false, session.agent.id));
+      for (const turn of thread.turns ?? []) {
+        for (const item of turn.items ?? []) {
+          if (item.type === "agentMessage" && typeof item.text === "string") this.recordNativeReply(session, item.id, item.text);
+        }
+      }
+      if (thread.status?.type === "active") session.agent.status = "working";
+      else if (session.agent.status === "working") {
+        const last = thread.turns?.at(-1);
+        session.agent.status = last?.status === "completed" ? "done" : "idle";
+      }
+      delete session.agent.unavailableReason;
+    } catch (error) {
+      session.agent.unavailableReason = errorText(error);
+      if (session.agent.status === "working") session.agent.status = "error";
+    }
+  }
+
+  private recordNativeReply(session: AgentSession, itemId: string | undefined, text: string) {
+    const existing = itemId && session.agent.messages.find((entry) => entry.providerItemId === itemId);
+    if (existing) {
+      existing.text = text;
+      delete existing.state;
+      session.stream.delete(itemId);
+    } else {
+      session.agent.messages.push({ ...message("assistant", text), providerItemId: itemId });
+    }
+  }
+
+  private registerNativeChild(parent: AgentSession, threadId: string, name?: string | null, model?: string | null, role?: string | null) {
+    if (!threadId || threadId.length > 200) return;
+    let child = this.threadSessions.get(threadId);
+    if (child && (!child.agent.nativeChild || child.agent.parentId !== parent.agent.id)) return;
+    if (!child) {
+      const id = `native:${threadId}`;
+      if (this.sessions.has(id)) return;
+      child = this.createAgent(id, name || "Codex subagent", "worker", parent.agent.id);
+      Object.assign(child.agent, { nativeChild: true, projectId: parent.agent.projectId, status: "working" });
+      child.threadId = threadId;
+      this.threadSessions.set(threadId, child);
+      this.trackUsage((usage) => usage.registerThread(threadId, true, id));
+    }
+    if (name) child.agent.name = name;
+    if (model) child.agent.modelSettings = { reportedModel: model, source: "provider-default" };
+    if (role === "coder" || role === "reviewer" || role === "tester" || role === "designer" || role === "analyser" || role === "pm") {
+      child.agent.duty = role;
+    }
+    return child;
+  }
+
+  private recordNativeActivity(parent: AgentSession, item: NonNullable<Event["params"]["item"]>, completed: boolean) {
+    if (!item.agentThreadId || !["started", "interacted", "interrupted", "completed"].includes(item.kind ?? "")) return;
+    const child = this.registerNativeChild(parent, item.agentThreadId, item.agentNickname, item.model, item.agentRole);
+    if (!child) return;
+    if (item.agentPath && child.agent.name === "Codex subagent") child.agent.name = item.agentPath;
+    if (item.kind === "interrupted") child.agent.status = "idle";
+    else if (item.kind === "completed" && child.agent.status !== "error") child.agent.status = "done";
+    if (completed && (item.kind === "completed" || item.kind === "interrupted")) this.signal(child.agent.id, parent.agent.id);
+    this.publish();
+  }
+
+  private onNativeEvent(session: AgentSession, method: string, params: Event["params"]) {
+    if (session.agent.archivedAt) return;
+    if (method === "turn/started" || method === "turn/completed" || method === "thread/tokenUsage/updated") {
+      const turnId = params.turn?.id ?? params.turnId;
+      if (turnId && session.threadId) {
+        let owner = this.sessions.get(session.agent.parentId!);
+        while (owner?.agent.nativeChild) owner = this.sessions.get(owner.agent.parentId!);
+        const entry = owner?.run?.message;
+        this.trackUsage((usage) => usage.registerTurn(session.threadId!, turnId, {
+          agentId: session.agent.id, runId: entry?.orchestrationRunId ?? entry?.id ?? turnId,
+          model: session.agent.modelSettings?.reportedModel,
+        }));
+      }
+      if (method === "thread/tokenUsage/updated") return;
+      session.agent.status = method === "turn/started" ? "working"
+        : params.turn?.status === "completed" ? "done" : params.turn?.status === "interrupted" ? "idle" : "error";
+      if (method === "turn/completed") {
+        for (const entry of session.stream.values()) {
+          if (session.agent.status === "done") delete entry.state;
+          else entry.state = "failed";
+        }
+        session.stream.clear();
+      }
+      this.publish();
+    }
+    if (method === "error" && !params.willRetry) {
+      session.agent.status = "error";
+      session.agent.messages.push(message("system", errorText(params.error?.message ?? params.message ?? "Codex subagent reported an error."), "error"));
+      this.publish();
+      return;
+    }
+    const item = params.item;
+    if (method === "item/agentMessage/delta" && params.itemId) {
+      const { delta } = params as typeof params & { delta?: string };
+      if (typeof delta !== "string") return;
+      let entry = session.stream.get(params.itemId);
+      if (!entry) {
+        entry = { ...message("assistant", ""), state: "streaming", providerItemId: params.itemId };
+        session.stream.set(params.itemId, entry);
+        session.agent.messages.push(entry);
+      }
+      entry.text += delta;
+      this.publish(false);
+    } else if (method === "item/completed" && item?.type === "agentMessage" && typeof item.text === "string") {
+      this.recordNativeReply(session, item.id, item.text);
+      this.publish();
+    }
+  }
+
   private onEvent({ method, params }: Event) {
     const session = params.threadId ? this.threadSessions.get(params.threadId) : undefined;
+    const startedThread = method === "thread/started" ? params.thread : undefined;
+    if (startedThread?.parentThreadId) {
+      const parent = this.threadSessions.get(startedThread.parentThreadId);
+      if (parent && !parent.agent.archivedAt && (parent.agent.directTask || parent.agent.nativeChild)) {
+        this.registerNativeChild(parent, startedThread.id, startedThread.agentNickname, undefined, startedThread.agentRole);
+        this.publish();
+      }
+    }
+    if (session && !session.agent.archivedAt && (session.agent.directTask || session.agent.nativeChild) &&
+        (method === "item/started" || method === "item/completed") && params.item?.type === "subAgentActivity") {
+      this.recordNativeActivity(session, params.item, method === "item/completed");
+      return;
+    }
+    if (session?.agent.nativeChild) {
+      this.onNativeEvent(session, method, params);
+      if (method !== "thread/tokenUsage/updated") return;
+    }
     if (method === "thread/tokenUsage/updated") {
       const { threadId, turnId, tokenUsage } = params;
       if (threadId && turnId) {
@@ -2114,7 +2286,7 @@ export class WorkspaceRuntime {
   private async onRequest({ id, method, params }: Event & { id: Id }) {
     const session = params.threadId ? this.threadSessions.get(params.threadId) : undefined;
     const turn = session?.run?.turn;
-    const valid = Boolean(session && this.isActive(session) && turn && turn.id === params.turnId);
+    const valid = Boolean(session && !session.agent.nativeChild && this.isActive(session) && turn && turn.id === params.turnId);
     if (method === "item/commandExecution/requestApproval" || method === "item/fileChange/requestApproval") {
       if (method === "item/fileChange/requestApproval" && valid && session && this.available && !this.closed &&
           this.fileApprovalPolicy(session) === "on-request" && params.grantRoot == null && params.itemId &&

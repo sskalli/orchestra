@@ -17,6 +17,7 @@ export type ChatAgent = {
   name: string;
   role: "coordinator" | "lead" | "worker";
   parentId?: string;
+  nativeChild?: true;
   duty?: string;
   roleNumber?: number;
   goal?: string;
@@ -143,7 +144,7 @@ function Conversation({
   const recipient = `${projectLabel ? `${projectLabel} / ` : ""}${title ?? displayName}`;
   const heading = title ?? displayName;
   const archived = agent.archivedAt !== undefined;
-  const blocked = Boolean(disabled || archived || agent.lifecycleBusy);
+  const blocked = Boolean(disabled || archived || agent.lifecycleBusy || agent.nativeChild);
   const readyToSend = !blocked && !sending && Boolean(draft.trim());
   const hasFocusMessage = agent.messages.some((message) => message.id === focusMessageId);
   const shownInConversation = (detail: string) => kind === "agent" && agent.messages.some((message) =>
@@ -410,8 +411,8 @@ function Conversation({
   approvalHandler.current = resolveApproval;
   const implementationHandler = useRef(approveImplementation);
   implementationHandler.current = approveImplementation;
-  const canApproveImplementation = Boolean(onApproveImplementation) && !archived;
-  const canApprove = Boolean(onApproval) && !archived;
+  const canApproveImplementation = Boolean(onApproveImplementation) && !archived && !agent.nativeChild;
+  const canApprove = Boolean(onApproval) && !archived && !agent.nativeChild;
   const messageElements = useMemo(() => agent.messages.filter((message) =>
     !hiddenMessages.has(message.id)).map((message) => {
           const sender = message.role === "user" ? "USER" : message.role === "system" ? "SYSTEM" :
@@ -552,6 +553,11 @@ function Conversation({
         <p>Review and merge each repository separately.</p>
       </details>}
 
+      {agent.nativeChild && <div className="chat-native-child">
+        <span>Read-only subagent transcript.</span>
+        {agent.parentId && <button className="chat-steer" type="button"
+          onClick={() => onOpenAgent?.(agent.parentId!)}>Open parent conversation</button>}
+      </div>}
       {taskDetail && <p className="chat-task-detail" role="status">{taskDetail}</p>}
       {archived && <p className="chat-archive-notice">Archived {new Date(agent.archivedAt!).toLocaleString()}. Restore to continue this conversation.</p>}
       <div className="chat-transcript" role="log" aria-label={`Conversation with ${recipient}`} aria-relevant="additions"
@@ -570,7 +576,7 @@ function Conversation({
         {messageElements}
       </div>
 
-      {!archived && <>
+      {!archived && !agent.nativeChild && <>
       <div ref={divider} className="chat-composer-resize" role="separator" tabIndex={0} aria-orientation="horizontal"
         aria-label={`Resize ${kind === "project" ? "project" : "agent"} chat input`} aria-controls={composerId}
         onPointerDown={startComposerResize} onPointerMove={moveComposerResize} onPointerUp={endComposerResize}
