@@ -2,9 +2,15 @@ import { agentAppearance } from "./workspace-agent-appearance.ts";
 import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { FormEvent, KeyboardEvent, PointerEvent } from "react";
 import Markdown from "react-markdown";
-import type { SystemMessageKind } from "./workspace-runtime.ts";
+import type { SystemMessageKind, WorkspaceAgent } from "./workspace-runtime.ts";
 
 import "./workspace-chat.css";
+
+type ImplementationApproval = NonNullable<WorkspaceAgent["implementationProposal"]> & {
+  ownerId: string;
+  ownerArchived: boolean;
+  ownerBusy: boolean;
+};
 
 export type ChatAgent = {
   id: string;
@@ -25,6 +31,7 @@ export type ChatAgent = {
     sourceAgentId?: string;
     reportLabel?: string;
     state?: "queued" | "streaming" | "failed" | "cancelled";
+    implementation?: ImplementationApproval;
     approval?: { id: string; state: "pending" | "accepted" | "declined" | "expired"; canAccept?: boolean };
   }[];
   queueDepth: number;
@@ -53,6 +60,7 @@ type ChatProps = {
   onSteer?: (text: string) => Promise<void> | void;
   onCancel?: () => Promise<void>;
   onApproval?: (approvalId: string, decision: "accept" | "decline") => Promise<void> | void;
+  onApproveImplementation?: (agentId: string, proposalId: string) => Promise<void> | void;
   onResumeQueue?: () => Promise<void>;
   onClose: () => void;
   onOpenAgent?: (id: string) => void;
@@ -73,6 +81,13 @@ const statusLabels = {
   notice: "Update available",
 };
 
+const implementationLabels = {
+  "awaiting-approval": "Implementation approval requested",
+  implementing: "Implementation in progress",
+  blocked: "Implementation blocked",
+  "ready-for-review": "Ready for review",
+};
+
 const systemMessageLabels: Record<SystemMessageKind, string> = {
   error: "Error",
   action: "Action required",
@@ -82,7 +97,7 @@ const systemMessageLabels: Record<SystemMessageKind, string> = {
 };
 
 function Conversation({
-  agent, kind, title, projectLabel, repositoryScope, delivery, modelLabel, usageLabel, draft: initialDraft, composerHeight, onComposerHeightChange, onDraftInput, onDraftChange, onSend, onSteer, onCancel, onApproval, onResumeQueue, onClose,
+  agent, kind, title, projectLabel, repositoryScope, delivery, modelLabel, usageLabel, draft: initialDraft, composerHeight, onComposerHeightChange, onDraftInput, onDraftChange, onSend, onSteer, onCancel, onApproval, onApproveImplementation, onResumeQueue, onClose,
   disabled, disabledReason, focusMessageId, focusRequest, onOpenAgent, onLifecycle,
 }: ChatProps) {
   const transcript = useRef<HTMLDivElement>(null);
@@ -354,6 +369,19 @@ function Conversation({
     }
   }
 
+  async function approveImplementation(implementation: ImplementationApproval) {
+    if (!onApproveImplementation || approvalBusy || blocked || implementation.ownerArchived || implementation.ownerBusy) return;
+    setApprovalBusy(implementation.id);
+    setError("");
+    try {
+      await onApproveImplementation(implementation.ownerId, implementation.id);
+    } catch (failure) {
+      setError(failure instanceof Error ? failure.message : "Implementation approval could not be sent.");
+    } finally {
+      setApprovalBusy(undefined);
+    }
+  }
+
   function handleComposerKey(event: KeyboardEvent<HTMLTextAreaElement>) {
     if (event.key !== "Enter" || event.shiftKey || event.nativeEvent.isComposing) return;
     event.preventDefault();
@@ -362,16 +390,19 @@ function Conversation({
 
   const approvalHandler = useRef(resolveApproval);
   approvalHandler.current = resolveApproval;
+  const implementationHandler = useRef(approveImplementation);
+  implementationHandler.current = approveImplementation;
+  const canApproveImplementation = Boolean(onApproveImplementation) && !archived;
   const canApprove = Boolean(onApproval) && !archived;
   const messageElements = useMemo(() => agent.messages.filter((message) =>
     !hiddenMessages.has(message.id)).map((message) => {
           const sender = message.role === "user" ? "USER" : message.role === "system" ? "SYSTEM" :
             kind === "project" ? "COMPUTER" : agent.role === "lead" ? `LEAD-${agent.roleNumber ?? 1}` : displayName;
-          const { approval } = message;
+          const { approval, implementation } = message;
           const systemKind = message.role === "system" ? approval
             ? approval.state === "pending" ? "action" : approval.state === "accepted" ? "success" : "warning"
             : message.kind : undefined;
-          const compact = kind === "project" && message.role === "system" && message.sourceName && message.sourceAgentId && !approval;
+          const compact = kind === "project" && message.role === "system" && message.sourceName && message.sourceAgentId && !approval && !implementation;
           const category = message.reportLabel ?? (systemKind ? systemMessageLabels[systemKind] : "Notice");
           const explanation = message.text.split(/\n+/).filter((line) => line.trim()).slice(0, 2).join(" ")
             .replace(/[*#`]/g, "").slice(0, 320);
@@ -406,6 +437,25 @@ function Conversation({
                     {message.state === "streaming" ? <span className="chat-stream-cursor" aria-label="Responding" /> : null}
                   </div>
                 )}
+                {implementation && (
+                  <div className="chat-approval">
+                    <strong>{implementationLabels[implementation.status]}</strong>
+                    <p>Repository <code>{implementation.projectId}</code></p>
+                    <p className="chat-implementation-brief">{implementation.brief}</p>
+                    {implementation.detail && <p>{implementation.detail}</p>}
+                    {implementation.status === "ready-for-review" && implementation.verification &&
+                      <p className="chat-implementation-brief">Coder-reported checks: {implementation.verification.summary}</p>}
+                    {implementation.candidateRevision && <p>Revision <code>{implementation.candidateRevision}</code></p>}
+                    {implementation.candidatePath && <p>Worktree <code>{implementation.candidatePath}</code></p>}
+                    <div className="chat-approval-actions">
+                      {implementation.status === "awaiting-approval" && canApproveImplementation && !implementation.ownerArchived &&
+                        <button type="button" disabled={blocked || Boolean(approvalBusy) || implementation.ownerBusy}
+                          onClick={() => void implementationHandler.current(implementation)}>Approve implementation</button>}
+                      {implementation.coderId &&
+                        <button type="button" onClick={() => onOpenAgent?.(implementation.coderId!)}>Open coder chat</button>}
+                    </div>
+                  </div>
+                )}
                 {approval ? (
                   <div className="chat-approval">
                     {approval.state === "pending" ? (
@@ -425,7 +475,7 @@ function Conversation({
               </div>
             </article>
           );
-        }), [agent.messages, agent.role, agent.roleNumber, approvalBusy, blocked, canApprove, displayName, kind, onOpenAgent, hiddenMessages, focusMessageId]);
+        }), [agent.messages, agent.role, agent.roleNumber, approvalBusy, blocked, canApprove, canApproveImplementation, displayName, kind, onOpenAgent, hiddenMessages, focusMessageId]);
 
   return (
     <section ref={chat} className="workspace-chat" aria-label={kind === "project" ? "Project chat" : `${recipient} chat`}>
@@ -445,7 +495,7 @@ function Conversation({
               menu?.removeAttribute("open");
               menu?.querySelector("summary")?.focus();
               setHiddenMessages(new Set(agent.messages
-                .filter((message) => message.approval?.state !== "pending")
+                .filter((message) => message.approval?.state !== "pending" && message.implementation?.status !== "awaiting-approval")
                 .map((message) => message.id)));
               pinToBottom.current = true;
             }}>Clear chat</button>

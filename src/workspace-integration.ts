@@ -138,6 +138,19 @@ export function integrateProjectCandidates(
   return prepareProjectCandidates(projects, sources, false);
 }
 
+/** Deliver a changed single-repository submission at its original baseline. */
+export function pinApprovedCandidate(project: string, source: IntegrationSource) {
+  const delivery = materializeCandidates(project, [source], source.base);
+  try {
+    const revision = git(delivery.path, ["rev-parse", "--verify", "HEAD^{commit}"]);
+    if (revision === delivery.base) throw new Error("The coder finished without changes to the approved repository.");
+    return { path: delivery.path, revision };
+  } catch (error) {
+    removeFeatureWorktree(project, delivery.path);
+    throw error;
+  }
+}
+
 /** Copy one coder's pinned submission into clean delivery worktrees without rebasing it. */
 export function pinDirectCandidates(projects: readonly { id: string; path: string }[], sources: ProjectSource[]) {
   if (sources.length < 2 || new Set(sources.map(({ projectId }) => projectId)).size !== sources.length) {

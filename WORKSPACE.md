@@ -52,6 +52,10 @@ A single-repository workspace is identified by its resolved repository path. Ren
 
 The live workspace opens a coordinator conversation, labeled **Computer** in the project chat. Discuss or refine a goal there, ask it to start a team, or ask for a standalone analysis. Each delegated agent has its own chat, queue, and status. The local Node process serves the browser workspace; closing the browser tab does not stop that process. Stop the server explicitly when finished.
 
+### From investigation to implementation
+
+Ask the coordinator to investigate a bug and wait for approval before editing. An analyser can leave a scoped implementation proposal with the target repository, intended change, and verification steps. Review it in the main or task chat and select **Approve implementation** to start a coder in an isolated worktree under the investigation. The original task shows whether implementation is running, blocked, or ready for review. Project branches still require a separate merge decision.
+
 ## Claude Code mode
 
 Start a Git project with Claude Code 2.1.248 or later.

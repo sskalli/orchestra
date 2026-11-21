@@ -13,9 +13,13 @@ function git(cwd: string, ...args: string[]) {
     { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
 }
 
-function crossRepoFixture(t: TestContext) {
+function crossRepoFixture(t: TestContext, sources: Record<string, string> = {
+  api: "export default null;\n",
+  ui: "export default null;\n",
+  other: "export default null;\n",
+}) {
   const root = mkdtempSync(join(tmpdir(), "orchestra-cross-repo-"));
-  const projects = ["api", "ui", "other"].map((id) => ({ id, path: join(root, id) }));
+  const projects = Object.keys(sources).map((id) => ({ id, path: join(root, id) }));
   const initialized: string[] = [];
   t.after(() => {
     for (const project of initialized) {
@@ -39,7 +43,7 @@ function crossRepoFixture(t: TestContext) {
       return;
     }
     initialized.push(project.path);
-    writeFileSync(join(project.path, "index.mjs"), "export default null;\n");
+    writeFileSync(join(project.path, "index.mjs"), sources[project.id]);
     writeFileSync(join(project.path, ".gitignore"), "ignored-local.txt\n");
     git(project.path, "add", "index.mjs", ".gitignore");
     git(project.path, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-qm", "Baseline");
@@ -320,4 +324,127 @@ test("archived cross-repo teams can send the compact handoff to one fresh coder"
   assert.deepEqual(archived.handoff?.paths?.sort(), ["api/index.mjs", "ui/index.mjs"]);
   assert.deepEqual(archived.handoff?.sourceRevisions?.map(({ projectId, revision }) => [projectId, revision]).sort(),
     coder.agent.integration.members.map(({ projectId, revision }: { projectId: string; revision: string }) => [projectId, revision]).sort());
+});
+
+test("one approval continues the stale-status investigation in an isolated adapter candidate", async (t) => {
+  const fixture = crossRepoFixture(t, {
+    dashboard: "export const statusLabel = ({ status }) => `Status: ${status}`;\n",
+    "local-service": "export const getStatus = (readStatus, source) => readStatus(source);\n",
+    adapter: "const statuses = { west: 'online', east: 'offline' };\nlet cached;\nexport const readStatus = (source) => cached ??= { status: statuses[source] };\n",
+  });
+  if (!fixture) return;
+  const { root, projects, baseline, runtime, internal, requests, coordinator, call, complete, delegate, sessionFrom } = fixture;
+  const store = workspaceStore(root, join(root, "state"));
+  internal.store = store;
+  internal.storageReady = true;
+  const [dashboard, service, adapter] = projects;
+  const investigation = sessionFrom(await delegate(coordinator, "analyser", {
+    name: "Stale status investigation", projectId: dashboard.id,
+  }));
+  const brief = "Remove the shared adapter cache. Check west→east and east→west through the local service and dashboard.";
+  const tool = "raise_product_decision";
+  const question = "Approve reading the selected source on every request?";
+  assert.equal((await call(investigation, tool, { question })).success, true);
+  assert.equal(investigation.agent.implementationProposal, undefined, "a generic question must remain a discussion");
+  assert.equal((await call(investigation, tool, { question, implementation: { projectId: "missing", brief } })).success, false);
+  const proposal = await call(investigation, tool, { question, implementation: { projectId: adapter.id, brief } });
+  assert.equal(proposal.success, true, proposal.text);
+  complete(investigation);
+
+  const getTask = () => runtime.snapshot().agents.find((agent) => agent.id === investigation.agent.id)!;
+  const pending = getTask().implementationProposal;
+  assert.equal(pending?.status, "awaiting-approval");
+  assert.equal(pending.projectId, adapter.id);
+  const saved = store.loadWorkspace();
+  assert(saved);
+  assert.deepEqual(saved.sessions.find(({ agent }) => agent.id === investigation.agent.id)?.agent.implementationProposal, pending);
+  assert.equal(runtime.snapshot().agents.filter((agent) => agent.duty === "coder").length, 0);
+  assert.equal(git(adapter.path, "worktree", "list", "--porcelain").match(/^worktree /gm)?.length, 1);
+  assert(runtime.snapshot().agents.find((agent) => agent.id === coordinator.agent.id)?.messages.some((message) =>
+    message.sourceAgentId === investigation.agent.id && message.implementationProposalId === pending.id));
+
+  const approval = { type: "approveImplementation" as const, agentId: investigation.agent.id, proposalId: pending.id };
+  await assert.rejects(runtime.command({ ...approval, proposalId: "wrong-proposal" }));
+  const approvals = await Promise.allSettled([runtime.command(approval), runtime.command(approval)]);
+  assert.equal(approvals.filter((result) => result.status === "fulfilled").length, 1);
+  assert.equal(getTask().implementationProposal?.status, "implementing");
+  const coders = runtime.snapshot().agents.filter((agent) => agent.duty === "coder");
+  assert.equal(coders.length, 1);
+  const coder = internal.sessions.get(coders[0].id);
+  assert.equal(coder.agent.parentId, investigation.agent.id);
+  assert.equal(coder.agent.projectId, adapter.id);
+  const candidate = coder.agent.candidate.path;
+  assert.notEqual(candidate, adapter.path);
+  const turn = requests.findLast(({ method }) => method === "turn/start")?.params;
+  assert.deepEqual(turn.sandboxPolicy.writableRoots, [candidate]);
+  assert(JSON.stringify(turn.input).includes(brief));
+
+  const check = (adapterPath: string, expected: "pass" | "fail") => {
+    const script = `
+      import assert from 'node:assert/strict';
+      import { pathToFileURL } from 'node:url';
+      const [dashboard, service, adapter] = process.argv.slice(1).map(path => pathToFileURL(path).href);
+      const { statusLabel } = await import(dashboard);
+      const { getStatus } = await import(service);
+      for (const order of [['west', 'east'], ['east', 'west']]) {
+        const { readStatus } = await import(adapter + '?' + order[0]);
+        for (const source of order) {
+          const expected = source === 'west' ? 'online' : 'offline';
+          assert.equal(statusLabel(getStatus(readStatus, source)), 'Status: ' + expected);
+        }
+      }
+    `;
+    const run = () => execFileSync(process.execPath, ["--input-type=module", "-e", script,
+      join(dashboard.path, "index.mjs"), join(service.path, "index.mjs"), join(adapterPath, "index.mjs")],
+    { stdio: ["ignore", "pipe", "pipe"] });
+    if (expected === "fail") assert.throws(run, /ERR_ASSERTION/);
+    else run();
+  };
+  check(adapter.path, "fail");
+  const candidateFile = join(candidate, "index.mjs");
+  const fixedAdapter = "const statuses = { west: 'online', east: 'offline' };\nexport const readStatus = (source) => ({ status: statuses[source] });\n";
+  writeFileSync(candidateFile, fixedAdapter);
+  check(candidate, "pass");
+  const verification = "Both west→east and east→west passed through the service and dashboard.";
+  const reportCheck = async () => {
+    const reply = await call(coder, "submit_check_result", { outcome: "passed", summary: verification });
+    assert.equal(reply.success, true, reply.text);
+  };
+  await reportCheck();
+  writeFileSync(candidateFile, fixedAdapter + "\n");
+  complete(coder);
+  const blocked = getTask().implementationProposal;
+  assert.equal(blocked?.status, "blocked", "evidence for a prior checkout cannot mark the task ready");
+  assert.equal(blocked.coderId, coder.agent.id);
+  assert.equal(blocked.candidateRevision, undefined);
+
+  await runtime.command({ type: "send", agentId: coder.agent.id, text: "Rerun the checks on the final candidate." });
+  assert.equal(getTask().implementationProposal?.status, "implementing");
+  check(candidate, "pass");
+  await reportCheck();
+  internal.onEvent({ method: "item/completed", params: {
+    threadId: coder.threadId, turnId: coder.run.turn.id,
+    item: { type: "agentMessage", id: "bug-checks", text: verification },
+  } });
+  complete(coder);
+
+  const delivery = getTask().implementationProposal;
+  assert.equal(delivery?.status, "ready-for-review");
+  assert.equal(delivery.coderId, coder.agent.id);
+  assert(delivery.candidatePath);
+  assert.notEqual(delivery.candidatePath, candidate);
+  assert.equal(delivery.candidateRevision, git(delivery.candidatePath, "rev-parse", "HEAD"));
+  assert.equal(git(delivery.candidatePath, "status", "--porcelain"), "");
+  check(delivery.candidatePath, "pass");
+  const savedDelivery = store.loadWorkspace();
+  assert(savedDelivery);
+  const reopened = new WorkspaceRuntime({ cwd: dashboard.path, projects, store });
+  t.after(() => reopened.close());
+  (reopened as any).restore(savedDelivery.sessions, savedDelivery.teams);
+  assert.deepEqual(reopened.snapshot().agents.find((agent) => agent.id === investigation.agent.id)?.implementationProposal,
+    delivery);
+  for (const [index, { path }] of projects.entries()) {
+    assert.equal(git(path, "rev-parse", "HEAD"), baseline[index]);
+    assert.equal(git(path, "status", "--porcelain"), "");
+  }
 });
