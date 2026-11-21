@@ -418,3 +418,11 @@
   color: var(--sw-muted); font-size: .648rem; line-height: 1.6;
 }
 .chat-agent-update-heading button:disabled { text-decoration: none; }
+
+.chat-task-detail {
+  margin: 0;
+  padding: 5px 9px;
+  color: var(--sw-muted);
+  font-size: .675rem;
+  overflow-wrap: anywhere;
+}

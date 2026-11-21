@@ -192,3 +192,17 @@ button:focus-visible { outline: 2px solid #b8bcb8; outline-offset: 3px; }
   background: var(--sw-control-hover);
   color: #fff;
 }
+
+.sw-new-task-name { display: grid; gap: 4px; }
+.sw-new-task-name input {
+  min-width: 0;
+  padding: 5px 7px;
+  color: var(--sw-text);
+  border: 1px solid var(--sw-line);
+  background: #181a1d;
+  border-radius: 4px;
+  font: inherit;
+}
+.sw-new-task fieldset { margin: 10px 0 0; border: 1px solid var(--sw-line); border-radius: 4px; }
+.sw-new-task fieldset label { display: flex; align-items: center; gap: 6px; overflow-wrap: anywhere; }
+.sw-new-task fieldset p { color: var(--sw-muted); margin: 0 0 5px; }

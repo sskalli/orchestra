@@ -100,7 +100,7 @@ function attention(agent: Agent): Activity[] {
   return [];
 }
 
-async function send(command: Command) {
+async function sendRequest(command: Command) {
   const response = await fetch("/api/command", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -110,6 +110,11 @@ async function send(command: Command) {
     const body = await response.json().catch(() => ({}));
     throw new Error(body.error ?? "The workspace could not accept that command");
   }
+  return response;
+}
+
+async function send(command: Command) {
+  await sendRequest(command);
 }
 
 function Workspace() {
@@ -182,6 +187,13 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
   const [chooser, setChooser] = useState<{ agentId: string }>();
   const [projectDetails, setProjectDetails] = useState(false);
   const [archiveOpen, setArchiveOpen] = useState(false);
+  const [newTaskOpen, setNewTaskOpen] = useState(false);
+  const [newTaskPending, setNewTaskPending] = useState(false);
+  const [newTaskError, setNewTaskError] = useState("");
+  const [taskProjectIds, setTaskProjectIds] = useState<string[]>([]);
+  const [taskName, setTaskName] = useState("");
+  const [newTaskId, setNewTaskId] = useState<string>();
+  const newTaskDialog = useRef<HTMLDialogElement>(null);
   const [lifecycle, setLifecycle] = useState<{ action: "archive" | "restore" | "delete"; agentId: string }>();
   const [lifecycleError, setLifecycleError] = useState("");
   const [lifecyclePending, setLifecyclePending] = useState(false);
@@ -233,6 +245,21 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
     if (lifecycle) lifecycleDialog.current?.showModal();
     else lifecycleDialog.current?.close();
   }, [lifecycle]);
+
+  useEffect(() => {
+    if (newTaskOpen) newTaskDialog.current?.showModal();
+    else newTaskDialog.current?.close();
+  }, [newTaskOpen]);
+
+  useEffect(() => {
+    if (!newTaskId || !snapshot.agents.some((agent) => agent.id === newTaskId)) return;
+    setSelectedId(newTaskId);
+    setDockId(newTaskId);
+    setChooser(undefined);
+    setFocus((previous) => ({ count: previous.count + 1 }));
+    setNewTaskId(undefined);
+    requestAnimationFrame(() => document.querySelector<HTMLTextAreaElement>(".sw-right textarea")?.focus());
+  }, [snapshot.agents, newTaskId]);
 
   useEffect(() => {
     if (selectedId && !snapshot.agents.some((agent) => agent.id === selectedId)) {
@@ -326,6 +353,30 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
     if (id) setDockId(id);
     setChooser(undefined);
     setFocus((previous) => ({ id: messageId, count: previous.count + 1 }));
+  }
+
+  function openNewTask() {
+    setTaskName("");
+    setTaskProjectIds([]);
+    setNewTaskError("");
+    setNewTaskOpen(true);
+  }
+
+  async function createTask() {
+    if (newTaskPending || blocked) return;
+    setNewTaskPending(true);
+    setNewTaskError("");
+    try {
+      const response = await sendRequest({ type: "createTask", name: taskName.trim() || "New session", projectIds: taskProjectIds });
+      const result = await response.json();
+      if (typeof result.agentId !== "string") throw new Error("Orchestra did not return the new session ID.");
+      setNewTaskId(result.agentId);
+      setNewTaskOpen(false);
+    } catch (error) {
+      setNewTaskError(error instanceof Error ? error.message : "The session could not be created.");
+    } finally {
+      setNewTaskPending(false);
+    }
   }
 
   function closeAgent(restoreFocus: boolean) {
@@ -443,7 +494,7 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
   const canvasAgents = agents.filter((agent) => agent.role !== "coordinator" && !agent.archivedAt).map((agent) => ({
     ...agent,
     projectLabel: snapshot.projects.length > 1
-      ? agent.directCandidates?.map(({ projectId }) => projectId).join(", ") || agent.projectId
+      ? (agent.directTask?.projectIds ?? agent.directCandidates?.map(({ projectId }) => projectId))?.join(", ") || (agent.directTask ? undefined : agent.projectId)
       : undefined,
   }));
   const archivedAgents = agents.filter((agent) => agent.archivedAt);
@@ -497,10 +548,10 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
       ? agents.find((item) => item.role === "lead" && (item.id === agent.parentId || belongsTo(agent, item.id)))
       : undefined;
     const integration = team?.integration;
-    const repositoryIds = agent.role === "lead" ? teamIdentity?.projectIds
+    const repositoryIds = agent.directTask?.projectIds ?? (agent.role === "lead" ? teamIdentity?.projectIds
       : integration && agent.validationIntegrationId === integration.id ? integration.members?.map(({ projectId }) => projectId)
-      : agent.directCandidates?.map(({ projectId }) => projectId);
-    const repositoryScope = repositoryIds && repositoryIds.length > 1 ? repositoryIds : undefined;
+      : agent.directCandidates?.map(({ projectId }) => projectId));
+    const repositoryScope = repositoryIds && (agent.directTask ? repositoryIds.length > 0 : repositoryIds.length > 1) ? repositoryIds : undefined;
 
     function belongsTo(child: Agent, id: string) {
       const visited = new Set<string>();
@@ -554,12 +605,20 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
         ? `${agentAppearance(team).displayName} / ${agentAppearance(agent).displayName}`
         : `${agentAppearance(agent).displayName}${team ? ` / ${agentAppearance(team).displayName}`
           : teamIdentity && teamIdentity.name !== agent.name ? ` / ${teamIdentity.name}` : ""}`}
-      projectLabel={kind === "agent" && snapshot.projects.length > 1 && !repositoryScope ? agent.projectId : undefined}
+      projectLabel={kind === "agent" && !agent.directTask && snapshot.projects.length > 1 && !repositoryScope ? agent.projectId : undefined}
       repositoryScope={repositoryScope}
+      taskPhase={agent.directTask?.phase}
+      taskDetail={agent.directTask?.detail}
+      onStartImplementation={agent.directTask?.projectIds.length && agent.directTask.phase !== "implementing"
+        ? () => send({ type: "startImplementation", agentId: agent.id,
+          text: agent.directTask?.phase === "ready-for-review"
+            ? "Revise the candidate using the feedback we agreed in this chat." : undefined })
+        : undefined}
       delivery={agent.integration?.members?.length ? {
         members: agent.integration.members,
         confirmed: agent.integration.confirmed,
         direct: Boolean(agent.directCandidates?.length),
+        taskChecks: agent.directTask ? agent.integration.validationEvidence?.summary ?? "" : undefined,
       } : undefined}
       modelLabel={modelLabel}
       usageLabel={[usage, teamTokens].filter(Boolean).join(" · ")}
@@ -622,7 +681,9 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
           <button ref={archivedToggle} className="sw-archived-toggle" type="button" aria-expanded={archiveOpen} onClick={() => setArchiveOpen(!archiveOpen)}>Archived ({archivedAgents.length})</button>
           {(blocked || storageUnavailable) && <div className="sw-banner" role="status">{blocked ? blockedReason : "Browser storage is unavailable. Drafts and layout changes may not survive reload."}</div>}
           <WorkspaceCanvas agents={canvasAgents} signals={signals} selectedId={selectedId} onSelect={select} onStatus={handleStatus}
-            emptyMessage={mode === "claude" ? "Use the project chat to message Claude Code." : undefined}
+            onCreateTask={mode === "codex" && !blocked ? openNewTask : undefined}
+            emptyMessage={mode === "claude" ? "Use the project chat to message Claude Code."
+              : mode === "codex" ? "Select + to start a session." : undefined}
             initialCamera={savedCamera} onCameraChange={preferences.writeCamera} />
           {archiveOpen && <section className="sw-archive-list" aria-label="Archived agents" onKeyDown={(event) => {
             if (event.key === "Escape") { event.stopPropagation(); setArchiveOpen(false); archivedToggle.current?.focus(); }
@@ -662,6 +723,32 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
           {selected && resizeHandle("right")}
         </aside>
       </main>
+      <dialog ref={newTaskDialog} className="sw-lifecycle-dialog sw-new-task" aria-labelledby="new-task-heading" onCancel={(event) => {
+        if (newTaskPending) event.preventDefault();
+        else setNewTaskOpen(false);
+      }}>
+        <h2 id="new-task-heading">New session</h2>
+        <form onSubmit={(event) => { event.preventDefault(); void createTask(); }}>
+          <label className="sw-new-task-name">Name <input value={taskName} onChange={(event) => setTaskName(event.target.value)}
+            placeholder="New session" maxLength={60} disabled={newTaskPending} autoFocus /></label>
+          <fieldset disabled={newTaskPending}>
+            <legend>Repositories</legend>
+            <p>Select the repositories this session may work in. Leave them unchecked for a general chat.</p>
+            {snapshot.projects.map(({ id }) => <label key={id}>
+              <input type="checkbox" checked={taskProjectIds.includes(id)} onChange={(event) => {
+                const checked = event.target.checked;
+                setTaskProjectIds((current) => checked ? [...current, id] : current.filter((selected) => selected !== id));
+              }} />
+              {id}
+            </label>)}
+          </fieldset>
+          {newTaskError && <p role="alert">{newTaskError}</p>}
+          <footer>
+            <button type="button" disabled={newTaskPending} onClick={() => setNewTaskOpen(false)}>Cancel</button>
+            <button type="submit" disabled={newTaskPending || blocked}>{newTaskPending ? "Starting…" : "Start session"}</button>
+          </footer>
+        </form>
+      </dialog>
       <dialog ref={lifecycleDialog} className="sw-lifecycle-dialog" aria-labelledby="lifecycle-heading" onCancel={(event) => {
         if (lifecyclePending) event.preventDefault(); else setLifecycle(undefined);
       }}>

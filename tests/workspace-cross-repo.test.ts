@@ -505,3 +505,111 @@ test("deleting a blocked approved coder allows a new proposal on the same invest
   assert.deepEqual(runtime.snapshot().agents.filter(({ duty }) => duty === "coder").map(({ id, parentId }) => [id, parentId]),
     [[getProposal()?.coderId, investigation.agent.id]]);
 });
+
+test("a direct task without repositories starts a read-only chat without a pilot turn", async (t) => {
+  const fixture = crossRepoFixture(t);
+  if (!fixture) return;
+  const { runtime, internal, requests, coordinator, complete } = fixture;
+  const agentId = await runtime.command({ type: "createTask", name: "Dinner ideas", projectIds: [] });
+  assert.equal(typeof agentId, "string");
+  assert.notEqual(agentId, coordinator.agent.id);
+  const task = internal.sessions.get(agentId);
+  assert.deepEqual(task.agent.directTask.projectIds, []);
+  assert.equal(task.agent.directTask.phase, "planning");
+  await runtime.command({ type: "send", agentId, text: "Suggest a weeknight dinner." });
+  const started = requests.findLast(({ method }) => method === "turn/start")?.params;
+  assert.equal(started.threadId, task.threadId);
+  assert.notEqual(started.threadId, coordinator.threadId);
+  assert.equal(started.sandboxPolicy.type, "readOnly");
+  assert.equal(started.approvalPolicy, "never");
+  complete(task);
+  await assert.rejects(runtime.command({ type: "startImplementation", agentId }));
+  assert.equal(runtime.snapshot().agents.length, 2);
+});
+
+test("one direct task plans and delivers an isolated cross-repo change in the same Codex thread", async (t) => {
+  const fixture = crossRepoFixture(t, {
+    api: "export default 'ready';\n",
+    ui: "export default (value) => value.toUpperCase();\n",
+    other: "export default null;\n",
+  });
+  if (!fixture) return;
+  const { runtime, internal, projects, baseline, requests, coordinator, call, complete } = fixture;
+  await assert.rejects(runtime.command({ type: "createTask", name: "Invalid", projectIds: ["missing"] }));
+  const agentId = await runtime.command({ type: "createTask", name: "Status payload", projectIds: ["api", "ui"] });
+  assert.equal(typeof agentId, "string");
+  const task = internal.sessions.get(agentId);
+  const getTask = () => runtime.snapshot().agents.find(({ id }) => id === agentId)!;
+  const initial = projects.map(({ path }) => git(path, "worktree", "list", "--porcelain"));
+  await runtime.command({ type: "send", agentId,
+    text: "Plan to return { message: 'ready' } from the API and render the same display in the UI. Leave edits until approval." });
+  const planning = requests.findLast(({ method }) => method === "turn/start")?.params;
+  assert.equal(planning.threadId, task.threadId);
+  assert.notEqual(planning.threadId, coordinator.threadId);
+  assert.equal(planning.sandboxPolicy.type, "readOnly");
+  assert.equal(planning.approvalPolicy, "never");
+  assert.deepEqual(projects.map(({ path }) => git(path, "worktree", "list", "--porcelain")), initial);
+  internal.onEvent({ method: "item/completed", params: {
+    threadId: task.threadId, turnId: task.run.turn.id,
+    item: { type: "agentMessage", id: "proposed-plan", text: "Update both exports, then run the shared assertion." },
+  } });
+  complete(task);
+
+  await runtime.command({ type: "startImplementation", agentId, text: "Implement the agreed status payload and verify both repos together." });
+  const implementation = requests.findLast(({ method }) => method === "turn/start")?.params;
+  assert.equal(implementation.threadId, planning.threadId);
+  assert.equal(requests.filter(({ method }) => method === "thread/start").length, 1);
+  assert.equal(requests.filter(({ method }) => method === "turn/start").length, 2);
+  assert.equal(getTask().directTask.phase, "implementing");
+  await assert.rejects(runtime.command({ type: "startImplementation", agentId }));
+  assert.equal(requests.filter(({ method }) => method === "turn/start").length, 2);
+  assert.equal(implementation.sandboxPolicy.type, "workspaceWrite");
+  assert.equal(implementation.sandboxPolicy.networkAccess, false);
+  assert.equal(implementation.sandboxPolicy.writableRoots.length, 2);
+  for (const { path } of projects) assert(!implementation.sandboxPolicy.writableRoots.includes(path));
+  const [api, ui] = projects;
+  const worktreeFor = (path: string) => implementation.sandboxPolicy.writableRoots.find((candidate: string) =>
+    git(path, "worktree", "list", "--porcelain").split("\n").includes("worktree " + candidate));
+  const apiPath = worktreeFor(api.path);
+  const uiPath = worktreeFor(ui.path);
+  assert(apiPath && uiPath && apiPath !== uiPath);
+  const check = (apiWorktree: string, uiWorktree: string) => execFileSync(process.execPath, [
+    "--input-type=module", "-e", `import assert from "node:assert/strict";
+      import { pathToFileURL } from "node:url";
+      const [api, ui] = await Promise.all(process.argv.slice(1).map(path => import(pathToFileURL(path).href)));
+      assert.equal(ui.default(api.default), "READY");`, join(apiWorktree, "index.mjs"), join(uiWorktree, "index.mjs"),
+  ]);
+  writeFileSync(join(apiPath, "index.mjs"), "export default { message: 'ready' };\n");
+  writeFileSync(join(uiPath, "index.mjs"), "export default ({ message }) => message.toUpperCase();\n");
+  writeFileSync(join(apiPath, "ignored-local.txt"), "generated local data\n");
+  check(apiPath, uiPath);
+  const verification = await call(task, "submit_check_result", { outcome: "passed", summary: "API payload renders READY through the UI." });
+  assert.equal(verification.success, true, verification.text);
+  complete(task);
+
+  const delivery = getTask();
+  assert.equal(delivery.directTask.phase, "ready-for-review");
+  assert.equal(runtime.snapshot().agents.length, 2);
+  const members = delivery.integration?.members;
+  assert.deepEqual(members?.map(({ projectId }) => projectId).sort(), ["api", "ui"]);
+  const pinnedApi = members!.find(({ projectId }) => projectId === "api")!;
+  const pinnedUi = members!.find(({ projectId }) => projectId === "ui")!;
+  assert.notEqual(pinnedApi.path, apiPath);
+  assert.notEqual(pinnedUi.path, uiPath);
+  assert(!existsSync(join(pinnedApi.path, "ignored-local.txt")));
+  check(pinnedApi.path, pinnedUi.path);
+  projects.forEach(({ path }, index) => {
+    assert.equal(git(path, "status", "--porcelain"), "");
+    assert.equal(git(path, "rev-parse", "HEAD"), baseline[index]);
+  });
+
+  await runtime.command({ type: "send", agentId, text: "Explain the check results without making changes." });
+  const followUp = requests.findLast(({ method }) => method === "turn/start")?.params;
+  assert.equal(followUp.threadId, planning.threadId);
+  assert.equal(followUp.sandboxPolicy.type, "readOnly");
+  assert.equal(followUp.approvalPolicy, "never");
+  assert.equal((await call(task, "submit_check_result", { outcome: "passed", summary: "Unexpected read-only check." })).success, false);
+  complete(task);
+  assert.equal(getTask().directTask.phase, "ready-for-review");
+  assert.equal(getTask().integration?.id, delivery.integration?.id);
+});

@@ -48,7 +48,10 @@ type ChatProps = {
   title?: string;
   projectLabel?: string;
   repositoryScope?: string[];
-  delivery?: { members: { projectId: string; path: string; revision?: string }[]; confirmed?: boolean; direct?: boolean };
+  delivery?: { members: { projectId: string; path: string; revision?: string }[]; confirmed?: boolean; direct?: boolean; taskChecks?: string };
+  taskPhase?: NonNullable<WorkspaceAgent["directTask"]>["phase"];
+  taskDetail?: string;
+  onStartImplementation?: () => Promise<void>;
   modelLabel?: string;
   usageLabel?: string;
   draft: string;
@@ -98,7 +101,7 @@ const systemMessageLabels: Record<SystemMessageKind, string> = {
 };
 
 function Conversation({
-  agent, kind, title, projectLabel, repositoryScope, delivery, modelLabel, usageLabel, draft: initialDraft, composerHeight, onComposerHeightChange, onDraftInput, onDraftChange, onSend, onSteer, onCancel, onApproval, onApproveImplementation, onResumeQueue, onClose,
+  agent, kind, title, projectLabel, repositoryScope, delivery, taskPhase, taskDetail, onStartImplementation, modelLabel, usageLabel, draft: initialDraft, composerHeight, onComposerHeightChange, onDraftInput, onDraftChange, onSend, onSteer, onCancel, onApproval, onApproveImplementation, onResumeQueue, onClose,
   disabled, disabledReason, focusMessageId, focusRequest, onOpenAgent, onLifecycle,
 }: ChatProps) {
   const transcript = useRef<HTMLDivElement>(null);
@@ -131,6 +134,7 @@ function Conversation({
   const mounted = useRef(true);
   draftChangeRef.current = onDraftChange;
   const [sending, setSending] = useState(false);
+  const [startingImplementation, setStartingImplementation] = useState(false);
   const [cancelling, setCancelling] = useState(false);
   const [approvalBusy, setApprovalBusy] = useState<string>();
   const [resumingQueue, setResumingQueue] = useState(false);
@@ -326,6 +330,19 @@ function Conversation({
     }
   }
 
+  async function startImplementation() {
+    if (!onStartImplementation || blocked || sending || startingImplementation) return;
+    setStartingImplementation(true);
+    setError("");
+    try {
+      await onStartImplementation();
+    } catch (failure) {
+      setError(failure instanceof Error ? failure.message : "Implementation could not start.");
+    } finally {
+      setStartingImplementation(false);
+    }
+  }
+
   async function resolveApproval(id: string, decision: "accept" | "decline") {
     if (!onApproval || approvalBusy || blocked) return;
     setApprovalBusy(id);
@@ -485,6 +502,7 @@ function Conversation({
           <h2 title={heading}>{kind === "project" ? `COMMS // CHANNEL: ${heading}` : heading}</h2>
           {kind === "agent" ? <span className="chat-agent-status">{projectLabel ? `Project: ${projectLabel} · ` : ""}{archived ? "Archived" : agent.lifecycleBusy ? "Updating…" : statusLabels[agent.status]}</span> : null}
           {repositoryScope && <span className="chat-agent-status">Repositories: {repositoryScope.join(", ")}</span>}
+          {taskPhase === "planning" && <span className="chat-agent-status">{repositoryScope ? "Planning · read-only" : "General chat"}</span>}
           {modelLabel && <span className="chat-agent-status">{modelLabel}</span>}
           {usageLabel && <span className="chat-agent-status" title={usageLabel}>{usageLabel}</span>}
         </div>
@@ -519,7 +537,7 @@ function Conversation({
         </button>
       </header>
       {delivery && <details className="chat-delivery">
-        <summary>Delivery snapshots · {delivery.direct
+        <summary>Delivery snapshots · {delivery.taskChecks !== undefined ? "Ready for review" : delivery.direct
           ? (delivery.confirmed ? "Accepted by pilot" : "Awaiting pilot confirmation")
           : (delivery.confirmed ? "Recorded checks passed" : "Validation required")}</summary>
         <ul>
@@ -530,9 +548,11 @@ function Conversation({
               onFocus={(event) => event.currentTarget.select()} /></label>}
           </li>)}
         </ul>
+        {delivery.taskChecks && <p className="chat-implementation-brief">Checks: {delivery.taskChecks}</p>}
         <p>Review and merge each repository separately.</p>
       </details>}
 
+      {taskDetail && <p className="chat-task-detail" role="status">{taskDetail}</p>}
       {archived && <p className="chat-archive-notice">Archived {new Date(agent.archivedAt!).toLocaleString()}. Restore to continue this conversation.</p>}
       <div className="chat-transcript" role="log" aria-label={`Conversation with ${recipient}`} aria-relevant="additions"
         ref={transcript} onScroll={(event) => {
@@ -570,6 +590,14 @@ function Conversation({
           <textarea aria-label={`Message ${recipient}`} rows={3} disabled={Boolean(agent.lifecycleBusy)}
             value={draft} onChange={(event) => updateDraft(event.target.value)} onBlur={flushDraft} onKeyDown={handleComposerKey} />
         </div>
+        {onStartImplementation && agent.messages.some((entry) => entry.role === "assistant" && !entry.state) && (
+          <button className="chat-steer" type="button"
+            disabled={blocked || sending || startingImplementation || agent.canCancel || agent.queueDepth > 0}
+            onClick={() => void startImplementation()}>
+            {startingImplementation ? "Starting…" : taskPhase === "blocked" ? "Retry implementation"
+              : taskPhase === "ready-for-review" ? "Revise candidate" : "Start implementation"}
+          </button>
+        )}
         {agent.canSteer && onSteer ? (
           <button className="chat-steer" type="button" disabled={!readyToSend}
             onClick={() => void send(onSteer)}>Steer current turn</button>

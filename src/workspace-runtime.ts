@@ -4,6 +4,7 @@ import { readFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { basename, resolve } from "node:path";
+import { tmpdir } from "node:os";
 import { AppServer, safeError } from "./app-server.ts";
 import type { Event, FileUpdate, Id, Thread, Turn } from "./app-server.ts";
 import { checkClaudeCode, ClaudeCodeError, runClaudeCode } from "./claude-code.ts";
@@ -56,6 +57,7 @@ export type WorkspaceAgent = {
   modelSettings?: ModelSettings;
   candidate?: Candidate;
   implementationProposal?: ImplementationProposal;
+  directTask?: { projectIds: string[]; phase: "planning" | "implementing" | "blocked" | "ready-for-review"; detail?: string };
   directCandidates?: (Candidate & { projectId: string })[];
   acceptanceOwnerId?: string;
   requiredChecks?: CheckDuty[];
@@ -91,6 +93,8 @@ export type WorkspaceSnapshot = {
 };
 export type AgentSignal = { id: string; senderId: string; recipientId: string };
 export type WorkspaceCommand =
+  | { type: "createTask"; name: string; projectIds: string[] }
+  | { type: "startImplementation"; agentId: string; text?: string }
   | { type: "send" | "steer"; agentId: string; text: string }
   | { type: "resumeQueue" | "cancel" | "restore" | "delete"; agentId: string }
   | { type: "archive"; agentId: string; stopRunning?: boolean }
@@ -105,6 +109,7 @@ const legacyRequiredChecks: readonly CheckDuty[] = ["reviewer", "tester"];
 type Duty = "coder" | "reviewer" | "tester" | "analyser" | "designer" | "pm";
 
 type Run = {
+  taskImplementation?: boolean;
   turn?: Turn; delegated?: boolean; reuseRequest?: ReturnType<typeof resolveTeamReuseRequest>; reuseLookupAttempted?: boolean; messageOffset?: number; message: WorkspaceMessage; check?: WorkspaceAgent["check"];
   demoTimer?: ReturnType<typeof setTimeout>; claude?: ReturnType<typeof runClaudeCode>;
   patches?: Map<string, FileUpdate[]>;
@@ -505,13 +510,13 @@ export class WorkspaceRuntime {
         } else if (this.approvedProposal(this.sessions.get(entry.agent.id)!)?.status === "implementing") {
           this.finishApprovedImplementation(this.sessions.get(entry.agent.id)!, false,
             "Orchestra restarted before the approved coder started. Open a fresh investigation to retry.");
-        } else if (entry.agent.role === "lead" && !this.sessions.get(entry.agent.id)?.threadId) {
-          const lead = this.sessions.get(entry.agent.id)!;
+        } else if ((entry.agent.role === "lead" || entry.agent.directTask) && !this.sessions.get(entry.agent.id)?.threadId) {
+          const session = this.sessions.get(entry.agent.id)!;
           try {
-            await this.attachThread(lead);
-            delete lead.agent.unavailableReason;
+            await this.attachThread(session);
+            delete session.agent.unavailableReason;
           } catch (error) {
-            lead.agent.unavailableReason = errorText(error);
+            session.agent.unavailableReason = errorText(error);
           }
         }
       }
@@ -543,6 +548,7 @@ export class WorkspaceRuntime {
 
   async command(command: WorkspaceCommand) {
     if (this.closed) throw new Error("The workspace is closed.");
+    if (command.type === "createTask") return this.createDirectTask(command.name, command.projectIds);
     const session = this.sessions.get(command.agentId);
     if (!session) throw new Error("This conversation no longer exists.");
     if (command.type === "archive" || command.type === "restore" || command.type === "delete") {
@@ -550,6 +556,10 @@ export class WorkspaceRuntime {
       return;
     }
     if (!this.isActive(session)) throw new Error("Restore this archived conversation before messaging it.");
+    if (command.type === "startImplementation") {
+      await this.startDirectTaskImplementation(session, command.text);
+      return;
+    }
     if (command.type === "approveImplementation") {
       await this.approveImplementation(session, command.proposalId);
       return;
@@ -593,6 +603,132 @@ export class WorkspaceRuntime {
     const next = message("user", text);
     session.agent.messages.push(next);
     await this.enqueue(session, next);
+  }
+
+  private async createDirectTask(name: string, projectIds: string[]) {
+    if (!this.available || this.demo || this.state.provider.name !== "codex" || this.storageFailed) {
+      throw new Error("Codex must be ready to create a task.");
+    }
+    const title = typeof name === "string" ? name.trim() : "";
+    if (!title || title.length > 60) throw new Error("Provide a task name of up to 60 characters.");
+    if (!Array.isArray(projectIds) || new Set(projectIds).size !== projectIds.length ||
+        projectIds.some((id) => !this.projects.some((project) => project.id === id))) {
+      throw new Error("Choose distinct configured repositories.");
+    }
+    if ([...this.sessions.values()].filter((entry) => this.isActive(entry)).length >= 30) {
+      throw new Error("The workspace has reached its 30-session limit.");
+    }
+    const session = this.createAgent(randomUUID(), title, "worker");
+    session.agent.projectId = projectIds[0];
+    session.agent.directTask = { projectIds: [...projectIds], phase: "planning" };
+    try {
+      await this.attachThread(session);
+      if (this.storageFailed) throw new Error("Orchestra could not save the new task.");
+      return session.agent.id;
+    } catch (error) {
+      this.sessions.delete(session.agent.id);
+      if (session.threadId) this.threadSessions.delete(session.threadId);
+      this.state.agents = this.state.agents.filter((agent) => agent !== session.agent);
+      this.publish();
+      throw error;
+    }
+  }
+
+  private async startDirectTaskImplementation(session: AgentSession, text?: string) {
+    const task = session.agent.directTask;
+    if (!task?.projectIds.length) throw new Error("Choose at least one repository for an implementation task.");
+    if (!this.available || this.storageFailed || !session.threadId || session.agent.unavailableReason) {
+      throw new Error("This Codex task is unavailable.");
+    }
+    if (session.run || session.opening || session.recovery || session.queue.length || session.approvals.size ||
+        task.phase === "implementing") {
+      throw new Error("Wait for the task to finish its current turn before approving implementation.");
+    }
+    if (!session.agent.messages.some((entry) => entry.role === "assistant" && !entry.state)) {
+      throw new Error("Discuss the task in this chat before approving implementation.");
+    }
+    if (text !== undefined && (typeof text !== "string" || text.length > 24_000)) {
+      throw new Error("Keep the implementation instruction within 24,000 characters.");
+    }
+    if (!session.agent.candidate) {
+      const candidates: NonNullable<WorkspaceAgent["directCandidates"]> = [];
+      try {
+        for (const projectId of task.projectIds) {
+          const project = this.projects.find(({ id }) => id === projectId)!;
+          candidates.push({ ...createFeatureWorktree(project.path), projectId });
+        }
+      } catch (error) {
+        for (const { path, projectId } of candidates) {
+          removeFeatureWorktree(this.projects.find(({ id }) => id === projectId)!.path, path);
+        }
+        throw error;
+      }
+      const [candidate] = candidates;
+      session.agent.candidate = { path: candidate.path, base: candidate.base };
+      if (candidates.length > 1) session.agent.directCandidates = candidates;
+    }
+    const roots = this.directTaskCandidates(session);
+    const assignment = message("user",
+      (text?.trim() || "Implement the plan we agreed in this chat.") +
+      "\n\nImplementation is explicitly approved for this turn. Write only in these isolated worktrees: " +
+      JSON.stringify(roots.map(({ projectId, path }) => ({ projectId, path }))) +
+      ". Run the agreed verification and call submit_check_result before ending the turn.");
+    task.phase = "implementing";
+    delete task.detail;
+    delete session.agent.integration;
+    session.agent.messages.push(assignment);
+    await this.begin(session, assignment, undefined, true);
+  }
+
+  private directTaskCandidates(session: AgentSession) {
+    const { candidate, directCandidates, projectId } = session.agent;
+    return directCandidates ?? (candidate && projectId ? [{ ...candidate, projectId }] : []);
+  }
+
+  private finishDirectTask(session: AgentSession, check: CheckResult | undefined, detail?: string) {
+    const task = session.agent.directTask!;
+    try {
+      if (detail) throw new Error(detail);
+      if (check?.outcome !== "passed") throw new Error(check?.summary ?? "No passing verification was recorded for this turn.");
+      const candidates = this.directTaskCandidates(session);
+      const members = candidates.map((candidate) => ({ ...candidate, fingerprint: fingerprintCandidate(candidate.path) }));
+      if (fingerprintMemberSnapshots(members) !== check.candidateFingerprint) {
+        throw new Error("The candidate changed after verification. Recheck the current worktrees.");
+      }
+      const sources = members.map(({ fingerprint, ...member }) => ({
+        ...member, agentId: session.agent.id, submissionId: check.submissionId, expectedFingerprint: fingerprint,
+      }));
+      if (sources.length > 1) {
+        const delivery = pinDirectCandidates(this.projects, sources);
+        if (delivery.members?.every(({ base, revision }) => base === revision)) {
+          for (const { projectId, path } of delivery.members) {
+            removeFeatureWorktree(this.projects.find(({ id }) => id === projectId)!.path, path);
+          }
+          throw new Error("The task finished without changes to the approved repositories.");
+        }
+        session.agent.integration = { id: check.submissionId, ...delivery, validationEvidence: check };
+      } else {
+        const source = sources[0];
+        const pinned = pinApprovedCandidate(this.projectForAgent(session).path, source);
+        const fingerprint = fingerprintCandidate(pinned.path);
+        session.agent.integration = {
+          id: check.submissionId, path: pinned.path, base: source.base, fingerprint,
+          sources: [{ agentId: session.agent.id, submissionId: check.submissionId, head: pinned.revision }],
+          members: [{ ...pinned, projectId: source.projectId, base: source.base, fingerprint }],
+          validationEvidence: check,
+        };
+      }
+      task.phase = "ready-for-review";
+      session.agent.status = "awaiting-confirmation";
+      session.agent.messages.push(message("system", "A verified candidate is ready for review.", "success"));
+      return true;
+    } catch (error) {
+      task.phase = "blocked";
+      task.detail = errorText(error);
+      session.agent.status = "error";
+      session.agent.messages.push(message("system", task.detail, "error"));
+      return false;
+    }
   }
 
   private async approveImplementation(analysis: AgentSession, proposalId: string) {
@@ -1029,12 +1165,28 @@ export class WorkspaceRuntime {
     const entries = new Map(saved.map((entry) => [entry.agent.id, entry]));
     if (this.projects.length === 1) {
       for (const { agent } of saved) {
-        if (agent.role !== "coordinator") agent.projectId = this.projects[0].id;
+        if (agent.directTask) {
+          if (agent.directTask.projectIds.length) {
+            agent.directTask.projectIds = [this.projects[0].id];
+            agent.projectId = this.projects[0].id;
+            for (const member of [...(agent.integration?.members ?? []), ...(agent.integration?.sources ?? [])]) {
+              member.projectId = agent.projectId;
+            }
+          }
+        } else if (agent.role !== "coordinator") agent.projectId = this.projects[0].id;
         if (agent.implementationProposal) agent.implementationProposal.projectId = this.projects[0].id;
       }
     }
     for (const { agent } of saved) {
       if (agent.role === "coordinator") continue;
+      if (agent.directTask) {
+        const ids = agent.directTask.projectIds;
+        if (agent.role !== "worker" || agent.parentId || !Array.isArray(ids) || agent.projectId !== ids[0] ||
+            new Set(ids).size !== ids.length || ids.some((id) => !this.projects.some((project) => project.id === id))) {
+          throw new Error(`Saved task ${agent.name} has an invalid repository scope.`);
+        }
+        continue;
+      }
       if (!this.projects.some((project) => project.id === agent.projectId)) {
         throw new Error(`Saved agent ${agent.name} has an unknown project.`);
       }
@@ -1089,7 +1241,9 @@ export class WorkspaceRuntime {
       const parentAgent = agent.parentId && entries.get(agent.parentId)?.agent;
       const directCandidates = agent.directCandidates;
       if (directCandidates && (!Array.isArray(directCandidates) || directCandidates.length < 2 ||
-          agent.duty !== "coder" || parentAgent?.role !== "coordinator" ||
+          (agent.directTask ? directCandidates.length !== agent.directTask.projectIds.length ||
+            directCandidates.some(({ projectId }, index) => projectId !== agent.directTask?.projectIds[index])
+            : agent.duty !== "coder" || parentAgent?.role !== "coordinator") ||
           directCandidates[0]?.projectId !== agent.projectId || directCandidates[0]?.path !== agent.candidate?.path ||
           directCandidates[0]?.base !== agent.candidate?.base ||
           directCandidates.some((candidate) => !candidate || typeof candidate.path !== "string" ||
@@ -1143,6 +1297,10 @@ export class WorkspaceRuntime {
       });
       session.agent.queueDepth = session.queue.length;
       session.agent.queuePaused = session.queue.length > 0;
+      if (session.agent.directTask?.phase === "implementing") {
+        session.agent.directTask.phase = "blocked";
+        session.agent.directTask.detail = "Orchestra restarted during implementation. Review the worktree and run verification again.";
+      }
       if (agent.status === "working" || agent.status === "attention") {
         session.agent.status = "error";
         session.agent.messages.push(message("system", "Orchestra restarted during this turn. Check the conversation before sending it again.", "action"));
@@ -1204,7 +1362,8 @@ export class WorkspaceRuntime {
       this.threadSessions.set(thread.id, session);
       session.toolVersion = toolVersion;
       if (turn && turn.status === "completed") {
-        session.agent.status = session.agent.duty === "coder" ? "awaiting-confirmation" : "done";
+        session.agent.status = session.agent.directTask?.phase === "blocked" ? "error"
+          : session.agent.duty === "coder" ? "awaiting-confirmation" : "done";
         const submitted = session.agent.messages.find((entry) => entry.id === run?.messageId);
         if (submitted) delete submitted.state;
         for (const item of turn.items ?? []) {
@@ -1262,6 +1421,7 @@ export class WorkspaceRuntime {
 
   private sessionCwd(session: AgentSession) {
     if (session.agent.candidate) return session.agent.candidate.path;
+    if (session.agent.directTask && !session.agent.projectId) return tmpdir();
     if (session.agent.role === "coordinator") return this.projects[0].path;
     return this.projectForAgent(session).path;
   }
@@ -1305,13 +1465,20 @@ export class WorkspaceRuntime {
   }
 
   private threadPermissions(session: AgentSession) {
-    const candidates = this.candidatePaths(session);
+    const directTask = session.agent.directTask;
+    const candidates = directTask ? this.directTaskReadRoots(session) : this.candidatePaths(session);
     return {
+      ...(directTask && !candidates.length ? { environments: [] } : {
+        runtimeWorkspaceRoots: candidates.length ? candidates : [this.sessionCwd(session)],
+      }),
       sandbox: session.agent.duty === "coder" ? "workspace-write" : "read-only",
       approvalPolicy: this.fileApprovalPolicy(session),
       approvalsReviewer: "user",
-      runtimeWorkspaceRoots: candidates.length ? candidates : [this.sessionCwd(session)],
     };
+  }
+
+  private directTaskReadRoots(session: AgentSession) {
+    return session.agent.directTask!.projectIds.map((id) => this.projects.find((project) => project.id === id)!.path);
   }
 
   private fileApprovalPolicy(session: AgentSession) {
@@ -1319,6 +1486,13 @@ export class WorkspaceRuntime {
   }
 
   private instructions(session: AgentSession) {
+    if (session.agent.directTask) {
+      const roots = session.agent.directTask.projectIds.map((id) => this.projects.find((project) => project.id === id)!);
+      return "Work directly with the user in this task. " +
+        (roots.length ? `The selected repositories for read-only investigation are ${JSON.stringify(roots)}. ` : "No repositories are selected. ") +
+        "Plan and discuss by default. Perform code changes only in a turn explicitly approved for implementation, using its isolated worktree paths. " +
+        "Follow the repository instructions. Verify the candidate, call submit_check_result with the actual result, and report blockers concisely.";
+    }
     const role = session.agent.role === "worker" ? session.agent.duty ?? "analyser" : session.agent.role;
     const instructions = readFileSync(new URL(`../roles/${role}.md`, import.meta.url), "utf8");
     const projectContext = session.agent.directCandidates
@@ -1370,7 +1544,7 @@ export class WorkspaceRuntime {
       config: workspaceThreadConfig,
       ephemeral: false,
       ...(session.agent.role !== "worker" && { environments: [] }),
-      dynamicTools: this.approvedProposal(session) ? [decisionTool, checkTool]
+      dynamicTools: session.agent.directTask || this.approvedProposal(session) ? [decisionTool, checkTool]
         : session.agent.role === "worker" && session.agent.duty !== "coder"
         ? [decisionTool, ...(session.agent.duty === "reviewer" || session.agent.duty === "tester" ? [checkTool] : [])]
         : [tool, relayTool, listTool, inspectGitTool, reportTool, decisionTool,
@@ -1440,9 +1614,20 @@ export class WorkspaceRuntime {
     };
   }
 
-  private async begin(session: AgentSession, next: WorkspaceMessage, parent?: Turn) {
+  private directTaskTurnScope(session: AgentSession, implementation: boolean) {
+    const roots = implementation ? this.candidatePaths(session) : this.directTaskReadRoots(session);
+    return {
+      cwd: roots[0] ?? tmpdir(),
+      ...(roots.length ? { runtimeWorkspaceRoots: roots } : { environments: [] }),
+      sandboxPolicy: implementation
+        ? { type: "workspaceWrite", writableRoots: roots, networkAccess: false, excludeTmpdirEnvVar: true, excludeSlashTmp: true }
+        : { type: "readOnly", networkAccess: false },
+    };
+  }
+
+  private async begin(session: AgentSession, next: WorkspaceMessage, parent?: Turn, taskImplementation = false) {
     if (!this.isActive(session)) return;
-    const run: Run = { message: next, messageOffset: session.agent.messages.length };
+    const run: Run = { message: next, messageOffset: session.agent.messages.length, taskImplementation };
     if (session.agent.role === "coordinator" && this.state.provider.name === "codex" && !this.demo) {
       run.reuseRequest = resolveTeamReuseRequest(next.text, this.teamRecords());
     }
@@ -1459,6 +1644,7 @@ export class WorkspaceRuntime {
       session.agent.queuePaused = session.queue.length > 0;
       session.agent.messages.push(message("system", `The turn could not start: ${errorText(error)}`, "action"));
       this.finishApprovedImplementation(session, false, errorText(error));
+      if (taskImplementation) this.finishDirectTask(session, undefined, errorText(error));
       this.update(session);
       this.reportDelegation(session, false);
       return;
@@ -1505,7 +1691,7 @@ export class WorkspaceRuntime {
         threadId: session.threadId,
         approvalPolicy: this.fileApprovalPolicy(session),
         ...(session.agent.role !== "worker" && { environments: [] }),
-        ...(session.agent.candidate && {
+        ...(session.agent.directTask ? this.directTaskTurnScope(session, taskImplementation) : session.agent.candidate && {
           cwd: this.sessionCwd(session),
           runtimeWorkspaceRoots: this.candidatePaths(session),
           sandboxPolicy: session.agent.duty === "coder"
@@ -1602,6 +1788,7 @@ export class WorkspaceRuntime {
   }
 
   private finish(session: AgentSession, completed: boolean, detail?: string, cancelled = false) {
+    const directTaskRun = session.run?.taskImplementation ? session.run : undefined;
     const binding = session.run?.checkTarget;
     const approvedAssignment = this.approvedProposal(session) ? session.run?.message : undefined;
     if (session.run && !completed) session.run.message.state = cancelled ? "cancelled" : "failed";
@@ -1641,6 +1828,15 @@ export class WorkspaceRuntime {
     if (!completed && session.agent.implementationProposal?.status === "awaiting-approval") {
       session.agent.implementationProposal.status = "blocked";
       session.agent.implementationProposal.detail = "The investigation did not finish. Request a fresh proposal.";
+    }
+    if (directTaskRun) {
+      completed = this.finishDirectTask(session, directTaskRun.check,
+        completed ? undefined : detail ?? "The implementation turn did not complete.");
+      if (!completed && !cancelled) directTaskRun.message.state = "failed";
+    } else if (session.agent.directTask?.phase === "ready-for-review") {
+      session.agent.status = "awaiting-confirmation";
+    } else if (session.agent.directTask?.phase === "blocked") {
+      session.agent.status = "error";
     }
     this.finishApprovedImplementation(session, completed, detail);
     if (this.approvedProposal(session)?.status === "blocked") completed = false;
@@ -2001,7 +2197,9 @@ export class WorkspaceRuntime {
           session.agent.implementationProposal = proposal;
         }
         const parent = session.agent.parentId ? this.sessions.get(session.agent.parentId) : undefined;
-        for (const recipient of new Set([...(proposal ? [session] : []), parent, this.sessions.get(coordinatorId)])) {
+        const recipients = session.agent.directTask ? [session]
+          : [...(proposal ? [session] : []), parent, this.sessions.get(coordinatorId)];
+        for (const recipient of new Set(recipients)) {
           if (recipient && this.isActive(recipient)) {
             recipient.agent.messages.push({ ...message("system", `Product decision from ${session.agent.name}: ${question}`, "action", session.agent.id),
               ...(proposal && { implementationProposalId: proposal.id }) });
@@ -2010,18 +2208,26 @@ export class WorkspaceRuntime {
         }
         this.publish();
         reply(true, proposal ? "The implementation proposal is awaiting explicit user approval. Stop before editing."
+          : session.agent.directTask ? "Product decision posted in this task chat."
           : "Product decision posted in the parent and pilot chats.");
         return;
       }
       if (params.tool === checkTool.name) {
         const proposal = this.approvedProposal(session);
-        if (!proposal && session.agent.duty !== "reviewer" && session.agent.duty !== "tester") {
+        const taskRun = session.run!.taskImplementation ? session.run : undefined;
+        if (!taskRun && !proposal && session.agent.duty !== "reviewer" && session.agent.duty !== "tester") {
           throw new Error("Only an assigned verifier or approved implementation coder can submit a check result.");
         }
         const outcome = params.arguments?.outcome;
         const summary = typeof params.arguments?.summary === "string" ? params.arguments.summary.trim() : "";
         if ((outcome !== "passed" && outcome !== "changes-requested" && outcome !== "blocked") ||
           !summary || summary.length > 24_000) throw new Error("Provide a valid outcome and summary.");
+        if (taskRun) {
+          taskRun.check = { submissionId: randomUUID(), outcome, summary: summary.slice(0, 2400), recordedAt: Date.now(),
+            candidateFingerprint: fingerprintIntegrationMembers(this.directTaskCandidates(session)) };
+          reply(true, "Verification recorded for the current candidate. Record it again if the candidate changes.");
+          return;
+        }
         if (proposal) {
           proposal.verification = { outcome, summary: summary.slice(0, 2400),
             fingerprint: fingerprintCandidate(session.agent.candidate!.path) };
