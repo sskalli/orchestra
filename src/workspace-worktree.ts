@@ -1,7 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { lstatSync, mkdtempSync, realpathSync, rmdirSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { isAbsolute, join, relative, resolve, sep } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import type { FileUpdate } from "./app-server.ts";
 
 function worktreeFile(root: string, path: unknown) {
@@ -50,12 +50,12 @@ export function describeWorktreePatch(root: string, changes: FileUpdate[]) {
   return preview.join("\n\n");
 }
 
-export function createFeatureWorktree(project: string) {
+export function createFeatureWorktree(project: string, revision = "HEAD") {
   const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith("GIT_")));
   const git = (...args: string[]) => execFileSync("git", ["-c", "core.hooksPath=/dev/null", ...args], {
     cwd: project, env, encoding: "utf8",
   }).trim();
-  const base = git("rev-parse", "--verify", "HEAD^{commit}");
+  const base = git("rev-parse", "--verify", revision + "^{commit}");
   const directory = realpathSync(mkdtempSync(join(tmpdir(), "orchestra-feature-")));
   const path = join(directory, "candidate");
   try {
@@ -65,4 +65,14 @@ export function createFeatureWorktree(project: string) {
     throw error;
   }
   return { path, base };
+}
+
+/** Remove an isolated worktree created by the current attempt. */
+export function removeFeatureWorktree(project: string, path: string) {
+  const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith("GIT_")));
+  try {
+    execFileSync("git", ["-c", "core.hooksPath=/dev/null", "worktree", "remove", "--force", path],
+      { cwd: project, env, stdio: ["ignore", "pipe", "pipe"] });
+    rmdirSync(dirname(path));
+  } catch { /* Preserve partial state if Git cannot remove it. */ }
 }

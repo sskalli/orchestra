@@ -1,12 +1,12 @@
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdtempSync, realpathSync, rmSync, rmdirSync } from "node:fs";
+import { mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
-import { createFeatureWorktree } from "./workspace-worktree.ts";
+import { join, resolve } from "node:path";
+import { createFeatureWorktree, removeFeatureWorktree } from "./workspace-worktree.ts";
 
 export type IntegrationSource = { agentId: string; path: string; base: string; submissionId: string; expectedFingerprint: string };
-export type IntegrationMember = { projectId: string; path: string; base: string; fingerprint: string };
+export type IntegrationMember = { projectId: string; path: string; base: string; fingerprint: string; revision?: string };
 type ProjectSource = IntegrationSource & { projectId: string };
 type ProjectIntegration = Omit<IntegrationMember, "projectId"> & {
   members?: IntegrationMember[];
@@ -67,12 +67,6 @@ function captureSource(target: ReturnType<typeof repository>, baseline: string, 
   return { source, path: candidate.root, ...captured };
 }
 
-function removeIntegrationWorktree(project: string, path: string) {
-  // This is only called for worktrees created by the current integration attempt.
-  try { git(project, ["worktree", "remove", "--force", path]); rmdirSync(dirname(path)); }
-  catch { /* Preserve partial state if Git cannot remove it. */ }
-}
-
 /** Combine accepted submissions in a new detached worktree; never merge the project branch. */
 export function integrateCandidates(project: string, candidates: IntegrationSource[]) {
   if (candidates.length < 2 || new Set(candidates.map((source) => source.agentId)).size !== candidates.length) {
@@ -81,14 +75,14 @@ export function integrateCandidates(project: string, candidates: IntegrationSour
   return materializeCandidates(project, candidates);
 }
 
-function materializeCandidates(project: string, candidates: IntegrationSource[]) {
+function materializeCandidates(project: string, candidates: IntegrationSource[], pinnedBaseline?: string) {
   const target = repository(project);
-  const baseline = git(target.root, ["rev-parse", "--verify", "HEAD^{commit}"]);
+  const baseline = pinnedBaseline ?? git(target.root, ["rev-parse", "--verify", "HEAD^{commit}"]);
   const snapshots = candidates.map((source) => captureSource(target, baseline, source));
   if (new Set(snapshots.map((source) => source.path)).size !== snapshots.length) {
     throw new Error("Each integrated coder must have a distinct isolated worktree.");
   }
-  const integration = createFeatureWorktree(target.root);
+  const integration = createFeatureWorktree(target.root, pinnedBaseline);
   const identity = {
     GIT_AUTHOR_NAME: "Orchestra", GIT_AUTHOR_EMAIL: "orchestra@localhost",
     GIT_COMMITTER_NAME: "Orchestra", GIT_COMMITTER_EMAIL: "orchestra@localhost",
@@ -117,20 +111,20 @@ function materializeCandidates(project: string, candidates: IntegrationSource[])
       sources: snapshots.map(({ source, head, fingerprint }) => ({ agentId: source.agentId, submissionId: source.submissionId, head, fingerprint })),
     };
   } catch (error) {
-    removeIntegrationWorktree(target.root, integration.path);
+    removeFeatureWorktree(target.root, integration.path);
     throw error;
   }
 }
 
-function integrationFingerprint(members: readonly IntegrationMember[]) {
+export function fingerprintMemberSnapshots(members: readonly IntegrationMember[]) {
   const ordered = [...members].sort((a, b) => a.projectId < b.projectId ? -1 : a.projectId > b.projectId ? 1 : 0);
   const descriptors = ordered.map(({ projectId, path, base, fingerprint }) => [projectId, path, base, fingerprint]);
   return createHash("sha256").update(JSON.stringify(descriptors)).digest("hex");
 }
 
 /** Recompute the manifest fingerprint from current checked-out contents. */
-export function fingerprintIntegrationMembers(members: readonly IntegrationMember[]) {
-  return integrationFingerprint(members.map((member) => ({ ...member, fingerprint: fingerprintCandidate(member.path) })));
+export function fingerprintIntegrationMembers(members: readonly Omit<IntegrationMember, "fingerprint">[]) {
+  return fingerprintMemberSnapshots(members.map((member) => ({ ...member, fingerprint: fingerprintCandidate(member.path) })));
 }
 
 /** Prepare independent candidates per repository and pin them as a single testable delivery. */
@@ -141,6 +135,19 @@ export function integrateProjectCandidates(
   if (sources.length < 2 || new Set(sources.map((source) => source.agentId)).size !== sources.length) {
     throw new Error("Choose at least two distinct accepted coder submissions to integrate.");
   }
+  return prepareProjectCandidates(projects, sources, false);
+}
+
+/** Copy one coder's pinned submission into clean delivery worktrees without rebasing it. */
+export function pinDirectCandidates(projects: readonly { id: string; path: string }[], sources: ProjectSource[]) {
+  if (sources.length < 2 || new Set(sources.map(({ projectId }) => projectId)).size !== sources.length) {
+    throw new Error("Direct delivery needs one candidate per selected repository.");
+  }
+  return prepareProjectCandidates(projects, sources, true);
+}
+
+function prepareProjectCandidates(projects: readonly { id: string; path: string }[], sources: ProjectSource[],
+  pinned: boolean): ProjectIntegration {
   const groups = new Map<string, ProjectSource[]>();
   for (const source of sources) {
     const group = groups.get(source.projectId) ?? [];
@@ -157,12 +164,13 @@ export function integrateProjectCandidates(
   try {
     for (const { id: projectId, path: project } of selected) {
       const group = groups.get(projectId)!;
-      const combined = materializeCandidates(project, group);
+      const combined = materializeCandidates(project, group, pinned ? group[0].base : undefined);
       created.push({ project, path: combined.path });
-      members.push({ projectId, path: combined.path, base: combined.base, fingerprint: combined.fingerprint });
+      members.push({ projectId, path: combined.path, base: combined.base, fingerprint: combined.fingerprint,
+        ...(pinned && { revision: git(combined.path, ["rev-parse", "--verify", "HEAD^{commit}"]) }) });
       submissions.push(...combined.sources.map((source) => ({ ...source, projectId })));
     }
-    const fingerprint = integrationFingerprint(members);
+    const fingerprint = fingerprintMemberSnapshots(members);
     if (fingerprintIntegrationMembers(members) !== fingerprint ||
         sources.some((source) => fingerprintCandidate(source.path) !== source.expectedFingerprint)) {
       throw new Error("An integration candidate changed during preparation. Revalidate it before retrying.");
@@ -170,7 +178,7 @@ export function integrateProjectCandidates(
     const [{ path, base }] = members;
     return { path, base, fingerprint, members, sources: submissions };
   } catch (error) {
-    for (const { project, path } of created.reverse()) removeIntegrationWorktree(project, path);
+    for (const { project, path } of created.reverse()) removeFeatureWorktree(project, path);
     throw error;
   }
 }

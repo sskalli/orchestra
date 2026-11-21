@@ -41,7 +41,7 @@ type ChatProps = {
   title?: string;
   projectLabel?: string;
   repositoryScope?: string[];
-  delivery?: { members: { projectId: string; path: string }[]; confirmed?: boolean };
+  delivery?: { members: { projectId: string; path: string; revision?: string }[]; confirmed?: boolean; direct?: boolean };
   modelLabel?: string;
   usageLabel?: string;
   draft: string;
@@ -468,11 +468,15 @@ function Conversation({
         </button>
       </header>
       {delivery && <details className="chat-delivery">
-        <summary>Delivery snapshots · {delivery.confirmed ? "Recorded checks passed" : "Validation required"}</summary>
+        <summary>Delivery snapshots · {delivery.direct
+          ? (delivery.confirmed ? "Accepted by pilot" : "Awaiting pilot confirmation")
+          : (delivery.confirmed ? "Recorded checks passed" : "Validation required")}</summary>
         <ul>
-          {delivery.members.map(({ projectId, path }) => <li key={projectId}>
+          {delivery.members.map(({ projectId, path, revision }) => <li key={projectId}>
             <label>{projectId}<input aria-label={`${projectId} candidate worktree`} value={path} readOnly
               onFocus={(event) => event.currentTarget.select()} /></label>
+            {revision && <label>Revision<input aria-label={`${projectId} candidate revision`} value={revision} readOnly
+              onFocus={(event) => event.currentTarget.select()} /></label>}
           </li>)}
         </ul>
         <p>Review and merge each repository separately.</p>

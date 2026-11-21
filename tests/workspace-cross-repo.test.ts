@@ -1,18 +1,19 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
-import { test } from "node:test";
+import { test, type TestContext } from "node:test";
 import { WorkspaceRuntime } from "../src/workspace-runtime.ts";
 import { workspaceStore } from "../src/workspace-store.ts";
+import { resolveTeamReuseRequest } from "../src/workspace-teams.ts";
 
 function git(cwd: string, ...args: string[]) {
   return execFileSync("git", ["-c", "core.hooksPath=/dev/null", "-c", "commit.gpgsign=false", ...args],
     { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
 }
 
-test("cross-repo delivery pins the API and UI, enforces repo scope and requires fresh joint evidence", async (t) => {
+function crossRepoFixture(t: TestContext) {
   const root = mkdtempSync(join(tmpdir(), "orchestra-cross-repo-"));
   const projects = ["api", "ui", "other"].map((id) => ({ id, path: join(root, id) }));
   const initialized: string[] = [];
@@ -39,7 +40,8 @@ test("cross-repo delivery pins the API and UI, enforces repo scope and requires 
     }
     initialized.push(project.path);
     writeFileSync(join(project.path, "index.mjs"), "export default null;\n");
-    git(project.path, "add", "index.mjs");
+    writeFileSync(join(project.path, ".gitignore"), "ignored-local.txt\n");
+    git(project.path, "add", "index.mjs", ".gitignore");
     git(project.path, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-qm", "Baseline");
   }
   const baseline = projects.map(({ path }) => git(path, "rev-parse", "HEAD"));
@@ -85,6 +87,14 @@ test("cross-repo delivery pins the API and UI, enforces repo scope and requires 
     assert.equal(reply.success, true, reply.text);
     return internal.sessions.get(JSON.parse(reply.text).id);
   };
+
+  return { root, projects, baseline, runtime, internal, requests, coordinator, call, complete, delegate, sessionFrom };
+}
+
+test("cross-repo delivery pins the API and UI, enforces repo scope and requires fresh joint evidence", async (t) => {
+  const fixture = crossRepoFixture(t);
+  if (!fixture) return;
+  const { root, projects, baseline, runtime, requests, coordinator, call, complete, delegate, sessionFrom } = fixture;
 
   const lead = sessionFrom(await delegate(coordinator, "lead", { projectIds: ["api", "ui"] }));
   assert.deepEqual(runtime.snapshot().teams?.find((team) => team.id === lead.agent.teamId)?.projectIds, ["api", "ui"]);
@@ -166,4 +176,148 @@ test("cross-repo delivery pins the API and UI, enforces repo scope and requires 
     assert.equal(git(path, "status", "--porcelain"), "");
     assert.equal(readFileSync(join(path, "index.mjs"), "utf8"), "export default null;\n");
   }
+});
+
+
+test("the pilot delivers a cohesive API/UI change with one coder and clean isolated worktrees", async (t) => {
+  const fixture = crossRepoFixture(t);
+  if (!fixture) return;
+  const { root, projects, baseline, runtime, internal, requests, coordinator, call, complete, delegate, sessionFrom } = fixture;
+  const goal = "Return {message:'ready'} from the API; render READY in the UI; run the joint response check.";
+  const projectIds = ["api", "ui"];
+  assert.equal((await delegate(coordinator, "coder", { projectIds: ["api", "other-unknown"] })).success, false);
+  assert.equal((await delegate(coordinator, "coder", { projectIds: ["api", "api"] })).success, false);
+  assert.equal((await delegate(coordinator, "coder", { projectId: "other", projectIds })).success, false);
+  assert.equal((await delegate(coordinator, "coder", { projectIds, requiredChecks: ["tester"] })).success, false);
+  assert.equal(runtime.snapshot().agents.length, 1, "invalid inputs must not start a coder");
+
+  const coder = sessionFrom(await delegate(coordinator, "coder", { goal, projectIds, requiredChecks: [] }));
+  const candidates: { projectId: string; path: string; base: string }[] = coder.agent.directCandidates;
+  assert.deepEqual(candidates.map(({ projectId }) => projectId), projectIds);
+  assert.equal(runtime.snapshot().agents.length, 2);
+  assert.equal(coder.agent.parentId, coordinator.agent.id);
+  const request = requests.findLast(({ method }) => method === "turn/start")?.params;
+  const paths = candidates.map(({ path }) => path).sort();
+  assert.deepEqual([...request.runtimeWorkspaceRoots].sort(), paths);
+  assert.equal(request.sandboxPolicy.type, "workspaceWrite");
+  assert.equal(request.approvalPolicy, "never");
+  assert.deepEqual([...request.sandboxPolicy.writableRoots].sort(), paths);
+  assert.equal(request.input.filter(({ type }: { type: string }) => type === "text").length, 1);
+  assert.match(request.input[0].text, /Return \{message:'ready'\}/);
+  assert(!JSON.stringify(request.input).includes(projects[2].path));
+  assert.equal(request.additionalContext, undefined);
+
+  for (const [index, candidate] of candidates.entries()) {
+    assert.notEqual(candidate.path, projects[index].path);
+    assert.equal(candidate.base, baseline[index]);
+    writeFileSync(join(candidate.path, "ignored-local.txt"), "coder residue\n");
+  }
+  const [api, ui] = candidates;
+  const uiSource = "export const display = (value) => value.message.toUpperCase();\n";
+  writeFileSync(join(api.path, "index.mjs"), "export const payload = () => ({message:'ready'});\n");
+  writeFileSync(join(ui.path, "index.mjs"), uiSource);
+  const check = (apiPath: string, uiPath: string) =>
+    execFileSync(process.execPath, ["--input-type=module", "-e", `
+      import assert from 'node:assert/strict';
+      import { pathToFileURL } from 'node:url';
+      const [api, ui] = await Promise.all(process.argv.slice(1).map(path => import(pathToFileURL(path).href)));
+      assert.deepEqual(api.payload(), { message: 'ready' });
+      assert.equal(ui.display(api.payload()), 'READY');
+    `, join(apiPath, "index.mjs"), join(uiPath, "index.mjs")]);
+  check(api.path, ui.path);
+  internal.onEvent({ method: "item/completed", params: {
+    threadId: coder.threadId, turnId: coder.run.turn.id,
+    item: { type: "agentMessage", id: "joint-report", text: "API and UI updated. Joint response check passed." },
+  } });
+  complete(coder);
+  assert.equal(coder.agent.status, "awaiting-confirmation");
+  const report = await call(coordinator, "read_agent_report", { agentId: coder.agent.id });
+  assert.equal(report.success, true, report.text);
+  assert.match(report.text, /Joint response check passed/);
+  const confirm = () => call(coordinator, "confirm_implementation", { agentId: coder.agent.id });
+  writeFileSync(join(ui.path, "index.mjs"), "export const display = () => 'STALE';\n");
+  const stale = await confirm();
+  assert.equal(stale.success, false, "a change in the second repo invalidates the entire submission");
+  assert.equal(coder.agent.integration, undefined);
+  writeFileSync(join(ui.path, "index.mjs"), uiSource);
+  const accepted = await confirm();
+  assert.equal(accepted.success, true, accepted.text);
+  assert.equal(coder.agent.status, "done");
+  const delivery = coder.agent.integration;
+  assert(delivery?.confirmed);
+  assert.deepEqual(delivery.members.map(({ projectId }: { projectId: string }) => projectId).sort(), projectIds);
+  const apiDelivery = delivery.members.find(({ projectId }: { projectId: string }) => projectId === "api");
+  const uiDelivery = delivery.members.find(({ projectId }: { projectId: string }) => projectId === "ui");
+  check(apiDelivery.path, uiDelivery.path);
+  for (const candidate of candidates) {
+    const member = delivery.members.find(({ projectId }: { projectId: string }) => projectId === candidate.projectId);
+    assert.notEqual(member.path, candidate.path);
+    assert.equal(member.revision, git(member.path, "rev-parse", "HEAD"));
+    assert.equal(member.base, candidate.base);
+    assert.equal(git(member.path, "status", "--porcelain"), "");
+    assert.equal(existsSync(join(member.path, "ignored-local.txt")), false);
+    assert.equal(existsSync(join(candidate.path, "ignored-local.txt")), true);
+  }
+  for (const [index, { path }] of projects.entries()) {
+    assert.equal(git(path, "rev-parse", "HEAD"), baseline[index]);
+    assert.equal(git(path, "status", "--porcelain"), "");
+    assert.equal(readFileSync(join(path, "index.mjs"), "utf8"), "export default null;\n");
+  }
+
+  const store = workspaceStore(root, join(root, "state"));
+  const snapshot = runtime.snapshot();
+  store.save(snapshot.agents.map((agent) => ({ agent })), snapshot.teams);
+  const persisted = store.loadWorkspace();
+  assert(persisted);
+  const reopened = new WorkspaceRuntime({ cwd: projects[0].path, projects, store });
+  t.after(() => reopened.close());
+  (reopened as any).restore(persisted.sessions, persisted.teams);
+  const savedCoder = reopened.snapshot().agents.find((agent) => agent.id === coder.agent.id);
+  assert.deepEqual(savedCoder?.directCandidates, candidates);
+  assert.deepEqual(savedCoder?.integration, delivery);
+});
+
+
+test("archived cross-repo teams can send the compact handoff to one fresh coder", async (t) => {
+  const fixture = crossRepoFixture(t);
+  if (!fixture) return;
+  const { runtime, internal, requests, coordinator, call, complete, delegate, sessionFrom } = fixture;
+  const lead = sessionFrom(await delegate(coordinator, "lead", { name: "Contact Form", projectIds: ["api", "ui"] }));
+  complete(lead);
+  await runtime.command({ type: "archive", agentId: lead.agent.id });
+
+  const prompt = "Reuse team Contact Form to edit the API and UI";
+  const teams = runtime.snapshot().teams ?? [];
+  assert(teams.find(({ id }) => id === lead.agent.id)?.archivedAt);
+  coordinator.run.message.text = prompt;
+  coordinator.run.reuseRequest = resolveTeamReuseRequest(prompt, teams);
+  coordinator.run.delegated = false;
+  const selection = await call(coordinator, "find_archived_team", { name: lead.agent.id });
+  assert.equal(selection.success, true, selection.text);
+
+  const coder = sessionFrom(await delegate(coordinator, "coder", { projectIds: ["ui", "api"] }));
+  const [ui, api] = coder.agent.directCandidates;
+  assert.equal(coder.agent.teamId, lead.agent.id);
+  assert.equal(coder.agent.projectId, "ui");
+  assert.equal(ui.projectId, "ui");
+  assert.equal(api.projectId, "api");
+  const request = requests.findLast(({ method }) => method === "turn/start")?.params;
+  assert.equal(request.cwd, ui.path);
+  assert.equal(JSON.parse(request.additionalContext.orchestra_reused_team.value).id, lead.agent.id);
+
+  writeFileSync(join(api.path, "index.mjs"), "export const payload = () => ({message:'ready'});\n");
+  writeFileSync(join(ui.path, "index.mjs"), "export const display = (value) => value.message.toUpperCase();\n");
+  internal.onEvent({ method: "item/completed", params: {
+    threadId: coder.threadId, turnId: coder.run.turn.id,
+    item: { type: "agentMessage", id: "joint-report", text: "API and UI updated." },
+  } });
+  complete(coder);
+  const accepted = await call(coordinator, "confirm_implementation", { agentId: coder.agent.id });
+  assert.equal(accepted.success, true, accepted.text);
+  await runtime.command({ type: "archive", agentId: coder.agent.id });
+  const archived = runtime.snapshot().teams?.find(({ id }) => id === lead.agent.id);
+  assert(archived?.archivedAt);
+  assert.deepEqual(archived.handoff?.paths?.sort(), ["api/index.mjs", "ui/index.mjs"]);
+  assert.deepEqual(archived.handoff?.sourceRevisions?.map(({ projectId, revision }) => [projectId, revision]).sort(),
+    coder.agent.integration.members.map(({ projectId, revision }: { projectId: string; revision: string }) => [projectId, revision]).sort());
 });
