@@ -21,7 +21,7 @@ export type CanvasAgent = {
 };
 
 type Point = { x: number; y: number };
-type Node = Point & { agent: CanvasAgent; hub: boolean; directCoder: boolean };
+type Node = Point & { agent: CanvasAgent; taskRoot: boolean };
 type Team = Point & { depth: number };
 type Layout = { nodes: Node[]; teams: Team[] };
 type Gesture = { start: Point; previous: Point; dragged: boolean };
@@ -78,11 +78,9 @@ export function radialLayout(agents: CanvasAgent[]): Layout {
       if (visited.has(agent.id)) return;
       visited.add(agent.id);
       const radius = depth ? radiusAt(depth) : 0;
-      const directCoder = depth === 0 && agent.duty === "coder";
       nodes.push({
         agent,
-        hub: agent.role === "lead" || directCoder,
-        directCoder,
+        taskRoot: depth === 0,
         x: team.x + Math.cos(angle) * radius,
         y: team.y + Math.sin(angle) * radius,
       });
@@ -469,11 +467,11 @@ export function WorkspaceCanvas({
           if (!sender || !recipient || (sender.agent.parentId !== recipient.agent.id && recipient.agent.parentId !== sender.agent.id)) return null;
           return <MessageDot key={signal.id} from={sender} to={recipient} />;
         })}
-        {layout.nodes.map(({ agent, x, y, hub, directCoder }) => {
-          const members = hub ? subtree(agent) : [agent];
+        {layout.nodes.map(({ agent, x, y, taskRoot }) => {
+          const members = taskRoot ? subtree(agent) : [agent];
           const statusAgent = statusPriority.map((level) => members.find((member) => member.status === level))
             .find((member) => member !== undefined) ?? agent;
-          const status = hub || revealed.has(agent.id) ? statuses[statusAgent.status] : undefined;
+          const status = taskRoot || revealed.has(agent.id) ? statuses[statusAgent.status] : undefined;
           const statusLabel = status?.label ?? statuses[statusAgent.status]?.label ?? "Idle";
           const { color, displayName } = agentAppearance(agent);
           const selected = agent.id === selectedId;
@@ -486,7 +484,7 @@ export function WorkspaceCanvas({
             <div
               key={agent.id}
               data-agent-color={color}
-              className={`swarm-node ${hub ? "is-hub" : "is-worker"}${directCoder ? " is-direct-coder" : ""}${selected ? " is-selected" : ""}${statusHovered === agent.id ? " is-status-hovered" : ""}${showChildStatusIcon ? " is-subtree-only" : ""}`}
+              className={`swarm-node ${taskRoot ? "is-task-root" : "is-child"}${selected ? " is-selected" : ""}${statusHovered === agent.id ? " is-status-hovered" : ""}${showChildStatusIcon ? " is-subtree-only" : ""}`}
               style={{ left: x, top: y }}
               onPointerEnter={() => setHovered(agent.id)}
               onPointerLeave={() => {
@@ -520,7 +518,7 @@ export function WorkspaceCanvas({
                       className={`swarm-team-status-icon status-${statusAgent.status}`}
                       aria-label={`${accessibleName}: ${statusLabel}`}
                       aria-describedby={tooltipId}
-                      onClick={() => onStatus(hub &&
+                      onClick={() => onStatus(taskRoot &&
                         (statusAgent.status === "error" || statusAgent.status === "attention") ? agent.id : statusAgent.id)}
                       onPointerEnter={() => setStatusHovered(agent.id)}
                       onPointerLeave={() => setStatusHovered((id) => id === agent.id ? null : id)}
