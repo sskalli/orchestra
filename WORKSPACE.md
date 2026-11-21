@@ -42,7 +42,7 @@ Configure a shared workspace at launch by repeating `--project` with a unique ID
 npm run workspace -- --project app=/path/to/app --project api=/path/to/api
 ```
 
-The coordinator chat and team map are shared. Ask the coordinator to delegate to a specific project ID; when the target is ambiguous, clarify it in chat. The coordinator assigns one or more configured projects to a team and one project to a direct worker. In a multi-repository team, leads specify each coder’s repository. A coder’s checks inherit its repository and candidate worktree. The menu in the header lists project IDs and paths, and map and chat labels identify each agent's project.
+The coordinator chat and team map are shared. Ask the coordinator to delegate to a specific project ID; when the target is ambiguous, clarify it in chat. The coordinator assigns configured projects to a team or a direct worker. A direct coder can cover several explicitly selected projects for a cohesive change. In a multi-repository team, leads specify each coder’s repository. A coder’s checks inherit its repository and candidate worktree. The menu in the header lists project IDs and paths, and map and chat labels identify each agent's project.
 
 Use `--provider company` alongside `--project` to use a configured custom provider.
 
@@ -111,7 +111,7 @@ The checks above are a manual checklist, not a claim that the current workspace 
 
 ## Delegating from chat
 
-- Ask the coordinator to implement a change. It can assign an isolated change directly to a coder or start a lead when scopes need coordination or integration. The lead assigns coders based on useful independent scopes. Each coder assignment creates a separate detached worktree from the project HEAD. The project must be a Git repository with at least one commit; uncommitted and untracked project changes are not included.
+- Ask the coordinator to implement a change. It can assign an isolated change directly to a coder or start a lead when scopes need coordination or integration. The lead assigns coders based on useful independent scopes. Each coder assignment creates a separate detached worktree from each assigned project's HEAD. The project must be a Git repository with at least one commit; uncommitted and untracked project changes are not included.
 - Ask the pilot or lead to delegate a read-only analysis or design review. The coordinator or lead schedules a designer, reviewer, or tester with `afterAgentId` naming the exact coder. The checker appears beneath that coder and uses its candidate; Orchestra waits for the coder's submission before starting scheduled checks. Coders can also arrange their own independent checks. Designer feedback is advisory and does not replace required review or testing.
 - When multiple accepted scopes must be delivered together, the lead calls `integrate_candidates` with their coder IDs. Orchestra snapshots their changes into a separate combined worktree, preserving source worktrees and the project branch. Conflicts fail explicitly. The lead delegates a tester with an integration/regression goal against that combined candidate, then uses `confirm_integration` after its current snapshot passes. This extra check is unnecessary for a single unchanged candidate.
 - Ask the pilot to relay refinements to an existing lead. Ask the lead to send instructions to its workers. You can also open and message any agent directly.
@@ -120,7 +120,9 @@ The candidate remains on disk for inspection, and merging is manual. Tests that 
 
 ## Cross-repository delivery
 
-Name the participating repositories in the pilot chat. A lead can be assigned several configured repository IDs, and each coder receives one repository and its own worktree. When several repositories are eligible for a repository-scoped assignment, the lead specifies the repository. A check attached to a coder uses the same worktree.
+Name the participating repositories in the pilot chat. For a cohesive change with a clear joint check, the pilot can give one coder a brief covering the repositories, constraints, and acceptance criteria. The coder works in separate worktrees and reports the result of the joint check. The pilot can then confirm the submission and report the pinned delivery revisions.
+
+For independent workstreams or work that needs independent cross-repository verification, a lead can be assigned several configured repository IDs, and each coder receives one repository and its own worktree. When several repositories are eligible for a repository-scoped assignment, the lead specifies the repository. A check attached to a coder uses the same worktree.
 
 After accepting the relevant submissions, the lead prepares a delivery from all participating repositories. Orchestra prepares a fresh delivery worktree for each repository and combines its accepted submissions there. Ignored files from coder worktrees stay out of delivery. The joint tester receives the pinned worktree paths and tests their behavior together. Changes to a pinned candidate or its source submission require fresh validation. The lead chat lists the candidate paths and recorded joint result. Review and merge each repository separately.
 

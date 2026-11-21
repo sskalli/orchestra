@@ -431,7 +431,9 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
 
   const canvasAgents = agents.filter((agent) => agent.role !== "coordinator" && !agent.archivedAt).map((agent) => ({
     ...agent,
-    projectLabel: snapshot.projects.length > 1 ? agent.projectId : undefined,
+    projectLabel: snapshot.projects.length > 1
+      ? agent.directCandidates?.map(({ projectId }) => projectId).join(", ") || agent.projectId
+      : undefined,
   }));
   const archivedAgents = agents.filter((agent) => agent.archivedAt);
 
@@ -486,7 +488,7 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
     const integration = team?.integration;
     const repositoryIds = agent.role === "lead" ? teamIdentity?.projectIds
       : integration && agent.validationIntegrationId === integration.id ? integration.members?.map(({ projectId }) => projectId)
-      : undefined;
+      : agent.directCandidates?.map(({ projectId }) => projectId);
     const repositoryScope = repositoryIds && repositoryIds.length > 1 ? repositoryIds : undefined;
 
     function belongsTo(child: Agent, id: string) {
@@ -536,7 +538,11 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
           : teamIdentity && teamIdentity.name !== agent.name ? ` / ${teamIdentity.name}` : ""}`}
       projectLabel={kind === "agent" && snapshot.projects.length > 1 && !repositoryScope ? agent.projectId : undefined}
       repositoryScope={repositoryScope}
-      delivery={agent.integration?.members?.length ? { members: agent.integration.members, confirmed: agent.integration.confirmed } : undefined}
+      delivery={agent.integration?.members?.length ? {
+        members: agent.integration.members,
+        confirmed: agent.integration.confirmed,
+        direct: Boolean(agent.directCandidates?.length),
+      } : undefined}
       modelLabel={modelLabel}
       usageLabel={[usage, teamTokens].filter(Boolean).join(" · ")}
       draft={drafts[agent.id] ?? ""}
@@ -610,6 +616,7 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
               return <article key={agent.id}>
                 <button type="button" onClick={() => { select(agent.id); setArchiveOpen(false); }}>{agentAppearance(agent).displayName}</button>
                 <small>Parent: {parent ? agentAppearance(parent).displayName : "Project"}</small>
+                {agent.directCandidates?.length ? <small>Repositories: {agent.directCandidates.map(({ projectId }) => projectId).join(", ")}</small> : null}
                 {team && <>
                   <small>Team: {team.name}</small>
                   <label className="sw-archived-team-id">Team ID
