@@ -229,6 +229,8 @@
   font-size: .675rem;
 }
 
+.chat-implementation-brief { white-space: pre-wrap; overflow-wrap: anywhere; }
+
 .chat-approval-actions {
   display: flex;
   gap: 6px;

@@ -8,7 +8,7 @@ import { AppServer, safeError } from "./app-server.ts";
 import type { Event, FileUpdate, Id, Thread, Turn } from "./app-server.ts";
 import { checkClaudeCode, ClaudeCodeError, runClaudeCode } from "./claude-code.ts";
 import { createFeatureWorktree, describeWorktreePatch, removeFeatureWorktree } from "./workspace-worktree.ts";
-import { fingerprintCandidate, fingerprintIntegrationMembers, fingerprintMemberSnapshots, integrateProjectCandidates, pinDirectCandidates, type IntegrationMember } from "./workspace-integration.ts";
+import { fingerprintCandidate, fingerprintIntegrationMembers, fingerprintMemberSnapshots, integrateProjectCandidates, pinApprovedCandidate, pinDirectCandidates, type IntegrationMember } from "./workspace-integration.ts";
 import { readModelCatalog, recordReportedModel, selectModelSettings } from "./workspace-models.ts";
 import type { ModelSettings, ReportedModel } from "./workspace-models.ts";
 import type { SavedSession, workspaceStore } from "./workspace-store.ts";
@@ -30,7 +30,19 @@ export type WorkspaceMessage = {
   orchestrationRunId?: string;
   reuseTeamId?: string;
   state?: "queued" | "streaming" | "failed" | "cancelled";
+  implementationProposalId?: string;
   approval?: { id: string; state: "pending" | "accepted" | "declined" | "expired"; canAccept?: boolean };
+};
+export type ImplementationProposal = {
+  id: string;
+  projectId: string;
+  brief: string;
+  status: "awaiting-approval" | "implementing" | "blocked" | "ready-for-review" | "confirmed";
+  coderId?: string;
+  candidatePath?: string;
+  candidateRevision?: string;
+  verification?: { outcome: CheckResult["outcome"]; summary: string; fingerprint: string };
+  detail?: string;
 };
 export type WorkspaceAgent = {
   id: string;
@@ -43,6 +55,7 @@ export type WorkspaceAgent = {
   duty?: Duty;
   modelSettings?: ModelSettings;
   candidate?: Candidate;
+  implementationProposal?: ImplementationProposal;
   directCandidates?: (Candidate & { projectId: string })[];
   acceptanceOwnerId?: string;
   requiredChecks?: CheckDuty[];
@@ -81,6 +94,7 @@ export type WorkspaceCommand =
   | { type: "send" | "steer"; agentId: string; text: string }
   | { type: "resumeQueue" | "cancel" | "restore" | "delete"; agentId: string }
   | { type: "archive"; agentId: string; stopRunning?: boolean }
+  | { type: "approveImplementation"; agentId: string; proposalId: string }
   | { type: "approval"; agentId: string; approvalId: string; decision: "accept" | "decline" };
 
 type Candidate = { path: string; base: string };
@@ -114,8 +128,9 @@ type AgentSession = {
 };
 
 const coordinatorId = "coordinator";
-const managementToolVersion = 11;
-const coordinatorToolVersion = 12;
+const managementToolVersion = 12;
+const analysisToolVersion = 12;
+const coordinatorToolVersion = 13;
 const workspaceThreadConfig = { "features.multi_agent": false, "features.multi_agent_v2": false };
 const input = (text: string) => [{ type: "text", text, text_elements: [] }];
 const hasSubmittedMessage = (agent: WorkspaceAgent) =>
@@ -207,7 +222,7 @@ const reportTool = {
 const checkTool = {
   type: "function",
   name: "submit_check_result",
-  description: "Record the result of this review or test. Use passed only when the required scope passed, changes-requested for findings or failures, or blocked when verification could not finish.",
+  description: "Record the result of the assigned verification. Use passed only when the required scope passed, changes-requested for findings or failures, or blocked when verification could not finish.",
   inputSchema: {
     type: "object",
     properties: { outcome: { type: "string", enum: ["passed", "changes-requested", "blocked"] }, summary: { type: "string" } },
@@ -228,10 +243,14 @@ const listTool = {
 const decisionTool = {
   type: "function",
   name: "raise_product_decision",
-  description: "Notify your parent and the pilot of an unresolved product decision. Include the question, options, and what is blocked.",
+  description: "Notify your parent and the pilot of an unresolved product decision. An analyser can offer a specific, single-repository implementation requiring explicit user approval.",
   inputSchema: {
     type: "object",
-    properties: { question: { type: "string" } },
+    properties: {
+      question: { type: "string" },
+      implementation: { type: "object", properties: { projectId: { type: "string" }, brief: { type: "string" } },
+        required: ["projectId", "brief"], additionalProperties: false },
+    },
     required: ["question"],
     additionalProperties: false,
   },
@@ -483,6 +502,9 @@ export class WorkspaceRuntime {
         if (entry.agent.archivedAt) continue;
         if (entry.threadId && this.sessions.get(entry.agent.id)?.threadId === entry.threadId) {
           await this.resumeThread(entry);
+        } else if (this.approvedProposal(this.sessions.get(entry.agent.id)!)?.status === "implementing") {
+          this.finishApprovedImplementation(this.sessions.get(entry.agent.id)!, false,
+            "Orchestra restarted before the approved coder started. Open a fresh investigation to retry.");
         } else if (entry.agent.role === "lead" && !this.sessions.get(entry.agent.id)?.threadId) {
           const lead = this.sessions.get(entry.agent.id)!;
           try {
@@ -528,6 +550,10 @@ export class WorkspaceRuntime {
       return;
     }
     if (!this.isActive(session)) throw new Error("Restore this archived conversation before messaging it.");
+    if (command.type === "approveImplementation") {
+      await this.approveImplementation(session, command.proposalId);
+      return;
+    }
     if (command.type === "cancel") {
       if (!session.agent.canCancel || !session.run?.claude) throw new Error("There is no active Claude Code turn to stop.");
       session.agent.canCancel = false;
@@ -567,6 +593,98 @@ export class WorkspaceRuntime {
     const next = message("user", text);
     session.agent.messages.push(next);
     await this.enqueue(session, next);
+  }
+
+  private async approveImplementation(analysis: AgentSession, proposalId: string) {
+    const proposal = analysis.agent.implementationProposal;
+    if (!proposal || proposal.id !== proposalId || proposal.status !== "awaiting-approval") {
+      throw new Error("This implementation proposal is no longer awaiting approval.");
+    }
+    if (analysis.run || analysis.opening || analysis.recovery || analysis.agent.status !== "done") {
+      throw new Error("Wait for the investigation to finish before approving implementation.");
+    }
+    if (!this.available || this.storageFailed || this.demo || this.state.provider.name !== "codex") {
+      throw new Error("Codex must be available to start the approved implementation.");
+    }
+    const project = this.proposalProject(analysis, proposal.projectId);
+    let candidate: Candidate;
+    try {
+      candidate = createFeatureWorktree(project.path);
+    } catch (error) {
+      proposal.status = "blocked";
+      proposal.detail = `Unable to create an isolated candidate: ${errorText(error)}`;
+      this.publish();
+      return;
+    }
+    const worker = this.createAgent(randomUUID(), `Implement ${analysis.agent.name}`, "worker", analysis.agent.id, proposal.brief);
+    Object.assign(worker.agent, {
+      projectId: project.id, teamId: analysis.agent.teamId, duty: "coder", candidate,
+      acceptanceOwnerId: coordinatorId, requiredChecks: [], modelSettings: this.selectModelSettings(),
+    });
+    proposal.status = "implementing";
+    proposal.coderId = worker.agent.id;
+    const assignment = message("user", proposal.brief +
+      "\n\nImplement only the approved scope in the isolated worktree. Run the requested verification and call submit_check_result with the actual outcome and evidence before finishing. Report any blockers.");
+    assignment.orchestrationRunId = proposal.id;
+    assignment.state = "queued";
+    worker.agent.messages.push(assignment);
+    worker.queue.push(assignment);
+    worker.agent.queueDepth = 1;
+    if (!this.persist()) {
+      this.sessions.delete(worker.agent.id);
+      this.state.agents.pop();
+      removeFeatureWorktree(project.path, candidate.path);
+      delete proposal.coderId;
+      proposal.status = "blocked";
+      proposal.detail = "Orchestra could not save the approved implementation.";
+      this.publish(false);
+      return;
+    }
+    this.signal(analysis.agent.id, worker.agent.id);
+    await this.startDelegation(worker);
+  }
+
+  private proposalProject(analysis: AgentSession, id: string) {
+    const project = this.projects.find((entry) => entry.id === id);
+    if (!project || (analysis.agent.teamId && !this.teams.get(analysis.agent.teamId)?.projectIds.includes(id))) {
+      throw new Error("Choose one configured repository within this investigation's scope.");
+    }
+    return project;
+  }
+
+  private approvedProposal(coder: AgentSession) {
+    const parent = coder.agent.parentId && this.sessions.get(coder.agent.parentId);
+    const proposal = parent ? parent.agent.implementationProposal : undefined;
+    return proposal?.coderId === coder.agent.id ? proposal : undefined;
+  }
+
+  private finishApprovedImplementation(coder: AgentSession, completed: boolean, detail?: string) {
+    const proposal = this.approvedProposal(coder);
+    if (!proposal) return;
+    const candidate = coder.agent.candidate;
+    const submissionId = coder.agent.submissionId;
+    try {
+      if (!completed || !candidate || !submissionId || !coder.agent.submissionFingerprint) {
+        throw new Error(detail ?? "The coder did not finish the approved implementation.");
+      }
+      if (!proposal.verification || proposal.verification.fingerprint !== coder.agent.submissionFingerprint) {
+        throw new Error("The coder did not record verification for the current candidate.");
+      }
+      if (proposal.verification.outcome !== "passed") throw new Error(proposal.verification.summary);
+      const project = this.projects.find(({ id }) => id === proposal.projectId)!;
+      const delivery = pinApprovedCandidate(project.path, {
+        ...candidate, agentId: coder.agent.id, submissionId, expectedFingerprint: coder.agent.submissionFingerprint,
+      });
+      proposal.candidateRevision = delivery.revision;
+      proposal.candidatePath = delivery.path;
+      proposal.status = "ready-for-review";
+      delete proposal.detail;
+    } catch (error) {
+      proposal.status = "blocked";
+      proposal.detail = errorText(error);
+      coder.agent.status = "error";
+      coder.agent.messages.push(message("system", proposal.detail, "error"));
+    }
   }
 
   private isActive(session: AgentSession) {
@@ -696,6 +814,15 @@ export class WorkspaceRuntime {
           for (const historical of entry.agent.messages) {
             if (historical.sourceAgentId && ids.has(historical.sourceAgentId)) {
               historical.sourceAgentName ??= this.sessions.get(historical.sourceAgentId)?.agent.name;
+            }
+          }
+          const proposal = entry.agent.implementationProposal;
+          if (!ids.has(entry.agent.id) && proposal?.coderId && ids.has(proposal.coderId)) {
+            delete proposal.coderId;
+            if (proposal.status !== "confirmed") {
+              proposal.status = "blocked";
+              if (!proposal.candidateRevision) delete proposal.verification;
+              proposal.detail = "The implementation coder was deleted. Request a fresh proposal in this investigation.";
             }
           }
           if (entry.waitingFor && ids.has(entry.waitingFor)) {
@@ -903,6 +1030,7 @@ export class WorkspaceRuntime {
     if (this.projects.length === 1) {
       for (const { agent } of saved) {
         if (agent.role !== "coordinator") agent.projectId = this.projects[0].id;
+        if (agent.implementationProposal) agent.implementationProposal.projectId = this.projects[0].id;
       }
     }
     for (const { agent } of saved) {
@@ -950,6 +1078,14 @@ export class WorkspaceRuntime {
       if (agent.teamId && !this.teams.get(agent.teamId)?.projectIds.includes(agent.projectId!)) {
         throw new Error(`Saved agent ${agent.name} has an invalid team assignment.`);
       }
+      const proposal = agent.implementationProposal;
+      const coder = proposal?.coderId ? entries.get(proposal.coderId)?.agent : undefined;
+      if (proposal && (agent.duty !== "analyser" ||
+          !this.projects.some(({ id }) => id === proposal.projectId) ||
+          (agent.teamId && !this.teams.get(agent.teamId)?.projectIds.includes(proposal.projectId)) ||
+          (coder && (coder.duty !== "coder" || coder.parentId !== agent.id || coder.projectId !== proposal.projectId)))) {
+        throw new Error(`Saved investigation ${agent.name} has an invalid implementation proposal.`);
+      }
       const parentAgent = agent.parentId && entries.get(agent.parentId)?.agent;
       const directCandidates = agent.directCandidates;
       if (directCandidates && (!Array.isArray(directCandidates) || directCandidates.length < 2 ||
@@ -966,7 +1102,10 @@ export class WorkspaceRuntime {
       }
       if (parentAgent && parentAgent.role !== "coordinator" &&
           (parentAgent.teamId !== agent.teamId ||
-           (parentAgent.projectId !== agent.projectId && (parentAgent.role !== "lead" || !agent.teamId)))) {
+           (parentAgent.projectId !== agent.projectId && (parentAgent.role !== "lead" || !agent.teamId) &&
+             !(parentAgent.duty === "analyser" && agent.duty === "coder" &&
+               parentAgent.implementationProposal?.coderId === agent.id &&
+               parentAgent.implementationProposal.projectId === agent.projectId)))) {
         throw new Error(`Saved agent ${agent.name} has an invalid project assignment.`);
       }
     }
@@ -1054,6 +1193,7 @@ export class WorkspaceRuntime {
       const turn = run?.turnId && (initialTurnsPage?.data ?? thread.turns)?.find((entry) => entry.id === run.turnId);
       const refreshTools = session.agent.role === "coordinator" ? toolVersion !== coordinatorToolVersion
         : session.agent.role === "lead" || session.agent.duty === "coder" ? toolVersion !== managementToolVersion
+        : session.agent.duty === "analyser" ? toolVersion !== analysisToolVersion
         : (session.agent.duty === "reviewer" || session.agent.duty === "tester") && (toolVersion ?? 0) < 8;
       if (thread.status?.type === "active" || turn && turn.status === "inProgress") {
         throw new Error("Codex still reports an active turn. Check again after restarting the workspace.");
@@ -1078,6 +1218,15 @@ export class WorkspaceRuntime {
           }
         }
         session.agent.messages.push(message("system", "Codex confirmed that the interrupted turn completed.", "success"));
+      }
+      if (run && this.approvedProposal(session)) {
+        if (turn && turn.status === "completed" && session.agent.candidate) {
+          try { session.agent.submissionFingerprint = fingerprintCandidate(session.agent.candidate.path); }
+          catch { delete session.agent.submissionFingerprint; }
+          this.finishApprovedImplementation(session, true);
+        } else {
+          this.finishApprovedImplementation(session, false, "Orchestra could not confirm the interrupted implementation.");
+        }
       }
       if (refreshTools) {
         await this.attachThread(session);
@@ -1105,6 +1254,7 @@ export class WorkspaceRuntime {
       } else {
         session.agent.unavailableReason = detail;
       }
+      if (this.approvedProposal(session)?.status === "implementing") this.finishApprovedImplementation(session, false, detail);
       session.agent.status = "error";
       session.agent.messages.push(message("system", `Unable to resume this Codex conversation. ${session.agent.unavailableReason}`, "error"));
     }
@@ -1188,7 +1338,11 @@ export class WorkspaceRuntime {
       : session.agent.role === "lead"
         ? `Team repository IDs: ${this.eligibleProjects(session).map((project) => project.id).join(", ")}. Set projectId for each repository-scoped assignment when there is more than one choice.\n`
         : "";
-    return `${scopedContext}${manifest ? "" : projectContext}\nUse Orchestra's tools for delegation and product questions.\n\n${instructions}`;
+    const proposalContext = this.approvedProposal(session) || session.agent.duty === "analyser"
+      ? `\nConfigured source repositories for read-only inspection: ${JSON.stringify(
+        session.agent.teamId ? this.projects.filter(({ id }) => this.teams.get(session.agent.teamId!)?.projectIds.includes(id)) : this.projects)}.`
+      : "";
+    return `${scopedContext}${manifest ? "" : projectContext}${proposalContext}\nUse Orchestra's tools for delegation and product questions.\n\n${instructions}`;
   }
 
   private selectModelSettings(complexity?: unknown): ModelSettings {
@@ -1216,7 +1370,8 @@ export class WorkspaceRuntime {
       config: workspaceThreadConfig,
       ephemeral: false,
       ...(session.agent.role !== "worker" && { environments: [] }),
-      dynamicTools: session.agent.role === "worker" && session.agent.duty !== "coder"
+      dynamicTools: this.approvedProposal(session) ? [decisionTool, checkTool]
+        : session.agent.role === "worker" && session.agent.duty !== "coder"
         ? [decisionTool, ...(session.agent.duty === "reviewer" || session.agent.duty === "tester" ? [checkTool] : [])]
         : [tool, relayTool, listTool, inspectGitTool, reportTool, decisionTool,
           ...((session.agent.role === "coordinator" || session.agent.role === "lead") ? [confirmCoderTool] : []),
@@ -1230,7 +1385,8 @@ export class WorkspaceRuntime {
     session.threadId = thread.id;
     this.trackUsage((usage) => usage.registerThread(thread.id, true, session.agent.id));
     session.freshThread = true;
-    session.toolVersion = session.agent.role === "coordinator" ? coordinatorToolVersion : managementToolVersion;
+    session.toolVersion = session.agent.role === "coordinator" ? coordinatorToolVersion
+      : session.agent.duty === "analyser" ? analysisToolVersion : managementToolVersion;
     this.threadSessions.set(thread.id, session);
     this.publish();
     } finally { session.opening = false; }
@@ -1250,7 +1406,8 @@ export class WorkspaceRuntime {
       orchestra_reused_team: { kind: "untrusted", name: "orchestra_reused_team", value: JSON.stringify(reusedTeam) },
     } : undefined;
     if (session.agent.role === "worker" && session.agent.duty !== "coder") return handoff;
-    const priorMessages = session.agent.directCandidates
+    const briefOnly = Boolean(session.agent.directCandidates || this.approvedProposal(session));
+    const priorMessages = briefOnly
       ? session.agent.messages.filter((message) => message.id !== entry?.id && message.role !== "system" && !message.state)
       : session.agent.messages;
     const previousChat = session.freshThread && priorMessages.length ? {
@@ -1260,7 +1417,7 @@ export class WorkspaceRuntime {
         value: JSON.stringify(priorMessages.slice(-12).map(({ role, text, state }) => ({ role, text: text.slice(0, 2000), state }))),
       },
     } : undefined;
-    if (session.agent.directCandidates) return handoff || previousChat ? { ...handoff, ...previousChat } : undefined;
+    if (briefOnly) return handoff || previousChat ? { ...handoff, ...previousChat } : undefined;
     const team = this.availableReports(session, entry);
     const reports = team.map(({ agent }) => {
       const recent = agent.messages.findLast((entry) => entry.role === "assistant" && !entry.state);
@@ -1301,11 +1458,21 @@ export class WorkspaceRuntime {
       session.agent.status = "error";
       session.agent.queuePaused = session.queue.length > 0;
       session.agent.messages.push(message("system", `The turn could not start: ${errorText(error)}`, "action"));
+      this.finishApprovedImplementation(session, false, errorText(error));
       this.update(session);
       this.reportDelegation(session, false);
       return;
     }
     if (session.agent.duty === "coder") {
+      const proposal = this.approvedProposal(session);
+      if (proposal) {
+        next.orchestrationRunId = proposal.id;
+        proposal.status = "implementing";
+        delete proposal.detail;
+        delete proposal.candidatePath;
+        delete proposal.candidateRevision;
+        delete proposal.verification;
+      }
       session.agent.submissionId = randomUUID();
       delete session.agent.submissionFingerprint;
       delete session.agent.validationEvidence;
@@ -1436,6 +1603,7 @@ export class WorkspaceRuntime {
 
   private finish(session: AgentSession, completed: boolean, detail?: string, cancelled = false) {
     const binding = session.run?.checkTarget;
+    const approvedAssignment = this.approvedProposal(session) ? session.run?.message : undefined;
     if (session.run && !completed) session.run.message.state = cancelled ? "cancelled" : "failed";
     delete session.run;
     if (session.agent.canCancel !== undefined) session.agent.canCancel = false;
@@ -1470,6 +1638,13 @@ export class WorkspaceRuntime {
         : validation && session.agent.check?.outcome === "changes-requested" ? "error"
           : validation && session.agent.check?.outcome !== "passed" ? "attention" : "done"
       : cancelled ? "idle" : "error";
+    if (!completed && session.agent.implementationProposal?.status === "awaiting-approval") {
+      session.agent.implementationProposal.status = "blocked";
+      session.agent.implementationProposal.detail = "The investigation did not finish. Request a fresh proposal.";
+    }
+    this.finishApprovedImplementation(session, completed, detail);
+    if (this.approvedProposal(session)?.status === "blocked") completed = false;
+    if (!completed && !cancelled && approvedAssignment) approvedAssignment.state = "failed";
     if (detail) session.agent.messages.push(message("system", detail, completed || cancelled ? "notice" : "error"));
     if (!completed || !this.drain(session)) this.update(session);
     return completed;
@@ -1563,7 +1738,9 @@ export class WorkspaceRuntime {
     if (!session.agent.parentId || this.closed || !this.isActive(session)) return;
     const parent = this.sessions.get(session.agent.parentId);
     const acceptanceOwner = this.sessions.get(session.agent.acceptanceOwnerId ?? session.agent.parentId);
-    const outcome = session.agent.status === "awaiting-confirmation"
+    const outcome = this.approvedProposal(session)?.status === "ready-for-review"
+      ? "prepared a pinned candidate for review."
+      : session.agent.status === "awaiting-confirmation"
       ? `finished its turn and is awaiting confirmation${acceptanceOwner ? ` from ${acceptanceOwner.agent.name}` : ""}.`
       : completed ? "finished its turn." : "could not complete its turn.";
     const report = session.agent.directCandidates && result && result.length > 2400
@@ -1808,25 +1985,50 @@ export class WorkspaceRuntime {
       if (params.tool === decisionTool.name) {
         const question = typeof params.arguments?.question === "string" ? params.arguments.question.trim() : "";
         if (!question || question.length > 4000) throw new Error("Provide a product question of up to 4,000 characters.");
+        const implementation = params.arguments?.implementation;
+        let proposal: ImplementationProposal | undefined;
+        if (implementation !== undefined) {
+          const current = session.agent.implementationProposal;
+          if (session.agent.duty !== "analyser" || current?.coderId) {
+            throw new Error("Only an investigation without an approved coder can propose implementation.");
+          }
+          const brief = typeof implementation?.brief === "string" ? implementation.brief.trim() : "";
+          if (!brief || brief.length > 4000 || typeof implementation?.projectId !== "string") {
+            throw new Error("Provide one repository and a concrete implementation brief of up to 4,000 characters.");
+          }
+          const project = this.proposalProject(session, implementation.projectId);
+          proposal = { id: randomUUID(), projectId: project.id, brief, status: "awaiting-approval" };
+          session.agent.implementationProposal = proposal;
+        }
         const parent = session.agent.parentId ? this.sessions.get(session.agent.parentId) : undefined;
-        for (const recipient of new Set([parent, this.sessions.get(coordinatorId)])) {
+        for (const recipient of new Set([...(proposal ? [session] : []), parent, this.sessions.get(coordinatorId)])) {
           if (recipient && this.isActive(recipient)) {
-            recipient.agent.messages.push(message("system", `Product decision from ${session.agent.name}: ${question}`, "action", session.agent.id));
+            recipient.agent.messages.push({ ...message("system", `Product decision from ${session.agent.name}: ${question}`, "action", session.agent.id),
+              ...(proposal && { implementationProposalId: proposal.id }) });
             this.signal(session.agent.id, recipient.agent.id);
           }
         }
         this.publish();
-        reply(true, "Product decision posted in the parent and pilot chats.");
+        reply(true, proposal ? "The implementation proposal is awaiting explicit user approval. Stop before editing."
+          : "Product decision posted in the parent and pilot chats.");
         return;
       }
       if (params.tool === checkTool.name) {
-        if (session.agent.duty !== "reviewer" && session.agent.duty !== "tester") {
-          throw new Error("Only a reviewer or tester can submit a check result.");
+        const proposal = this.approvedProposal(session);
+        if (!proposal && session.agent.duty !== "reviewer" && session.agent.duty !== "tester") {
+          throw new Error("Only an assigned verifier or approved implementation coder can submit a check result.");
         }
         const outcome = params.arguments?.outcome;
         const summary = typeof params.arguments?.summary === "string" ? params.arguments.summary.trim() : "";
         if ((outcome !== "passed" && outcome !== "changes-requested" && outcome !== "blocked") ||
           !summary || summary.length > 24_000) throw new Error("Provide a valid outcome and summary.");
+        if (proposal) {
+          proposal.verification = { outcome, summary: summary.slice(0, 2400),
+            fingerprint: fingerprintCandidate(session.agent.candidate!.path) };
+          this.publish();
+          reply(true, "Verification recorded for the current candidate. Record it again if the candidate changes.");
+          return;
+        }
         const binding = session.run!.checkTarget;
         this.assertCheckCurrent(binding);
         session.run!.check = { submissionId: binding!.submissionId, targetAgentId: binding!.agentId,
@@ -1834,6 +2036,7 @@ export class WorkspaceRuntime {
         reply(true, "Check result recorded for this turn.");
         return;
       }
+      if (this.approvedProposal(session)) throw new Error("Complete the approved assignment directly and report verification.");
       if (session.agent.role === "worker" && session.agent.duty !== "coder") throw new Error("Workers can raise product decisions through their parent.");
       if (params.tool === inspectGitTool.name) {
         const project = this.selectProject(session, params.arguments?.projectId);
@@ -1891,6 +2094,8 @@ export class WorkspaceRuntime {
         }
         coder.agent.submissionFingerprint = fingerprint;
         coder.agent.status = "done";
+        const proposal = this.approvedProposal(coder);
+        if (proposal?.status === "ready-for-review") proposal.status = "confirmed";
         this.updateTeamHandoff(coder.agent);
         const deliveryLocations = directMembers && coder.agent.integration?.members?.map(
           ({ projectId, path, revision }) => `${projectId} at ${revision}: ${path}`).join("\n");

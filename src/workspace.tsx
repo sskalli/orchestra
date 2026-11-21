@@ -81,6 +81,14 @@ function Folder() {
 }
 
 function attention(agent: Agent): Activity[] {
+  const proposal = agent.implementationProposal;
+  if (proposal?.status === "awaiting-approval" || proposal?.status === "blocked") {
+    return [{
+      agent,
+      messageId: agent.messages.findLast((message) => message.implementationProposalId === proposal.id)?.id,
+      text: proposal.status === "awaiting-approval" ? "Implementation approval requested" : proposal.detail ?? "Implementation blocked",
+    }];
+  }
   const pending = agent.messages.filter((message) => message.approval?.state === "pending");
   if (pending.length) return pending.map((message) => ({
     agent, messageId: message.id, text: message.text.split("\n", 1)[0].slice(0, 160),
@@ -337,7 +345,10 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
       return;
     }
     const agent = agents.find((item) => item.id === id);
-    select(id, agent?.messages.findLast((message) => message.role !== "user")?.id);
+    const proposal = agent?.implementationProposal;
+    select(id, agent?.messages.findLast((message) => proposal
+      ? message.implementationProposalId === proposal.id
+      : message.role !== "user")?.id);
   }
 
   function toggleProjectChat(open: boolean) {
@@ -526,8 +537,15 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
       key={agent.id}
       agent={{ ...agent, messages: agent.messages.map((entry) => {
         const source = agents.find((item) => item.id === entry.sourceAgentId);
-        return source ? { ...entry, sourceName: `${snapshot.projects.length > 1 && source.projectId ? `${source.projectId} / ` : ""}${agentAppearance(source).displayName}` }
-          : entry.sourceAgentId ? { ...entry, sourceName: entry.sourceAgentName ?? "Deleted agent", sourceDeleted: true } : entry;
+        const proposalOwner = kind === "project" ? source : agent;
+        const currentProposal = proposalOwner?.implementationProposal;
+        const implementation = proposalOwner && currentProposal && currentProposal.id === entry.implementationProposalId
+          ? { ...currentProposal, ownerId: proposalOwner.id, ownerArchived: Boolean(proposalOwner.archivedAt),
+            ownerBusy: Boolean(proposalOwner.canCancel || proposalOwner.lifecycleBusy) }
+          : undefined;
+        return source ? { ...entry, implementation, sourceName: `${snapshot.projects.length > 1 && source.projectId ? `${source.projectId} / ` : ""}${agentAppearance(source).displayName}` }
+          : entry.sourceAgentId ? { ...entry, implementation, sourceName: entry.sourceAgentName ?? "Deleted agent", sourceDeleted: true }
+          : { ...entry, implementation };
       }) }}
       kind={kind}
       onOpenAgent={(id) => select(id)}
@@ -562,6 +580,7 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
       onSteer={(value) => submit("steer", value)}
       onCancel={() => send({ type: "cancel", agentId: agent.id })}
       onApproval={(approvalId, decision) => send({ type: "approval", agentId: agent.id, approvalId, decision })}
+      onApproveImplementation={(agentId, proposalId) => send({ type: "approveImplementation", agentId, proposalId })}
       onResumeQueue={() => send({ type: "resumeQueue", agentId: agent.id })}
       onClose={() => kind === "project" ? toggleProjectChat(false) : closeAgent(true)}
       disabled={blocked || Boolean(agent.unavailableReason) || Boolean(agent.archivedAt) || Boolean(agent.lifecycleBusy)}

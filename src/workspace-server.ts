@@ -43,6 +43,9 @@ async function readCommand(request: IncomingMessage) {
   if ((command.type === "send" || command.type === "steer") && typeof command.text === "string" && command.text.trim()) {
     return { type: command.type as "send" | "steer", agentId: command.agentId, text: command.text };
   }
+  if (command.type === "approveImplementation" && typeof command.proposalId === "string" && command.proposalId) {
+    return { type: "approveImplementation" as const, agentId: command.agentId, proposalId: command.proposalId };
+  }
   if (command.type === "approval" && typeof command.approvalId === "string" &&
     (command.decision === "accept" || command.decision === "decline")) {
     return { type: "approval" as const, agentId: command.agentId, approvalId: command.approvalId, decision: command.decision as "accept" | "decline" };
