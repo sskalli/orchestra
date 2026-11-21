@@ -81,18 +81,20 @@ function Folder() {
 }
 
 function attention(agent: Agent): Activity[] {
+  const questions = agent.messages.flatMap((message) => message.productQuestion?.status === "pending"
+    ? [{ agent, messageId: message.id, text: message.text.split("\n", 1)[0].slice(0, 160) }] : []);
   const proposal = agent.implementationProposal;
   if (proposal?.status === "awaiting-approval" || proposal?.status === "blocked") {
-    return [{
+    return [...questions, {
       agent,
       messageId: agent.messages.findLast((message) => message.implementationProposalId === proposal.id)?.id,
       text: proposal.status === "awaiting-approval" ? "Implementation approval requested" : proposal.detail ?? "Implementation blocked",
     }];
   }
   const pending = agent.messages.filter((message) => message.approval?.state === "pending");
-  if (pending.length) return pending.map((message) => ({
+  if (pending.length || questions.length) return [...questions, ...pending.map((message) => ({
     agent, messageId: message.id, text: message.text.split("\n", 1)[0].slice(0, 160),
-  }));
+  }))];
   if (agent.status === "attention" || agent.status === "error") {
     const message = agent.messages.findLast((entry) => entry.state === "failed" || entry.role === "system");
     return [{ agent, messageId: message?.id, text: message?.text ?? (agent.status === "error" ? "Run failed" : "Needs your response") }];
@@ -641,6 +643,9 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
       onApproval={(approvalId, decision) => send({ type: "approval", agentId: agent.id, approvalId, decision })}
       onApproveImplementation={(agentId, proposalId) => send({ type: "approveImplementation", agentId, proposalId })}
       onResumeQueue={() => send({ type: "resumeQueue", agentId: agent.id })}
+      onAnswerProductQuestion={agent.directTask
+        ? (questionId, text) => send({ type: "answerProductQuestion", agentId: agent.id, questionId, text })
+        : undefined}
       onClose={() => kind === "project" ? toggleProjectChat(false) : closeAgent(true)}
       disabled={blocked || Boolean(agent.unavailableReason) || Boolean(agent.archivedAt) || Boolean(agent.lifecycleBusy)}
       disabledReason={agent.unavailableReason ?? (blocked && !(connected && provider.state === "usage-limit") ? blockedReason : undefined)}

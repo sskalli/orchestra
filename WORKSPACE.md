@@ -58,6 +58,8 @@ Use the map’s **+** control to open a top-level task chat. Choose the reposito
 
 A direct task can delegate to Codex-native children. Orchestra shows each child below its parent on the map and keeps the child's transcript available for inspection. Send feedback and follow-up instructions to the parent task. The parent controls its Codex children.
 
+If a direct task asks a product question, use **Answer question** on that message and reply in the task chat. The question stays pending after a restart, and an accepted answer clears that question while keeping the exchange in the transcript.
+
 ### From investigation to implementation
 
 Ask the coordinator to investigate a bug and wait for approval before editing. An analyser can leave a scoped implementation proposal with the target repository, intended change, and verification steps. Review it in the main or task chat and select **Approve implementation** to start a coder in an isolated worktree under the investigation. The original task shows whether implementation is running, blocked, ready for review, or confirmed. Project branches still require a separate merge decision.

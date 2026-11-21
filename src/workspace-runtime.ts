@@ -32,6 +32,8 @@ export type WorkspaceMessage = {
   reuseTeamId?: string;
   state?: "queued" | "streaming" | "failed" | "cancelled";
   implementationProposalId?: string;
+  productQuestion?: { status: "pending" } | { status: "answered"; answerMessageId: string };
+  answersProductQuestionId?: string;
   approval?: { id: string; state: "pending" | "accepted" | "declined" | "expired"; canAccept?: boolean };
 };
 export type ImplementationProposal = {
@@ -95,6 +97,7 @@ export type WorkspaceSnapshot = {
 export type AgentSignal = { id: string; senderId: string; recipientId: string };
 export type WorkspaceCommand =
   | { type: "createTask"; name: string; projectIds: string[] }
+  | { type: "answerProductQuestion"; agentId: string; questionId: string; text: string }
   | { type: "startImplementation"; agentId: string; text?: string }
   | { type: "send" | "steer"; agentId: string; text: string }
   | { type: "resumeQueue" | "cancel" | "restore" | "delete"; agentId: string }
@@ -600,7 +603,9 @@ export class WorkspaceRuntime {
       this.resolveApproval(session, command.approvalId, command.decision);
       return;
     }
-    if (command.type !== "send" && command.type !== "steer") throw new Error("Unknown workspace command.");
+    if (command.type !== "send" && command.type !== "steer" && command.type !== "answerProductQuestion") {
+      throw new Error("Unknown workspace command.");
+    }
     const text = typeof command.text === "string" ? command.text.trim() : "";
     if (!text || text.length > 24_000) throw new Error("Enter a message of 1–24,000 characters.");
     if (command.type === "steer") {
@@ -608,9 +613,34 @@ export class WorkspaceRuntime {
       return;
     }
     this.checkCandidateAccess(session);
+    if (command.type === "answerProductQuestion") {
+      this.answerProductQuestion(session, command.questionId, text);
+      return;
+    }
     const next = message("user", text);
     session.agent.messages.push(next);
     await this.enqueue(session, next);
+  }
+
+  private answerProductQuestion(session: AgentSession, questionId: string, text: string) {
+    const question = session.agent.directTask
+      ? session.agent.messages.find((entry) => entry.id === questionId)
+      : undefined;
+    if (question?.productQuestion?.status !== "pending") {
+      throw new Error("This product question is no longer awaiting an answer in this task.");
+    }
+    const answer = { ...message("user", text), answersProductQuestionId: question.id, state: "queued" as const };
+    question.productQuestion = { status: "answered", answerMessageId: answer.id };
+    session.agent.messages.push(answer);
+    session.queue.push(answer);
+    if (!this.persist()) {
+      session.queue.pop();
+      session.agent.messages.pop();
+      question.productQuestion = { status: "pending" };
+      this.publish(false);
+      throw new Error("Orchestra could not save the answer. The question remains pending.");
+    }
+    if (!this.drain(session)) this.update(session);
   }
 
   private async createDirectTask(name: string, projectIds: string[]) {
@@ -1308,7 +1338,9 @@ export class WorkspaceRuntime {
     this.state.agents.length = 0;
     for (const { agent, threadId, run, waitingFor } of saved) {
       const session = this.createAgent(agent.id, agent.name, agent.role, agent.parentId, agent.goal);
-      Object.assign(session.agent, agent, { canSteer: false, canCancel: undefined, lifecycleBusy: undefined });
+      Object.assign(session.agent, agent, {
+        projectId: agent.projectId, canSteer: false, canCancel: undefined, lifecycleBusy: undefined,
+      });
       if (!session.agent.nativeChild && (session.agent.duty === "reviewer" || session.agent.duty === "tester") && session.agent.status === "done" && session.agent.check?.outcome !== "passed") {
         session.agent.status = session.agent.check?.outcome === "changes-requested" ? "error" : "attention";
       }
@@ -1408,6 +1440,13 @@ export class WorkspaceRuntime {
           }
         }
         session.agent.messages.push(message("system", "Codex confirmed that the interrupted turn completed.", "success"));
+      }
+      if (run && turn && (turn.status === "failed" || turn.status === "interrupted")) {
+        const answer = session.agent.messages.find(({ id }) => id === run.messageId);
+        if (answer?.answersProductQuestionId) {
+          answer.state = turn.status === "interrupted" ? "cancelled" : "failed";
+          this.reopenProductQuestion(session, answer);
+        }
       }
       if (run && this.approvedProposal(session)) {
         if (turn && turn.status === "completed" && session.agent.candidate) {
@@ -1521,7 +1560,8 @@ export class WorkspaceRuntime {
       const roots = session.agent.directTask.projectIds.map((id) => this.projects.find((project) => project.id === id)!);
       return "Work directly with the user in this task. " +
         (roots.length ? `The selected repositories for read-only investigation are ${JSON.stringify(roots)}. ` : "No repositories are selected. ") +
-        "Plan and discuss by default. Perform code changes only in a turn explicitly approved for implementation, using its isolated worktree paths. " +
+        "Plan and discuss by default. Use raise_product_decision if you need the user to choose, then end the turn. " +
+        "Perform code changes only in a turn explicitly approved for implementation, using its isolated worktree paths. " +
         "Follow the repository instructions. Verify the candidate, call submit_check_result with the actual result, and report blockers concisely.";
     }
     const role = session.agent.role === "worker" ? session.agent.duty ?? "analyser" : session.agent.role;
@@ -1657,6 +1697,22 @@ export class WorkspaceRuntime {
     };
   }
 
+  private reopenProductQuestion(session: AgentSession, answer: WorkspaceMessage) {
+    if (!answer.answersProductQuestionId) return;
+    const question = session.agent.messages.find(({ id }) => id === answer.answersProductQuestionId);
+    if (question?.productQuestion?.status === "answered" && question.productQuestion.answerMessageId === answer.id) {
+      question.productQuestion = { status: "pending" };
+    }
+  }
+
+  private answerInput(session: AgentSession, entry: WorkspaceMessage) {
+    if (!entry.answersProductQuestionId) return entry.text;
+    const question = session.agent.messages.find(({ id }) => id === entry.answersProductQuestionId);
+    return question?.productQuestion
+      ? `My answer to this product decision:\n\n${question.text}\n\nAnswer: ${entry.text}`
+      : entry.text;
+  }
+
   private async begin(session: AgentSession, next: WorkspaceMessage, parent?: Turn, taskImplementation = false) {
     if (!this.isActive(session)) return;
     const run: Run = { message: next, messageOffset: session.agent.messages.length, taskImplementation };
@@ -1671,6 +1727,7 @@ export class WorkspaceRuntime {
       if (session.agent.duty === "reviewer" || session.agent.duty === "tester") run.checkTarget = this.captureCheckTarget(session);
     } catch (error) {
       next.state = "failed";
+      this.reopenProductQuestion(session, next);
       delete session.agent.check;
       session.agent.status = "error";
       session.agent.queuePaused = session.queue.length > 0;
@@ -1731,7 +1788,7 @@ export class WorkspaceRuntime {
                 excludeTmpdirEnvVar: true, excludeSlashTmp: true }
             : { type: "readOnly", networkAccess: false },
         }),
-        input: input(next.text),
+        input: input(this.answerInput(session, next)),
         additionalContext: this.teamReportContext(session, next),
         effort: session.agent.modelSettings?.effort,
         parentTurnId: parent?.id,
@@ -1823,7 +1880,11 @@ export class WorkspaceRuntime {
     const directTaskRun = session.run?.taskImplementation ? session.run : undefined;
     const binding = session.run?.checkTarget;
     const approvedAssignment = this.approvedProposal(session) ? session.run?.message : undefined;
-    if (session.run && !completed) session.run.message.state = cancelled ? "cancelled" : "failed";
+    if (session.run && !completed) {
+      const answer = session.run.message;
+      answer.state = cancelled ? "cancelled" : "failed";
+      if (!session.recovery) this.reopenProductQuestion(session, answer);
+    }
     delete session.run;
     if (session.agent.canCancel !== undefined) session.agent.canCancel = false;
     for (const entry of session.stream.values()) {
@@ -2368,9 +2429,22 @@ export class WorkspaceRuntime {
           proposal = { id: randomUUID(), projectId: project.id, brief, status: "awaiting-approval" };
           session.agent.implementationProposal = proposal;
         }
+        if (session.agent.directTask) {
+          session.agent.messages.push({
+            ...message("system", `Product decision from ${session.agent.name}: ${question}`, "action", session.agent.id),
+            productQuestion: { status: "pending" },
+          });
+          if (!this.persist()) {
+            session.agent.messages.pop();
+            this.publish(false);
+            throw new Error("Orchestra could not save the product question.");
+          }
+          this.publish(false);
+          reply(true, "Product decision posted in this task chat. End this turn so the user can answer the question.");
+          return;
+        }
         const parent = session.agent.parentId ? this.sessions.get(session.agent.parentId) : undefined;
-        const recipients = session.agent.directTask ? [session]
-          : [...(proposal ? [session] : []), parent, this.sessions.get(coordinatorId)];
+        const recipients = [...(proposal ? [session] : []), parent, this.sessions.get(coordinatorId)];
         for (const recipient of new Set(recipients)) {
           if (recipient && this.isActive(recipient)) {
             recipient.agent.messages.push({ ...message("system", `Product decision from ${session.agent.name}: ${question}`, "action", session.agent.id),
@@ -2380,7 +2454,6 @@ export class WorkspaceRuntime {
         }
         this.publish();
         reply(true, proposal ? "The implementation proposal is awaiting explicit user approval. Stop before editing."
-          : session.agent.directTask ? "Product decision posted in this task chat."
           : "Product decision posted in the parent and pilot chats.");
         return;
       }

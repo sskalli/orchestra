@@ -1,6 +1,9 @@
 import type { AgentStatus, WorkspaceAgent } from "./workspace-runtime.ts";
 
-type StatusAgent = Pick<WorkspaceAgent, "status" | "implementationProposal"> & { check?: { outcome: string } };
+type StatusAgent = Pick<WorkspaceAgent, "status" | "implementationProposal"> & {
+  messages?: WorkspaceAgent["messages"];
+  check?: { outcome: string };
+};
 
 const implementationStatuses = {
   "awaiting-approval": "attention",
@@ -13,6 +16,7 @@ const implementationStatuses = {
 // A finished provider turn is not necessarily a successful validation.
 // Also correct older saved snapshots that recorded blocked checks as done.
 export function effectiveAgentStatus(agent: StatusAgent): AgentStatus {
+  if (agent.messages?.some((entry) => entry.productQuestion?.status === "pending")) return "attention";
   if (agent.implementationProposal) return implementationStatuses[agent.implementationProposal.status];
   if (agent.status === "done") {
     if (agent.check?.outcome === "blocked") return "attention";

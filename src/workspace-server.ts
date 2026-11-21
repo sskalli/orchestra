@@ -47,6 +47,10 @@ async function readCommand(request: IncomingMessage) {
   if ((command.type === "send" || command.type === "steer") && typeof command.text === "string" && command.text.trim()) {
     return { type: command.type as "send" | "steer", agentId: command.agentId, text: command.text };
   }
+  if (command.type === "answerProductQuestion" && typeof command.questionId === "string" && command.questionId &&
+      typeof command.text === "string" && command.text.trim()) {
+    return { type: "answerProductQuestion" as const, agentId: command.agentId, questionId: command.questionId, text: command.text };
+  }
   if (command.type === "startImplementation" && (command.text === undefined || typeof command.text === "string")) {
     return { type: "startImplementation" as const, agentId: command.agentId, text: command.text };
   }
