@@ -10,7 +10,7 @@
   background:
     linear-gradient(90deg, #43577029 1px, transparent 1px) 50% 50% / 126px 126px,
     linear-gradient(0deg, #43577029 1px, transparent 1px) 50% 50% / 126px 126px,
-    radial-gradient(ellipse at 55% 30%, #1a2942 0%, #121d2f 55%, #0c1421 100%);
+    #0c1421;
   cursor: grab;
 }
 
