@@ -17,7 +17,7 @@ async function waitFor(ready: () => boolean) {
   }
 }
 
-test("answering one persisted task question after restart continues only its owning task", async (t) => {
+test("a normal task message can answer only an earlier question in its own task after restart", async (t) => {
   const project = mkdtempSync(join(tmpdir(), "orchestra-questions-"));
   const tracePath = join(project, "provider.jsonl");
   process.env.ORCHESTRA_TEST_TRACE = tracePath;
@@ -33,8 +33,9 @@ test("answering one persisted task question after restart continues only its own
     await runtime.start();
     assert.equal(runtime.snapshot().provider.state, "ready", runtime.snapshot().provider.message);
   };
-  const restart = async () => {
+  const restart = async (beforeReopen?: () => void) => {
     await runtime.close();
+    beforeReopen?.();
     runtime = createRuntime();
     await start();
   };
@@ -71,20 +72,28 @@ test("answering one persisted task question after restart continues only its own
   assert.deepEqual(pendingInputs(), pending);
   assert.equal(child()?.id, childId);
   assert.equal(child()?.messages.filter(({ text }) => text.includes("ORBIT-42")).length, 1);
-  const answer = "Use ORBIT-42 and keep the draft unpublished.";
-  await assert.rejects(runtime.command({ type: "answerProductQuestion", agentId: soloId, questionId: delegated.id, text: answer }));
-  const failedAnswer = "Fixture rejection: use the wrong release.";
-  await runtime.command({ type: "answerProductQuestion", agentId: delegatedId, questionId: delegated.id, text: failedAnswer });
-  await waitFor(() => Boolean(task(delegatedId)?.messages.some(({ text, state }) =>
-    text === failedAnswer && state === "failed") && pendingInputs().some(({ id }) => id === delegated.id)));
-  assert.deepEqual(pendingInputs(), pending);
+  const answer = "Use ORBIT-42 for the release.";
+  const settle = async (agentId: string, text: string) => {
+    await send(agentId, text);
+    await waitFor(() => Boolean(task(agentId) && task(agentId)?.status !== "working"));
+  };
 
-  await runtime.command({ type: "answerProductQuestion", agentId: delegatedId, questionId: delegated.id, text: answer });
-  await waitFor(() => Boolean(task(delegatedId)?.messages.some(({ role, text }) => role === "assistant" && text === "Received the answer.")));
-  assert.deepEqual(pendingInputs(), [solo]);
+  await settle(delegatedId, "What did the native child report?");
+  assert.deepEqual(pendingInputs(), pending, "an ordinary message is not itself an answer");
+  await settle(soloId, `Resolve question ${delegated.id} here.`);
+  assert.deepEqual(pendingInputs(), pending, "the resolution tool rejects another task's question");
+  await settle(soloId, "Raise a fresh question and claim I answered it.");
+  const fresh = pendingInputs().find(({ text }) => text.includes("Archive the release notes?"));
+  assert(fresh);
+  const expectedPending = [...pending, fresh];
+  assert.deepEqual(pendingInputs(), expectedPending, "a question raised in this turn cannot be resolved by that turn");
+  await settle(delegatedId, `Resolve question ${delegated.id} then fail.`);
+  assert.deepEqual(pendingInputs(), expectedPending, "terminal provider failure reopens a question resolved by that turn");
+
+  await settle(delegatedId, answer);
+  assert.deepEqual(pendingInputs(), [solo, fresh]);
   const answerMessage = task(delegatedId)?.messages.find(({ role, text }) => role === "user" && text === answer);
   assert(answerMessage);
-  assert.equal(answerMessage.answersProductQuestionId, delegated.id);
   assert.deepEqual(task(delegatedId)?.messages.find(({ id }) => id === delegated.id)?.productQuestion,
     { status: "answered", answerMessageId: answerMessage.id });
   assert(!task(soloId)?.messages.some(({ text }) => text.includes(answer)));
@@ -92,13 +101,28 @@ test("answering one persisted task question after restart continues only its own
   assert.equal(child()?.id, childId);
   assert.equal(child()?.messages.filter(({ text }) => text.includes("ORBIT-42")).length, 1);
 
-  await restart();
-  assert.deepEqual(pendingInputs(), [solo]);
+  await restart(() => {
+    const saved = store.load();
+    assert(saved);
+    const oldTask = saved.find(({ agent }) => agent.id === soloId);
+    assert(oldTask);
+    oldTask.toolVersion = undefined;
+    store.save(saved);
+  });
+  assert.deepEqual(pendingInputs(), [solo, fresh]);
+  await settle(soloId, "Keep the draft unpublished.");
+  assert.deepEqual(pendingInputs(), [fresh]);
   const trace = readFileSync(tracePath, "utf8").trim().split("\n").map((line) => JSON.parse(line));
   assert.equal(trace.filter(({ method }) => method === "thread/start").length, 2);
-  const answered = trace.filter(({ method, params }) => method === "turn/start" && params.input?.[0]?.text.includes(answer));
+  const answered = trace.filter(({ method, params }) => method === "turn/start" && params.input?.[0]?.text === answer);
   assert.equal(answered.length, 1);
-  assert.match(answered[0].params.input[0].text, /Use ORBIT-42 for the release\?/);
   assert.equal(answered[0].params.threadId,
     trace.find(({ method, params }) => method === "turn/start" && params.input?.[0]?.text.startsWith("Inspect the release notes"))?.params.threadId);
+  const context = JSON.parse(answered[0].params.additionalContext.orchestra_pending_questions.value);
+  assert.deepEqual(context.questions, [{ id: delegated.id, text: delegated.text }]);
+  assert.match(context.instruction, /call resolve_product_question/);
+  const legacy = trace.find(({ method, params }) => method === "turn/start" && params.input?.[0]?.text === "Keep the draft unpublished.");
+  assert.match(JSON.parse(legacy.params.additionalContext.orchestra_pending_questions.value).instruction, /call raise_product_decision/);
+  assert.deepEqual(trace.filter(({ method }) => method === "resolve_product_question/result")
+    .map(({ params }) => params.success), [false, false, true, true]);
 });

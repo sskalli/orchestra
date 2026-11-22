@@ -77,6 +77,7 @@ type Duty = "lead" | "coder" | "reviewer" | "tester" | "analyser" | "designer" |
 
 type Run = {
   taskImplementation?: boolean;
+  steered?: boolean;
   turn?: Turn;
   message: WorkspaceMessage;
   check?: CheckResult;
@@ -94,7 +95,8 @@ type AgentSession = {
   stream: Map<string, WorkspaceMessage>;
 };
 
-const taskToolVersion = 12;
+const taskToolVersion = 14;
+const legacyQuestionResolutionPrefix = "Resolve product question: ";
 const workspaceThreadConfig = { "features.multi_agent": true, "features.multi_agent_v2": true };
 const input = (text: string) => [{ type: "text", text, text_elements: [] }];
 const hasSubmittedMessage = (agent: WorkspaceAgent) =>
@@ -110,9 +112,18 @@ const checkTool = {
   },
 };
 
-function coderIsReady(agent: WorkspaceAgent) {
-  return agent.status === "awaiting-confirmation" || agent.status === "done";
-}
+const resolveQuestionTool = {
+  type: "function",
+  deferLoading: false,
+  name: "resolve_product_question",
+  description: "Mark a pending product question answered only if the current user message actually answers it.",
+  inputSchema: {
+    type: "object",
+    properties: { questionId: { type: "string" } },
+    required: ["questionId"],
+    additionalProperties: false,
+  },
+};
 const decisionTool = {
   type: "function",
   deferLoading: false,
@@ -859,6 +870,7 @@ export class WorkspaceRuntime {
     return "Work directly with the user in this task. " +
       (roots.length ? `The selected repositories for read-only investigation are ${JSON.stringify(roots)}. ` : "No repositories are selected. ") +
       "Plan and discuss by default. Use raise_product_decision if you need the user to choose, then end the turn. " +
+      "When orchestra_pending_questions is supplied, use its question IDs and the resolution tool it indicates only if the current user reply answers that question. Leave unrelated questions open. " +
       "Perform code changes only in a turn explicitly approved for implementation, using its isolated worktree paths. " +
       "Follow the repository instructions. Verify the candidate, call submit_check_result with the actual result, and report blockers concisely.";
   }
@@ -887,7 +899,7 @@ export class WorkspaceRuntime {
       ...this.threadPermissions(session),
       config: workspaceThreadConfig,
       ephemeral: false,
-      dynamicTools: [decisionTool, checkTool],
+      dynamicTools: [decisionTool, checkTool, resolveQuestionTool],
       developerInstructions: this.instructions(session),
     });
     const { thread, modelProvider } = response;
@@ -911,6 +923,46 @@ export class WorkspaceRuntime {
         ? { type: "workspaceWrite", writableRoots: roots, networkAccess: false, excludeTmpdirEnvVar: true, excludeSlashTmp: true }
         : { type: "readOnly", networkAccess: false },
     };
+  }
+
+  private pendingQuestionContext(session: AgentSession, answer: WorkspaceMessage, implementation: boolean) {
+    if (implementation || answer.answersProductQuestionId) return undefined;
+    const questions = session.agent.messages.slice(0, session.agent.messages.indexOf(answer))
+      .filter((entry) => entry.productQuestion?.status === "pending");
+    if (!questions.length) return undefined;
+    // Existing Codex threads retain their original tool definitions.
+    const resolve = session.toolVersion === taskToolVersion
+      ? "call resolve_product_question with its questionId"
+      : `call raise_product_decision with its question argument set to "${legacyQuestionResolutionPrefix}<question ID>"`;
+    return {
+      orchestra_pending_questions: {
+        kind: "untrusted", name: "orchestra_pending_questions",
+        value: JSON.stringify({
+          instruction: `If the current user message answers a pending question, ${resolve}. Leave other questions pending.`,
+          questions: questions.map(({ id, text }) => ({ id, text })),
+        }),
+      },
+    };
+  }
+
+  private resolveProductQuestion(session: AgentSession, questionId: unknown) {
+    const run = session.run;
+    if (!session.agent.directTask || !run || run.taskImplementation || run.steered || run.message.answersProductQuestionId) {
+      throw new Error("Only a normal reply in this task can resolve a pending product question.");
+    }
+    const answer = run.message;
+    const question = session.agent.messages.slice(0, session.agent.messages.indexOf(answer))
+      .find(({ id }) => id === questionId);
+    if (question?.productQuestion?.status !== "pending") throw new Error("Choose a pending question from before this reply in the current task.");
+    question.productQuestion = { status: "answered", answerMessageId: answer.id };
+    answer.answersProductQuestionId = question.id;
+    if (!this.persist()) {
+      this.reopenProductQuestion(session, answer);
+      delete answer.answersProductQuestionId;
+      this.publish(false);
+      throw new Error("Orchestra could not save the answer. The question remains pending.");
+    }
+    this.publish(false);
   }
 
   private reopenProductQuestion(session: AgentSession, answer: WorkspaceMessage) {
@@ -949,6 +1001,7 @@ export class WorkspaceRuntime {
         approvalPolicy: "never",
         ...this.directTaskTurnScope(session, taskImplementation),
         input: input(this.answerInput(session, next)),
+        additionalContext: this.pendingQuestionContext(session, next, taskImplementation),
       });
       session.freshThread = false;
       if (session.threadId) this.trackTurn(session, session.threadId, turn.id, next);
@@ -983,6 +1036,7 @@ export class WorkspaceRuntime {
 
   private async steer(session: AgentSession, text: string) {
     if (!session.agent.canSteer) throw new Error("There is no active turn to steer.");
+    if (session.agent.directTask && session.run) session.run.steered = true;
     if (!this.demo) {
       try {
         await this.server!.call("turn/steer", {
@@ -1273,20 +1327,32 @@ export class WorkspaceRuntime {
       return;
     }
     try {
+      if (params.tool === resolveQuestionTool.name) {
+        this.resolveProductQuestion(session, params.arguments?.questionId);
+        reply(true, "Question marked answered.");
+        return;
+      }
       if (params.tool === decisionTool.name) {
         const question = typeof params.arguments?.question === "string" ? params.arguments.question.trim() : "";
         if (!question || question.length > 4000) throw new Error("Provide a product question of up to 4,000 characters.");
-        session.agent.messages.push({
+        if (session.toolVersion !== taskToolVersion && question.startsWith(legacyQuestionResolutionPrefix)) {
+          this.resolveProductQuestion(session, question.slice(legacyQuestionResolutionPrefix.length).trim());
+          reply(true, "Question marked answered.");
+          return;
+        }
+        const questionMessage: WorkspaceMessage = {
           ...message("system", `Product decision from ${session.agent.name}: ${question}`, "action"),
           productQuestion: { status: "pending" },
-        });
+        };
+        session.agent.messages.push(questionMessage);
         if (!this.persist()) {
           session.agent.messages.pop();
           this.publish(false);
           throw new Error("Orchestra could not save the product question.");
         }
         this.publish(false);
-        reply(true, "Product decision posted in this task chat. End this turn so the user can answer the question.");
+        reply(true, JSON.stringify({ questionId: questionMessage.id,
+          message: "End this turn so the user can answer the question." }));
         return;
       }
       if (params.tool === checkTool.name) {

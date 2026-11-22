@@ -12,6 +12,11 @@ const finish = (threadId, turn) => emit("turn/completed", { threadId, turn: { ..
 const assistant = (threadId, turnId, id, text) => emit("item/completed", {
   threadId, turnId, item: { type: "agentMessage", id, text },
 });
+const callTool = (threadId, turn, tool, args, { fail = false, resolveFresh = false } = {}) => {
+  const id = `${tool}-${turn.id}`;
+  pending.set(id, { threadId, turn, tool, fail, resolveFresh });
+  write({ id, method: "item/tool/call", params: { threadId, turnId: turn.id, tool, arguments: args } });
+};
 
 createInterface({ input: process.stdin }).on("line", (line) => {
   const { method, params = {}, id, result } = JSON.parse(line);
@@ -19,8 +24,21 @@ createInterface({ input: process.stdin }).on("line", (line) => {
     const request = pending.get(id);
     if (!request) return;
     pending.delete(id);
-    trace("product-decision/result", result);
-    finish(request.threadId, request.turn);
+    trace(`${request.tool}/result`, result);
+    if (request.resolveFresh && result?.success) {
+      const { questionId } = JSON.parse(result.contentItems[0].text);
+      callTool(request.threadId, request.turn, "resolve_product_question", { questionId });
+    } else if (request.fail) {
+      emit("turn/completed", { threadId: request.threadId, turn: {
+        ...request.turn, status: "failed", error: { message: "Fixture rejected the answer after recording it." },
+      } });
+    } else {
+      if (request.tool === "resolve_product_question") {
+        assistant(request.threadId, request.turn.id, `reply-${request.turn.id}`,
+          result?.success ? "Recorded the decision." : "Could not record the decision.");
+      }
+      finish(request.threadId, request.turn);
+    }
     return;
   }
   if (method === "initialized") return;
@@ -57,16 +75,32 @@ createInterface({ input: process.stdin }).on("line", (line) => {
       assistant(childId, "child-turn", "child-report", "Native child found ORBIT-42.");
       activity("completed");
     }
+    if (text.startsWith("Resolve question ")) {
+      const [, questionId, directive] = /^Resolve question (\S+) (.+)$/.exec(text) ?? [];
+      callTool(threadId, turn, "resolve_product_question", { questionId }, { fail: directive === "then fail." });
+      return;
+    }
+    if (text === "Use ORBIT-42 for the release.") {
+      const context = params.additionalContext?.orchestra_pending_questions;
+      const { questions } = JSON.parse(context?.value ?? "{}");
+      const question = questions?.find(({ text }) => text.includes("Use ORBIT-42 for the release"));
+      callTool(threadId, turn, "resolve_product_question", { questionId: question?.id });
+      return;
+    }
+    if (text === "Keep the draft unpublished.") {
+      const { questions } = JSON.parse(params.additionalContext?.orchestra_pending_questions?.value ?? "{}");
+      const question = questions?.find(({ text }) => text.includes("Publish the draft now?"));
+      callTool(threadId, turn, "raise_product_decision", { question: `Resolve product question: ${question?.id}` });
+      return;
+    }
     const question = new Map([
       ["Inspect the release notes and ask which release to use.", "Use ORBIT-42 for the release?"],
       ["Ask whether to publish the draft.", "Publish the draft now?"],
+      ["Raise a fresh question and claim I answered it.", "Archive the release notes?"],
     ]).get(text);
     if (question) {
-      const requestId = `question-${turn.id}`;
-      pending.set(requestId, { threadId, turn });
-      write({ id: requestId, method: "item/tool/call", params: {
-        threadId, turnId: turn.id, tool: "raise_product_decision", arguments: { question },
-      } });
+      callTool(threadId, turn, "raise_product_decision", { question },
+        { resolveFresh: text === "Raise a fresh question and claim I answered it." });
     } else {
       assistant(threadId, turn.id, `reply-${turn.id}`, text === "Draft a short heading." ? "A solo release heading." : "Received the answer.");
       finish(threadId, turn);
