@@ -2,7 +2,7 @@ import { agentAppearance } from "./workspace-agent-appearance.ts";
 import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { FormEvent, KeyboardEvent, PointerEvent } from "react";
 import Markdown from "react-markdown";
-import type { SystemMessageKind, WorkspaceAgent } from "./workspace-runtime.ts";
+import type { SystemMessageKind, WorkspaceAgent, WorkspaceMessage } from "./workspace-runtime.ts";
 
 import "./workspace-chat.css";
 
@@ -17,6 +17,7 @@ export type ChatAgent = {
   name: string;
   role: "coordinator" | "lead" | "worker";
   parentId?: string;
+  nativeChild?: true;
   duty?: string;
   roleNumber?: number;
   goal?: string;
@@ -32,6 +33,7 @@ export type ChatAgent = {
     reportLabel?: string;
     state?: "queued" | "streaming" | "failed" | "cancelled";
     implementation?: ImplementationApproval;
+    productQuestion?: WorkspaceMessage["productQuestion"];
     approval?: { id: string; state: "pending" | "accepted" | "declined" | "expired"; canAccept?: boolean };
   }[];
   queueDepth: number;
@@ -48,7 +50,10 @@ type ChatProps = {
   title?: string;
   projectLabel?: string;
   repositoryScope?: string[];
-  delivery?: { members: { projectId: string; path: string; revision?: string }[]; confirmed?: boolean; direct?: boolean };
+  delivery?: { members: { projectId: string; path: string; revision?: string }[]; confirmed?: boolean; direct?: boolean; taskChecks?: string };
+  taskPhase?: NonNullable<WorkspaceAgent["directTask"]>["phase"];
+  taskDetail?: string;
+  onStartImplementation?: () => Promise<void>;
   modelLabel?: string;
   usageLabel?: string;
   draft: string;
@@ -98,7 +103,7 @@ const systemMessageLabels: Record<SystemMessageKind, string> = {
 };
 
 function Conversation({
-  agent, kind, title, projectLabel, repositoryScope, delivery, modelLabel, usageLabel, draft: initialDraft, composerHeight, onComposerHeightChange, onDraftInput, onDraftChange, onSend, onSteer, onCancel, onApproval, onApproveImplementation, onResumeQueue, onClose,
+  agent, kind, title, projectLabel, repositoryScope, delivery, taskPhase, taskDetail, onStartImplementation, modelLabel, usageLabel, draft: initialDraft, composerHeight, onComposerHeightChange, onDraftInput, onDraftChange, onSend, onSteer, onCancel, onApproval, onApproveImplementation, onResumeQueue, onAnswerProductQuestion, onClose,
   disabled, disabledReason, focusMessageId, focusRequest, onOpenAgent, onLifecycle,
 }: ChatProps) {
   const transcript = useRef<HTMLDivElement>(null);
@@ -131,6 +136,8 @@ function Conversation({
   const mounted = useRef(true);
   draftChangeRef.current = onDraftChange;
   const [sending, setSending] = useState(false);
+  const [questionId, setQuestionId] = useState<string>();
+  const [startingImplementation, setStartingImplementation] = useState(false);
   const [cancelling, setCancelling] = useState(false);
   const [approvalBusy, setApprovalBusy] = useState<string>();
   const [resumingQueue, setResumingQueue] = useState(false);
@@ -139,8 +146,9 @@ function Conversation({
   const recipient = `${projectLabel ? `${projectLabel} / ` : ""}${title ?? displayName}`;
   const heading = title ?? displayName;
   const archived = agent.archivedAt !== undefined;
-  const blocked = Boolean(disabled || archived || agent.lifecycleBusy);
+  const blocked = Boolean(disabled || archived || agent.lifecycleBusy || agent.nativeChild);
   const readyToSend = !blocked && !sending && Boolean(draft.trim());
+  const question = agent.messages.find((entry) => entry.id === questionId && entry.productQuestion?.status === "pending");
   const hasFocusMessage = agent.messages.some((message) => message.id === focusMessageId);
   const shownInConversation = (detail: string) => kind === "agent" && agent.messages.some((message) =>
     message.role === "system" && Boolean(message.text) && (message.text.includes(detail) || detail.includes(message.text)));
@@ -326,6 +334,19 @@ function Conversation({
     }
   }
 
+  async function startImplementation() {
+    if (!onStartImplementation || blocked || sending || startingImplementation) return;
+    setStartingImplementation(true);
+    setError("");
+    try {
+      await onStartImplementation();
+    } catch (failure) {
+      setError(failure instanceof Error ? failure.message : "Implementation could not start.");
+    } finally {
+      setStartingImplementation(false);
+    }
+  }
+
   async function resolveApproval(id: string, decision: "accept" | "decline") {
     if (!onApproval || approvalBusy || blocked) return;
     setApprovalBusy(id);
@@ -339,9 +360,20 @@ function Conversation({
     }
   }
 
+  function sendFromComposer() {
+    if (!questionId) {
+      void send(onSend);
+    } else if (question && onAnswerProductQuestion) {
+      void send(async (text) => {
+        await onAnswerProductQuestion(question.id, text);
+        setQuestionId((current) => current === question.id ? undefined : current);
+      });
+    }
+  }
+
   function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    void send(onSend);
+    sendFromComposer();
   }
 
   async function resumeQueue() {
@@ -386,23 +418,24 @@ function Conversation({
   function handleComposerKey(event: KeyboardEvent<HTMLTextAreaElement>) {
     if (event.key !== "Enter" || event.shiftKey || event.nativeEvent.isComposing) return;
     event.preventDefault();
-    void send(onSend);
+    sendFromComposer();
   }
 
   const approvalHandler = useRef(resolveApproval);
   approvalHandler.current = resolveApproval;
   const implementationHandler = useRef(approveImplementation);
   implementationHandler.current = approveImplementation;
-  const canApproveImplementation = Boolean(onApproveImplementation) && !archived;
-  const canApprove = Boolean(onApproval) && !archived;
+  const canApproveImplementation = Boolean(onApproveImplementation) && !archived && !agent.nativeChild;
+  const canApprove = Boolean(onApproval) && !archived && !agent.nativeChild;
+  const canAnswer = Boolean(onAnswerProductQuestion) && !blocked;
   const messageElements = useMemo(() => agent.messages.filter((message) =>
-    !hiddenMessages.has(message.id)).map((message) => {
+    message.productQuestion?.status === "pending" || !hiddenMessages.has(message.id)).map((message) => {
           const sender = message.role === "user" ? "USER" : message.role === "system" ? "SYSTEM" :
             kind === "project" ? "COMPUTER" : agent.role === "lead" ? `LEAD-${agent.roleNumber ?? 1}` : displayName;
-          const { approval, implementation } = message;
+          const { approval, implementation, productQuestion } = message;
           const systemKind = message.role === "system" ? approval
             ? approval.state === "pending" ? "action" : approval.state === "accepted" ? "success" : "warning"
-            : message.kind : undefined;
+            : productQuestion?.status === "answered" ? "notice" : message.kind : undefined;
           const compact = kind === "project" && message.role === "system" && message.sourceName && message.sourceAgentId && !approval && !implementation;
           const category = message.reportLabel ?? (systemKind ? systemMessageLabels[systemKind] : "Notice");
           const explanation = message.text.split(/\n+/).filter((line) => line.trim()).slice(0, 2).join(" ")
@@ -427,7 +460,9 @@ function Conversation({
                 </> : <>
                 <div className="chat-message-header">
                   <strong><span aria-hidden="true">&gt; </span>{sender}:</strong>
-                  {systemKind ? <span className="chat-message-state">{systemMessageLabels[systemKind]}</span> : null}
+                  {productQuestion ? (
+                    <span className="chat-message-state">{productQuestion.status === "pending" ? "Question awaiting answer" : "Question answered"}</span>
+                  ) : systemKind ? <span className="chat-message-state">{systemMessageLabels[systemKind]}</span> : null}
                   {message.state === "queued" ? <span className="chat-message-state">Queued</span> : null}
                   {message.state === "failed" ? <span className="chat-message-state chat-message-state--failed">Failed</span> : null}
                   {message.state === "cancelled" ? <span className="chat-message-state">Stopped</span> : null}
@@ -437,6 +472,12 @@ function Conversation({
                     <Markdown skipHtml disallowedElements={["img"]}>{message.text}</Markdown>
                     {message.state === "streaming" ? <span className="chat-stream-cursor" aria-label="Responding" /> : null}
                   </div>
+                )}
+                {productQuestion?.status === "pending" && canAnswer && (
+                  <button className="chat-steer" type="button" onClick={() => {
+                    setQuestionId(message.id);
+                    composer.current?.querySelector("textarea")?.focus();
+                  }}>Answer question</button>
                 )}
                 {implementation && (
                   <div className="chat-approval">
@@ -476,7 +517,7 @@ function Conversation({
               </div>
             </article>
           );
-        }), [agent.messages, agent.role, agent.roleNumber, approvalBusy, blocked, canApprove, canApproveImplementation, displayName, kind, onOpenAgent, hiddenMessages, focusMessageId]);
+        }), [agent.messages, agent.role, agent.roleNumber, approvalBusy, blocked, canApprove, canApproveImplementation, canAnswer, displayName, kind, onOpenAgent, hiddenMessages, focusMessageId]);
 
   return (
     <section ref={chat} className="workspace-chat" aria-label={kind === "project" ? "Project chat" : `${recipient} chat`}>
@@ -485,6 +526,7 @@ function Conversation({
           <h2 title={heading}>{kind === "project" ? `COMMS // CHANNEL: ${heading}` : heading}</h2>
           {kind === "agent" ? <span className="chat-agent-status">{projectLabel ? `Project: ${projectLabel} · ` : ""}{archived ? "Archived" : agent.lifecycleBusy ? "Updating…" : statusLabels[agent.status]}</span> : null}
           {repositoryScope && <span className="chat-agent-status">Repositories: {repositoryScope.join(", ")}</span>}
+          {taskPhase === "planning" && <span className="chat-agent-status">{repositoryScope ? "Planning · read-only" : "General chat"}</span>}
           {modelLabel && <span className="chat-agent-status">{modelLabel}</span>}
           {usageLabel && <span className="chat-agent-status" title={usageLabel}>{usageLabel}</span>}
         </div>
@@ -496,7 +538,8 @@ function Conversation({
               menu?.removeAttribute("open");
               menu?.querySelector("summary")?.focus();
               setHiddenMessages(new Set(agent.messages
-                .filter((message) => message.approval?.state !== "pending" && message.implementation?.status !== "awaiting-approval")
+                .filter((message) => message.approval?.state !== "pending" && message.implementation?.status !== "awaiting-approval" &&
+                  message.productQuestion?.status !== "pending")
                 .map((message) => message.id)));
               pinToBottom.current = true;
             }}>Clear chat</button>
@@ -519,7 +562,7 @@ function Conversation({
         </button>
       </header>
       {delivery && <details className="chat-delivery">
-        <summary>Delivery snapshots · {delivery.direct
+        <summary>Delivery snapshots · {delivery.taskChecks !== undefined ? "Ready for review" : delivery.direct
           ? (delivery.confirmed ? "Accepted by pilot" : "Awaiting pilot confirmation")
           : (delivery.confirmed ? "Recorded checks passed" : "Validation required")}</summary>
         <ul>
@@ -530,9 +573,16 @@ function Conversation({
               onFocus={(event) => event.currentTarget.select()} /></label>}
           </li>)}
         </ul>
+        {delivery.taskChecks && <p className="chat-implementation-brief">Checks: {delivery.taskChecks}</p>}
         <p>Review and merge each repository separately.</p>
       </details>}
 
+      {agent.nativeChild && <div className="chat-native-child">
+        <span>Read-only subagent transcript.</span>
+        {agent.parentId && <button className="chat-steer" type="button"
+          onClick={() => onOpenAgent?.(agent.parentId!)}>Open parent conversation</button>}
+      </div>}
+      {taskDetail && <p className="chat-task-detail" role="status">{taskDetail}</p>}
       {archived && <p className="chat-archive-notice">Archived {new Date(agent.archivedAt!).toLocaleString()}. Restore to continue this conversation.</p>}
       <div className="chat-transcript" role="log" aria-label={`Conversation with ${recipient}`} aria-relevant="additions"
         ref={transcript} onScroll={(event) => {
@@ -550,7 +600,7 @@ function Conversation({
         {messageElements}
       </div>
 
-      {!archived && <>
+      {!archived && !agent.nativeChild && <>
       <div ref={divider} className="chat-composer-resize" role="separator" tabIndex={0} aria-orientation="horizontal"
         aria-label={`Resize ${kind === "project" ? "project" : "agent"} chat input`} aria-controls={composerId}
         onPointerDown={startComposerResize} onPointerMove={moveComposerResize} onPointerUp={endComposerResize}
@@ -565,12 +615,24 @@ function Conversation({
         ) : null}
         {blocked && disabledReason && !shownInConversation(disabledReason) ? <p className="chat-disabled">{disabledReason}</p> : null}
         {error && !shownInConversation(error) ? <p className="chat-error" role="alert">{error}</p> : null}
+        {questionId && <div className="chat-queue">
+          <span>{question ? `Answering: ${question.text.split("\n", 1)[0].slice(0, 120)}` : "This question no longer needs an answer."}</span>
+          <button className="chat-steer" type="button" onClick={() => setQuestionId(undefined)}>Cancel reply</button>
+        </div>}
         <div className="chat-composer-box">
           <span className="chat-input-prompt" aria-hidden="true">&gt;</span>
           <textarea aria-label={`Message ${recipient}`} rows={3} disabled={Boolean(agent.lifecycleBusy)}
             value={draft} onChange={(event) => updateDraft(event.target.value)} onBlur={flushDraft} onKeyDown={handleComposerKey} />
         </div>
-        {agent.canSteer && onSteer ? (
+        {onStartImplementation && agent.messages.some((entry) => entry.role === "assistant" && !entry.state) && (
+          <button className="chat-steer" type="button"
+            disabled={blocked || sending || startingImplementation || agent.canCancel || agent.queueDepth > 0}
+            onClick={() => void startImplementation()}>
+            {startingImplementation ? "Starting…" : taskPhase === "blocked" ? "Retry implementation"
+              : taskPhase === "ready-for-review" ? "Revise candidate" : "Start implementation"}
+          </button>
+        )}
+        {!questionId && agent.canSteer && onSteer ? (
           <button className="chat-steer" type="button" disabled={!readyToSend}
             onClick={() => void send(onSteer)}>Steer current turn</button>
         ) : null}

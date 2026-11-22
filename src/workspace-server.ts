@@ -31,6 +31,10 @@ async function readCommand(request: IncomingMessage) {
     chunks.push(chunk);
   }
   const command = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+  if (command?.type === "createTask" && typeof command.name === "string" &&
+      Array.isArray(command.projectIds) && command.projectIds.every((id: unknown) => typeof id === "string")) {
+    return { type: "createTask" as const, name: command.name, projectIds: command.projectIds as string[] };
+  }
   if (typeof command?.agentId !== "string") throw new Error("Invalid agent");
   if (command.type === "archive") {
     if (command.stopRunning !== undefined && typeof command.stopRunning !== "boolean") throw new Error("Invalid stop option");
@@ -42,6 +46,13 @@ async function readCommand(request: IncomingMessage) {
   }
   if ((command.type === "send" || command.type === "steer") && typeof command.text === "string" && command.text.trim()) {
     return { type: command.type as "send" | "steer", agentId: command.agentId, text: command.text };
+  }
+  if (command.type === "answerProductQuestion" && typeof command.questionId === "string" && command.questionId &&
+      typeof command.text === "string" && command.text.trim()) {
+    return { type: "answerProductQuestion" as const, agentId: command.agentId, questionId: command.questionId, text: command.text };
+  }
+  if (command.type === "startImplementation" && (command.text === undefined || typeof command.text === "string")) {
+    return { type: "startImplementation" as const, agentId: command.agentId, text: command.text };
   }
   if (command.type === "approveImplementation" && typeof command.proposalId === "string" && command.proposalId) {
     return { type: "approveImplementation" as const, agentId: command.agentId, proposalId: command.proposalId };
@@ -93,8 +104,11 @@ const server = createServer(async (request, response) => {
       return;
     }
     try {
-      await runtime.command(await readCommand(request));
-      response.writeHead(204).end();
+      const command = await readCommand(request);
+      const result = await runtime.command(command);
+      if (command.type === "createTask") {
+        response.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({ agentId: result }));
+      } else response.writeHead(204).end();
     } catch (error) {
       response.writeHead(400, { "Content-Type": "application/json" })
         .end(JSON.stringify({ error: error instanceof Error ? error.message : "Workspace command failed" }));

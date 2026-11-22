@@ -191,6 +191,7 @@ export function WorkspaceCanvas({
   selectedId,
   onSelect,
   onStatus,
+  onCreateTask,
   emptyMessage = "Teams appear here when the coordinator delegates work.",
   initialCamera,
   onCameraChange,
@@ -200,6 +201,7 @@ export function WorkspaceCanvas({
   selectedId?: string | null;
   onSelect: (id: string | null) => void;
   onStatus: (id: string) => void;
+  onCreateTask?: () => void;
   emptyMessage?: string;
   initialCamera?: Camera;
   onCameraChange?: (camera: Camera) => void;
@@ -594,11 +596,14 @@ export function WorkspaceCanvas({
           );
         })}
       </div>
-      {layout.nodes.length > 0 && <div className="swarm-canvas-controls" aria-label="Canvas controls">
-        <button type="button" aria-label="Zoom out" onClick={() => zoomCenter(1 / 1.2)}>−</button>
-        <output aria-label="Zoom level">{Math.round(camera.scale * 100)}%</output>
-        <button type="button" aria-label="Zoom in" onClick={() => zoomCenter(1.2)}>+</button>
-        <button type="button" className="swarm-fit" onClick={fit}>Fit all teams</button>
+      {(onCreateTask || layout.nodes.length > 0) && <div className="swarm-canvas-controls" aria-label="Canvas controls">
+        {onCreateTask && <button type="button" aria-label="New session" title="New session" onClick={onCreateTask}>+</button>}
+        {layout.nodes.length > 0 && <>
+          <button type="button" aria-label="Zoom out" onClick={() => zoomCenter(1 / 1.2)}>−</button>
+          <output aria-label="Zoom level">{Math.round(camera.scale * 100)}%</output>
+          <button type="button" aria-label="Zoom in" onClick={() => zoomCenter(1.2)}>+</button>
+          <button type="button" className="swarm-fit" onClick={fit}>Fit all teams</button>
+        </>}
       </div>}
     </div>
   );
