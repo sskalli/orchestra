@@ -59,8 +59,7 @@
 .swarm-node:focus-within,
 .swarm-node.is-selected { z-index: 3; }
 
-.swarm-node-target,
-.swarm-node-status {
+.swarm-node-target {
   position: absolute;
   display: grid;
   place-items: center;
@@ -81,8 +80,7 @@
 
 .swarm-node.is-task-root .swarm-node-target { width: 52px; height: 52px; cursor: grab; }
 .swarm-node.is-task-root .swarm-node-target:active { cursor: grabbing; }
-.swarm-node-target:focus-visible,
-.swarm-node-status:focus-visible { outline: 2px solid #dedede; outline-offset: 2px; }
+.swarm-node-target:focus-visible { outline: 2px solid #dedede; outline-offset: 2px; }
 
 .swarm-node:hover .swarm-node-target,
 .swarm-node:focus-within .swarm-node-target,
@@ -108,43 +106,6 @@
   width: 28px;
   height: 28px;
   box-shadow: 0 0 24px 8px color-mix(in srgb, var(--agent-color) 48%, transparent);
-}
-
-.swarm-node-status {
-  z-index: 1;
-  width: 19px;
-  height: 19px;
-  left: 12px;
-  top: -19px;
-  color: #efeeee;
-}
-
-.swarm-node.is-task-root .swarm-node-status {
-  left: 31px;
-  top: -12px;
-  width: 23px;
-  height: 23px;
-}
-
-.swarm-node-status:hover { background: #ffffff14; }
-.swarm-node-status.status-attention { color: #efcd43; }
-.swarm-node-status.status-error { color: #ff6e66; }
-.swarm-node-status.status-done { color: #8be384; }
-.swarm-node-status:is(.status-notice, .status-awaiting-confirmation) { color: #85b6ff; }
-
-.swarm-node-status svg {
-  display: block;
-  width: 13px;
-  height: 13px;
-}
-
-.swarm-node.is-task-root .swarm-node-status svg {
-  width: 17px;
-  height: 17px;
-}
-
-.swarm-node-status.status-working svg {
-  animation: swarm-canvas-spin 1.8s linear infinite;
 }
 
 @keyframes swarm-canvas-spin { to { transform: rotate(360deg); } }
@@ -353,7 +314,6 @@
 
 @media (prefers-reduced-motion: reduce) {
   .swarm-node-target { transition: none; }
-  .swarm-node-status.status-working svg { animation: none; }
 }
 
 .swarm-message-dot {
