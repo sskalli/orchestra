@@ -21,7 +21,6 @@ export type WorkspaceMessage = {
   text: string;
   kind?: SystemMessageKind;
   providerItemId?: string;
-  orchestrationRunId?: string;
   state?: "queued" | "streaming" | "failed" | "cancelled";
   productQuestion?: { status: "pending" } | { status: "answered"; answerMessageId: string };
   answersProductQuestionId?: string;
@@ -219,7 +218,7 @@ export class WorkspaceRuntime {
   private trackTurn(session: AgentSession, threadId: string, turnId: string, entry: WorkspaceMessage, recovered = false) {
     this.trackUsage((usage) => usage.registerTurn(threadId, turnId, {
       agentId: session.agent.id,
-      runId: entry.orchestrationRunId ?? entry.id,
+      runId: entry.id,
       model: session.agent.modelSettings?.reportedModel ?? session.agent.modelSettings?.requestedModel,
     }, recovered));
   }
@@ -1179,7 +1178,7 @@ export class WorkspaceRuntime {
         while (owner?.agent.nativeChild) owner = this.sessions.get(owner.agent.parentId!);
         const entry = owner?.run?.message;
         this.trackUsage((usage) => usage.registerTurn(session.threadId!, turnId, {
-          agentId: session.agent.id, runId: entry?.orchestrationRunId ?? entry?.id ?? turnId,
+          agentId: session.agent.id, runId: entry?.id ?? turnId,
           model: session.agent.modelSettings?.reportedModel,
         }));
       }

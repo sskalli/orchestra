@@ -460,7 +460,7 @@ export function WorkspaceCanvas({
       ref={viewport}
       className={`swarm-canvas${dragging ? " is-panning" : ""}`}
       role="region"
-      aria-label="Team canvas"
+      aria-label="Task map"
       data-camera-x={camera.x}
       data-camera-y={camera.y}
       data-camera-scale={camera.scale}
@@ -600,7 +600,7 @@ export function WorkspaceCanvas({
           <button type="button" aria-label="Zoom out" onClick={() => zoomCenter(1 / 1.2)}>−</button>
           <output aria-label="Zoom level">{Math.round(camera.scale * 100)}%</output>
           <button type="button" aria-label="Zoom in" onClick={() => zoomCenter(1.2)}>+</button>
-          <button type="button" className="swarm-fit" onClick={fit}>Fit all teams</button>
+          <button type="button" className="swarm-fit" onClick={fit}>Fit all tasks</button>
         </>}
       </div>}
     </div>

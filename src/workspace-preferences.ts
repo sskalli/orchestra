@@ -9,12 +9,10 @@ export function workspacePreferences(projectPath: string, mode: "demo" | "codex"
   const key = customProvider
     ? `orchestra:workspace:v1:codex-provider:${modelProvider}:${projectPath}`
     : `orchestra:workspace:v1:${mode}:${projectPath}`;
-  const legacyKey = customProvider ? undefined : `swarmer:workspace:v1:${mode}:${projectPath}`;
 
   function read(name: string): unknown {
     try {
-      const value = localStorage.getItem(`${key}:${name}`)
-        ?? (legacyKey ? localStorage.getItem(`${legacyKey}:${name}`) : null);
+      const value = localStorage.getItem(`${key}:${name}`);
       return JSON.parse(value ?? "null");
     } catch {
       return null;
