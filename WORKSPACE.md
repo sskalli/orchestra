@@ -38,6 +38,7 @@ Run `npm run workspace` without arguments to open the simulated scenario. It sta
 - Open **Release notes** from the inbox to locate the pending question, then inspect the reviewer's read-only transcript on the map.
 - Open **Dashboard empty state** and expand the delivery snapshots to inspect the candidate and checks.
 - Compare **Investigate slow search** and its running child with the completed **Weeknight dinner** task. Type an unsent draft, switch chats, and return to verify the draft is still there.
+- Open **Review CSV export** from its **Failed** inbox entry or map badge to inspect the error in the chat.
 - Collapse and expand the inbox, resize both docks, and reload to check that the layout and draft are retained.
 
 ## Recovery and usage

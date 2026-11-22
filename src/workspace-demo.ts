@@ -118,6 +118,16 @@ export function demoTasks(projectId: string): DemoTask[] {
       messages: [{ id: "demo-search-repro-report", role: "assistant", text: "I captured a reproduction and noted the slowest interaction." }],
     },
     {
+      id: "demo-export",
+      name: "Review CSV export",
+      status: "error",
+      directTask: { projectIds: [], phase: "planning" },
+      messages: [
+        { id: "demo-export-request", role: "user", text: "Review the CSV export for edge cases.", state: "failed" },
+        { id: "demo-export-error", role: "system", kind: "error", text: "The session timed out while waiting for a response. Send a follow-up to retry." },
+      ],
+    },
+    {
       id: "demo-recipe",
       name: "Weeknight dinner",
       status: "done",
