@@ -13,7 +13,6 @@ export type CanvasAgent = {
   name: string;
   role: string;
   duty?: string;
-  roleNumber?: number;
   goal?: string;
   projectLabel?: string;
   status: string;
@@ -55,11 +54,10 @@ function teamCenters(count: number): Point[] {
 }
 
 export function radialLayout(agents: CanvasAgent[], taskPositions: ReadonlyMap<string, Point> = new Map()): Layout {
-  const teamAgents = agents.filter((agent) => agent.role !== "coordinator");
-  const ids = new Set(teamAgents.map((agent) => agent.id));
+  const ids = new Set(agents.map((agent) => agent.id));
   const children = new Map<string, CanvasAgent[]>();
   const roots: CanvasAgent[] = [];
-  for (const agent of teamAgents) {
+  for (const agent of agents) {
     if (!agent.parentId || !ids.has(agent.parentId)) {
       roots.push(agent);
       continue;
@@ -192,7 +190,7 @@ export function WorkspaceCanvas({
   onSelect,
   onStatus,
   onCreateTask,
-  emptyMessage = "Teams appear here when the coordinator delegates work.",
+  emptyMessage = "Select + to start a session.",
   initialCamera,
   onCameraChange,
 }: {
@@ -508,7 +506,7 @@ export function WorkspaceCanvas({
             .find((member) => member !== undefined) ?? agent;
           const status = taskRoot || revealed.has(agent.id) ? statuses[statusAgent.status] : undefined;
           const statusLabel = status?.label ?? statuses[statusAgent.status]?.label ?? "Idle";
-          const { color, displayName, prefix, topic } = agentAppearance(agent);
+          const { color, displayName, roleLabel } = agentAppearance(agent);
           const selected = agent.id === selectedId;
           const showChildStatusIcon = Boolean(status) && selectedRevealed.has(agent.id) && !highlighted.has(agent.id);
           const describedRole = agent.goal ?? agent.duty ?? agent.activity ?? statuses[statusAgent.status]?.label ?? "Idle";
@@ -578,7 +576,7 @@ export function WorkspaceCanvas({
                         setStatusHovered((id) => id === agent.id ? null : id);
                       }}
                     ><status.Icon aria-hidden="true" focusable="false" /></button>}
-                    <span>{prefix}{topic && <> | <span className="swarm-label-topic">{topic}</span></>}</span>
+                    <span>{displayName}{roleLabel && <> | <span className="swarm-label-topic">{roleLabel}</span></>}</span>
                   </strong>
                   <div className="swarm-label-subtitle">
                     <span title={describedRole}>{describedRole}</span>

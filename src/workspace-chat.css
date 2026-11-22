@@ -220,24 +220,8 @@
   background: #a7a7a7;
 }
 
-.chat-approval {
-  margin-top: 9px;
-  padding: 8px;
-  border: 1px solid #545454;
+.chat-delivery-checks { white-space: pre-wrap; overflow-wrap: anywhere; }
 
-  color: #ededed;
-  font-size: .675rem;
-}
-
-.chat-implementation-brief { white-space: pre-wrap; overflow-wrap: anywhere; }
-
-.chat-approval-actions {
-  display: flex;
-  gap: 6px;
-  margin-top: 6px;
-}
-
-.chat-approval-actions button,
 .chat-steer {
   padding: 5px 8px;
   border: 1px solid #545454;
@@ -246,7 +230,6 @@
   font-size: .72rem !important;
 }
 
-.chat-approval-actions button:not(:disabled):hover,
 .chat-steer:not(:disabled):hover {
   background: var(--sw-control-hover);
   color: #fff;
@@ -368,31 +351,6 @@
 .chat-message--assistant .chat-markdown li + li { margin-top: .5em; }
 .chat-message--assistant .chat-markdown :is(h1, h2, h3, h4, h5, h6) { margin-top: 1.2em; margin-bottom: .6em; }
 
-.chat-agent-update-heading { font-size: .684rem; line-height: 1.7; overflow-wrap: anywhere; }
-.chat-agent-update-heading button,
-.chat-agent-update-details button {
-  padding: 0;
-  border: 0;
-  background: transparent;
-  text-align: left;
-  text-decoration: underline;
-  text-underline-offset: 3px;
-}
-.chat-agent-update-heading button { text-decoration-color: #ffffff40; }
-.chat-agent-update-details { margin-top: 4px; font-size: .675rem; }
-.chat-agent-update-details summary { cursor: pointer; color: #b8b8b8; }
-.chat-agent-update-details p { margin: .6em 0; font-size: .702rem; }
-.chat-message--error .chat-update-category { color: #ff9c9f; }
-.chat-message--action .chat-update-category { color: #ffc18d; }
-.chat-message--warning .chat-update-category { color: #e9d475; }
-.chat-message--notice .chat-update-category { color: #a2ccf1; }
-.chat-message--success .chat-update-category { color: #9ae0ac; }
-.chat-update-category { font-weight: 700; }
-
-.chat-message--system.chat-message--agent-update {
-  background: transparent;
-}
-
 .chat-lifecycle-menu { position: relative; flex: none; }
 .chat-lifecycle-menu > summary {
   display: grid; place-items: center; width: 26px; height: 26px;
@@ -421,7 +379,6 @@
 .chat-native-child {
   display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px;
 }
-.chat-agent-update-heading button:disabled { text-decoration: none; }
 
 .chat-task-detail {
   margin: 0;

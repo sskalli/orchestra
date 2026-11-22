@@ -5,20 +5,7 @@ import { dirname } from "node:path";
 const tokenFields = ["totalTokens", "inputTokens", "cachedInputTokens", "outputTokens", "reasoningOutputTokens"] as const;
 type TokenField = typeof tokenFields[number];
 export type UsageTokens = Record<TokenField, number> & { cacheWriteInputTokens?: number };
-export type UsageAttribution = { agentId: string; runId?: string; teamId?: string; model?: string };
-export type DelegationDecision = {
-  id: string;
-  at: number;
-  agentId: string;
-  runId?: string;
-  teamId?: string;
-  delegateId?: string;
-  duty?: string;
-  complexity?: string;
-  model?: string;
-  reason: string;
-  outcome?: "queued" | "started" | "failed" | "uncertain";
-};
+export type UsageAttribution = { agentId: string; runId?: string; model?: string };
 type UsageThread = {
   id: string;
   agentId?: string;
@@ -43,11 +30,10 @@ export type UsageTotals = {
 export type UsageSummary = {
   total: UsageTotals;
   byAgent: Record<string, UsageTotals>;
-  byTeam: Record<string, UsageTotals>;
   byRun: Record<string, UsageTotals>;
   unattributedTokens: UsageTokens | null;
 };
-export type UsageSnapshot = UsageSummary & { turns: UsageTurn[]; decisions: DelegationDecision[] };
+export type UsageSnapshot = UsageSummary & { turns: UsageTurn[] };
 
 const zero = (): UsageTokens => ({
   totalTokens: 0, inputTokens: 0, cachedInputTokens: 0, outputTokens: 0, reasoningOutputTokens: 0,
@@ -106,26 +92,32 @@ function addTurn(totals: UsageTotals, turn: UsageTurn) {
 export class WorkspaceUsage {
   private readonly threads = new Map<string, UsageThread>();
   private readonly turns = new Map<string, UsageTurn>();
-  private readonly decisions = new Map<string, DelegationDecision>();
   private readonly resumedThreads = new Map<string, string | undefined>();
   private summaryCache?: UsageSummary;
   private dirty = false;
 
   private readonly path?: string;
 
-  constructor(path?: string) {
+  constructor(path?: string, previousPath?: string) {
     this.path = path;
     if (!path) return;
     let contents: string;
     try {
       contents = readFileSync(path, "utf8");
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
-      throw error;
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      if (!previousPath) return;
+      try {
+        contents = readFileSync(previousPath, "utf8");
+        this.dirty = true;
+      } catch (previousError) {
+        if ((previousError as NodeJS.ErrnoException).code === "ENOENT") return;
+        throw previousError;
+      }
     }
     const saved = JSON.parse(contents);
     if (saved?.version !== 1 || !Array.isArray(saved.threads) ||
-        !Array.isArray(saved.turns) || !Array.isArray(saved.decisions)) {
+        !Array.isArray(saved.turns)) {
       throw new Error("Orchestra could not read the saved usage format.");
     }
     for (const thread of saved.threads as UsageThread[]) {
@@ -141,12 +133,6 @@ export class WorkspaceUsage {
         throw new Error("Orchestra could not read a saved usage turn.");
       }
       this.turns.set(turnKey(turn.threadId, turn.turnId), turn);
-    }
-    for (const decision of saved.decisions as DelegationDecision[]) {
-      if (!validId(decision?.id) || !validId(decision.agentId) || typeof decision.reason !== "string") {
-        throw new Error("Orchestra could not read a saved delegation decision.");
-      }
-      this.decisions.set(decision.id, decision);
     }
   }
 
@@ -248,12 +234,6 @@ export class WorkspaceUsage {
     return gap;
   }
 
-  recordDecision(decision: DelegationDecision) {
-    if (!validId(decision.id) || !validId(decision.agentId) || this.decisions.has(decision.id)) return;
-    this.decisions.set(decision.id, { ...decision });
-    this.changed();
-  }
-
   removeAgents(agentIds: readonly string[]) {
     const ids = new Set(agentIds);
     this.removeWhere((id) => ids.has(id));
@@ -281,12 +261,6 @@ export class WorkspaceUsage {
         removed = true;
       }
     }
-    for (const [id, decision] of this.decisions) {
-      if (remove(decision.agentId) || (decision.delegateId && remove(decision.delegateId))) {
-        this.decisions.delete(id);
-        removed = true;
-      }
-    }
     if (removed) this.changed();
     else this.flush();
   }
@@ -295,7 +269,6 @@ export class WorkspaceUsage {
     if (this.summaryCache) return this.summaryCache;
     const total = emptyTotals();
     const byAgent: UsageSummary["byAgent"] = Object.create(null);
-    const byTeam: UsageSummary["byTeam"] = Object.create(null);
     const byRun: UsageSummary["byRun"] = Object.create(null);
     let unattributedTokens: UsageTokens | null = null;
     for (const turn of this.turns.values()) {
@@ -306,7 +279,6 @@ export class WorkspaceUsage {
         continue;
       }
       addTurn(byAgent[attribution.agentId] ??= emptyTotals(), turn);
-      if (attribution.teamId) addTurn(byTeam[attribution.teamId] ??= emptyTotals(), turn);
       if (attribution.runId) addTurn(byRun[attribution.runId] ??= emptyTotals(), turn);
     }
     for (const thread of this.threads.values()) {
@@ -314,13 +286,12 @@ export class WorkspaceUsage {
       unattributedTokens = addTokens(unattributedTokens, thread.unattributedTokens);
       total.tokens = addTokens(total.tokens, thread.unattributedTokens);
     }
-    return this.summaryCache = { total, byAgent, byTeam, byRun, unattributedTokens };
+    return this.summaryCache = { total, byAgent, byRun, unattributedTokens };
   }
 
   snapshot(): UsageSnapshot {
     return {
       ...structuredClone(this.summary()), turns: structuredClone([...this.turns.values()]),
-      decisions: structuredClone([...this.decisions.values()]),
     };
   }
 
@@ -336,7 +307,7 @@ export class WorkspaceUsage {
     const temporary = this.path + "." + randomUUID() + ".tmp";
     try {
       writeFileSync(temporary, JSON.stringify({
-        version: 1, threads: [...this.threads.values()], turns: [...this.turns.values()], decisions: [...this.decisions.values()],
+        version: 1, threads: [...this.threads.values()], turns: [...this.turns.values()],
       }), { mode: 0o600, flag: "wx" });
       renameSync(temporary, this.path);
       this.dirty = false;

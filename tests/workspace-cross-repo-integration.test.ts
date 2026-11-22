@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test, type TestContext } from "node:test";
-import { fingerprintCandidate, fingerprintIntegrationMembers, integrateProjectCandidates } from "../src/workspace-integration.ts";
+import { fingerprintCandidate, fingerprintIntegrationMembers, pinDirectCandidates } from "../src/workspace-integration.ts";
 import { createFeatureWorktree } from "../src/workspace-worktree.ts";
 
 function git(path: string, ...args: string[]) {
@@ -42,11 +42,10 @@ function candidate(project: { id: string; path: string }, name: string) {
   return { ...tree, projectId: project.id, agentId: name, submissionId: name, expectedFingerprint: fingerprintCandidate(tree.path) };
 }
 
-test("cross-repo integration materializes clean delivery worktrees for combined and singleton candidates", (t) => {
+test("cross-repo delivery pins clean worktrees for each selected repo", (t) => {
   const configured = projects(t);
   const [api, ui] = configured;
   const apiA = candidate(api, "api-a");
-  const apiB = candidate(api, "api-b");
   writeFileSync(join(ui.path, ".gitignore"), "generated.txt\n");
   writeFileSync(join(ui.path, "tracked.txt"), "baseline");
   git(ui.path, "add", ".gitignore", "tracked.txt");
@@ -57,10 +56,9 @@ test("cross-repo integration materializes clean delivery worktrees for combined 
   writeFileSync(join(uiA.path, "generated.txt"), "coder-only artifact");
   uiA.expectedFingerprint = fingerprintCandidate(uiA.path);
   const sourceStatus = git(uiA.path, "status", "--porcelain", "--ignored");
-  const manifest = integrateProjectCandidates(configured, [apiA, uiA, apiB]);
+  const manifest = pinDirectCandidates(configured, [apiA, uiA]);
   const [apiMember, uiMember] = manifest.members!;
   assert.notEqual(apiMember.path, apiA.path);
-  assert.notEqual(apiMember.path, apiB.path);
   assert.notEqual(uiMember.path, uiA.path);
   assert.equal(readFileSync(join(uiMember.path, "tracked.txt"), "utf8"), "updated");
   assert.equal(readFileSync(join(uiMember.path, "ui-a.txt"), "utf8"), "ui-a");
@@ -69,8 +67,8 @@ test("cross-repo integration materializes clean delivery worktrees for combined 
   assert.equal(git(uiA.path, "status", "--porcelain", "--ignored"), sourceStatus);
   assert.equal(fingerprintCandidate(uiA.path), uiA.expectedFingerprint);
   assert.equal(manifest.fingerprint, fingerprintIntegrationMembers(manifest.members!.slice().reverse()));
-  assert.equal(git(apiMember.path, "ls-files"), "api-a.txt\napi-b.txt");
-  assert.deepEqual(manifest.sources.map(({ projectId }) => projectId), ["api", "api", "ui"]);
+  assert.equal(git(apiMember.path, "ls-files"), "api-a.txt");
+  assert.deepEqual(manifest.sources.map(({ projectId }) => projectId), ["api", "ui"]);
   assert.equal(git(api.path, "status", "--porcelain"), "");
   assert.equal(git(ui.path, "status", "--porcelain"), "");
   writeFileSync(join(uiA.path, "changed.txt"), "source-only change");
@@ -79,12 +77,12 @@ test("cross-repo integration materializes clean delivery worktrees for combined 
   assert.notEqual(manifest.fingerprint, fingerprintIntegrationMembers(manifest.members!));
 });
 
-test("a wrong-repo singleton rolls back an already combined group without removing its sources", (t) => {
+test("a wrong-repo candidate rolls back delivery without removing its sources", (t) => {
   const configured = projects(t);
   const [api] = configured;
-  const sources = [candidate(api, "api-a"), candidate(api, "api-b"), { ...candidate(api, "api-c"), projectId: "ui" }];
+  const sources = [candidate(api, "api-a"), { ...candidate(api, "api-b"), projectId: "ui" }];
   const initial = git(api.path, "worktree", "list", "--porcelain");
-  assert.throws(() => integrateProjectCandidates(configured, sources), /isolated worktree of this project/);
+  assert.throws(() => pinDirectCandidates(configured, sources), /isolated worktree of this project/);
   assert.equal(git(api.path, "worktree", "list", "--porcelain"), initial);
   for (const source of sources) assert.equal(fingerprintCandidate(source.path), source.expectedFingerprint);
 });

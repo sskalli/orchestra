@@ -40,6 +40,7 @@ test("answering one persisted task question after restart continues only its own
   };
 
   await start();
+  assert.deepEqual(runtime.snapshot().agents, []);
   const delegatedId = String(await runtime.command({ type: "createTask", name: "Release research", projectIds: [] }));
   const soloId = String(await runtime.command({ type: "createTask", name: "Solo draft", projectIds: [] }));
   const send = (agentId: string, text: string) => runtime.command({ type: "send", agentId, text });
@@ -94,6 +95,7 @@ test("answering one persisted task question after restart continues only its own
   await restart();
   assert.deepEqual(pendingInputs(), [solo]);
   const trace = readFileSync(tracePath, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+  assert.equal(trace.filter(({ method }) => method === "thread/start").length, 2);
   const answered = trace.filter(({ method, params }) => method === "turn/start" && params.input?.[0]?.text.includes(answer));
   assert.equal(answered.length, 1);
   assert.match(answered[0].params.input[0].text, /Use ORBIT-42 for the release\?/);

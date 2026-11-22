@@ -3,8 +3,6 @@ export type WorkspaceOptions = {
   projectPath?: string;
   projects: { id: string; path: string }[];
   provider: string;
-  feature: boolean;
-  claude?: true;
 };
 
 export function parseWorkspaceArgs(args: string[]): WorkspaceOptions {
@@ -13,14 +11,11 @@ export function parseWorkspaceArgs(args: string[]): WorkspaceOptions {
   const projects: WorkspaceOptions["projects"] = [];
   let provider = "openai";
   let providerSpecified = false;
-  let feature = false;
-  let claude = false;
 
   for (let index = 0; index < args.length; index++) {
     const arg = args[index];
-    if (arg === "--live" || arg === "--claude") {
+    if (arg === "--live") {
       if (live) throw new Error("Specify only one workspace mode.");
-      claude = arg === "--claude";
       live = true;
       if (args[index + 1] && !args[index + 1].startsWith("--")) projectPath = args[++index];
     } else if (arg === "--provider") {
@@ -41,9 +36,6 @@ export function parseWorkspaceArgs(args: string[]): WorkspaceOptions {
       }
       if (projects.some((project) => project.id === id)) throw new Error(`Duplicate project ID: ${id}`);
       projects.push({ id, path });
-    } else if (arg === "--feature") {
-      if (feature) throw new Error("Specify --feature only once.");
-      feature = true;
     } else if (!arg.startsWith("--") && live && !projectPath) {
       projectPath = arg;
     } else {
@@ -51,12 +43,10 @@ export function parseWorkspaceArgs(args: string[]): WorkspaceOptions {
     }
   }
 
-  if (claude && providerSpecified) throw new Error("--provider is only supported in Codex mode.");
-  if (claude && projects.length) throw new Error("--project is only supported in Codex mode.");
   if (projects.length && projectPath) throw new Error("Use either --live with a project path or --project, not both.");
   if (projects.length) live = true;
   if (!live && args.length) {
-    throw new Error("Usage: npm run workspace -- [--live [project-path] | --project ID=path ...] [--provider provider-id], or --claude [project-path]");
+    throw new Error("Usage: npm run workspace -- [--live [project-path] | --project ID=path ...] [--provider provider-id]");
   }
-  return { live, projectPath, projects, provider, feature, ...(claude ? { claude: true } : {}) };
+  return { live, projectPath, projects, provider };
 }
