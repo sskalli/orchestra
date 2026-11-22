@@ -157,12 +157,14 @@ button:focus-visible { outline: 2px solid #b8bcb8; outline-offset: 3px; }
   .sw-dock, .sw-dock-inner { transition: none !important; }
 }
 
-[data-agent-color="lead"] { --agent-color: #6fff9d; }
+[data-agent-color="task"] { --agent-color: #6fff9d; }
+[data-agent-color="lead"] { --agent-color: #f5d347; }
 [data-agent-color="coder"] { --agent-color: #ff6269; }
 [data-agent-color="researcher"] { --agent-color: #ad7bff; }
 [data-agent-color="reviewer"] { --agent-color: #ffb86a; }
 [data-agent-color="tester"] { --agent-color: #ff69d1; }
 [data-agent-color="designer"] { --agent-color: #42e8ff; }
+[data-agent-color="pm"] { --agent-color: #5799ff; }
 [data-agent-color="other"] { --agent-color: #a4b7d0; }
 
 .sw-archived-toggle { position: absolute; z-index: 4; right: 12px; top: 12px; padding: 4px 7px; font-size: 11px; border-radius: 4px; background: #181a1d; border: 1px solid var(--sw-line); cursor: pointer; }

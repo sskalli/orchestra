@@ -5,10 +5,10 @@ const roles = {
   tester: { label: "Tester", color: "tester" },
   designer: { label: "Designer", color: "designer" },
   analyser: { label: "Researcher", color: "researcher" },
-  pm: { label: "Product adviser", color: "other" },
+  pm: { label: "Product adviser", color: "pm" },
 } as const;
 
-export function agentAppearance({ name, duty }: { name: string; duty?: string }) {
+export function agentAppearance({ name, duty }: { name: string; duty?: string }, taskRoot = false) {
   const role = duty && Object.hasOwn(roles, duty) ? roles[duty as keyof typeof roles] : undefined;
-  return { displayName: name, color: role?.color ?? "other", roleLabel: role?.label };
+  return { displayName: name, color: role?.color ?? (taskRoot ? "task" : "other"), roleLabel: role?.label };
 }

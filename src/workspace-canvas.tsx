@@ -506,7 +506,7 @@ export function WorkspaceCanvas({
             .find((member) => member !== undefined) ?? agent;
           const status = taskRoot || revealed.has(agent.id) ? statuses[statusAgent.status] : undefined;
           const statusLabel = status?.label ?? statuses[statusAgent.status]?.label ?? "Idle";
-          const { color, displayName, roleLabel } = agentAppearance(agent);
+          const { color, displayName, roleLabel } = agentAppearance(agent, taskRoot);
           const selected = agent.id === selectedId;
           const showChildStatusIcon = Boolean(status) && selectedRevealed.has(agent.id) && !highlighted.has(agent.id);
           const describedRole = agent.goal ?? agent.duty ?? agent.activity ?? statuses[statusAgent.status]?.label ?? "Idle";
