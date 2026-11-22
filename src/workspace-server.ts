@@ -7,15 +7,14 @@ import { workspaceStore } from "./workspace-store.ts";
 import { parseWorkspaceArgs } from "./workspace-options.ts";
 import { defaultProject, resolveProjects, workspaceIdentity } from "./workspace-projects.ts";
 
-const { live, projectPath, projects: specifiedProjects, provider: modelProvider, claude } = parseWorkspaceArgs(process.argv.slice(2));
-const provider = claude ? "claude" : "codex";
+const { live, projectPath, projects: specifiedProjects, provider: modelProvider } = parseWorkspaceArgs(process.argv.slice(2));
 let projects = live
   ? resolveProjects(specifiedProjects.length ? specifiedProjects : [defaultProject(projectPath ?? ".")])
   : [defaultProject(process.cwd())];
 if (live && !specifiedProjects.length) projects = [defaultProject(projects[0].path)];
 const cwd = projects[0].path;
 const identity = workspaceIdentity(projects);
-const port = Number(process.env.ORCHESTRA_PORT ?? process.env.SWARMER_PORT ?? 4317);
+const port = Number(process.env.ORCHESTRA_PORT ?? 4317);
 if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error("Invalid ORCHESTRA_PORT");
 const host = `127.0.0.1:${port}`;
 const origin = `http://${host}`;
@@ -53,13 +52,6 @@ async function readCommand(request: IncomingMessage) {
   }
   if (command.type === "startImplementation" && (command.text === undefined || typeof command.text === "string")) {
     return { type: "startImplementation" as const, agentId: command.agentId, text: command.text };
-  }
-  if (command.type === "approveImplementation" && typeof command.proposalId === "string" && command.proposalId) {
-    return { type: "approveImplementation" as const, agentId: command.agentId, proposalId: command.proposalId };
-  }
-  if (command.type === "approval" && typeof command.approvalId === "string" &&
-    (command.decision === "accept" || command.decision === "decline")) {
-    return { type: "approval" as const, agentId: command.agentId, approvalId: command.approvalId, decision: command.decision as "accept" | "decline" };
   }
   throw new Error("Invalid workspace command");
 }
@@ -134,11 +126,10 @@ server.listen(port, "127.0.0.1", () => {
     cwd,
     projects,
     demo: !live,
-    provider,
     modelProvider,
-    store: live ? workspaceStore(identity, undefined, provider, claude ? undefined : modelProvider) : undefined,
+    store: live ? workspaceStore(identity, undefined, modelProvider) : undefined,
   });
-  const mode = live ? claude ? "Claude Code" : `Codex: ${modelProvider}` : "demo";
+  const mode = live ? `Codex: ${modelProvider}` : "demo";
   console.log(`Orchestra (${mode}) is available at ${origin}`);
   void runtime.start().catch((error) => console.error("Workspace startup failed:", error instanceof Error ? error.message : error));
 });

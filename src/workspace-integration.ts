@@ -52,12 +52,23 @@ export function fingerprintCandidate(path: string) {
   return snapshot(repository(path).root).fingerprint;
 }
 
-function captureSource(target: ReturnType<typeof repository>, baseline: string, source: IntegrationSource) {
-  const candidate = repository(source.path);
+function isolatedRepository(target: ReturnType<typeof repository>, path: string) {
+  const candidate = repository(path);
   if (candidate.root === target.root || candidate.common !== target.common) {
     throw new Error("Every integration source must be an isolated worktree of this project.");
   }
-  if (!/^[a-f0-9]{40,64}$/i.test(source.base) || !source.submissionId) throw new Error("Invalid candidate baseline or submission.");
+  return candidate;
+}
+
+export function validateCandidateWorktree(project: string, candidate: { path: string; base: string }) {
+  const root = isolatedRepository(repository(project), candidate.path).root;
+  if (!/^[a-f0-9]{40}(?:[a-f0-9]{24})?$/i.test(candidate.base)) throw new Error("Invalid candidate baseline.");
+  git(root, ["merge-base", "--is-ancestor", candidate.base, "HEAD"]);
+}
+
+function captureSource(target: ReturnType<typeof repository>, baseline: string, source: IntegrationSource) {
+  const candidate = isolatedRepository(target, source.path);
+  if (!/^[a-f0-9]{40}(?:[a-f0-9]{24})?$/i.test(source.base) || !source.submissionId) throw new Error("Invalid candidate baseline or submission.");
   git(candidate.root, ["merge-base", "--is-ancestor", source.base, "HEAD"]);
   git(target.root, ["merge-base", "--is-ancestor", source.base, baseline]);
   const captured = snapshot(candidate.root);
@@ -67,48 +78,29 @@ function captureSource(target: ReturnType<typeof repository>, baseline: string, 
   return { source, path: candidate.root, ...captured };
 }
 
-/** Combine accepted submissions in a new detached worktree; never merge the project branch. */
-export function integrateCandidates(project: string, candidates: IntegrationSource[]) {
-  if (candidates.length < 2 || new Set(candidates.map((source) => source.agentId)).size !== candidates.length) {
-    throw new Error("Choose at least two distinct accepted coder submissions to integrate.");
-  }
-  return materializeCandidates(project, candidates);
-}
-
-function materializeCandidates(project: string, candidates: IntegrationSource[], pinnedBaseline?: string) {
+function materializeCandidate(project: string, candidate: IntegrationSource) {
   const target = repository(project);
-  const baseline = pinnedBaseline ?? git(target.root, ["rev-parse", "--verify", "HEAD^{commit}"]);
-  const snapshots = candidates.map((source) => captureSource(target, baseline, source));
-  if (new Set(snapshots.map((source) => source.path)).size !== snapshots.length) {
-    throw new Error("Each integrated coder must have a distinct isolated worktree.");
-  }
-  const integration = createFeatureWorktree(target.root, pinnedBaseline);
+  const baseline = candidate.base;
+  const source = captureSource(target, baseline, candidate);
+  const integration = createFeatureWorktree(target.root, baseline);
   const identity = {
     GIT_AUTHOR_NAME: "Orchestra", GIT_AUTHOR_EMAIL: "orchestra@localhost",
     GIT_COMMITTER_NAME: "Orchestra", GIT_COMMITTER_EMAIL: "orchestra@localhost",
   };
   try {
     if (integration.base !== baseline) throw new Error("The project baseline changed before integration began. Retry.");
-    for (const source of snapshots) {
-      const commit = git(source.path, ["commit-tree", source.tree, "-p", source.source.base,
-        "-m", `Snapshot ${source.source.agentId} submission ${source.source.submissionId}`], identity);
-      // A source with no changes adds no patch; do not create an empty cherry-pick.
-      if (source.tree === git(source.path, ["rev-parse", `${source.source.base}^{tree}`])) continue;
-      try {
-        git(integration.path, ["-c", "rerere.enabled=false", "cherry-pick", commit], identity);
-      } catch {
-        throw new Error(`Integration conflict or failed Git application for ${source.source.agentId}. The source worktree is unchanged. Resolve the overlap in the coder assignments before retrying.`);
-      }
+    if (source.tree !== git(source.path, ["rev-parse", `${baseline}^{tree}`])) {
+      const commit = git(source.path, ["commit-tree", source.tree, "-p", baseline,
+        "-m", `Snapshot ${candidate.agentId} submission ${candidate.submissionId}`], identity);
+      git(integration.path, ["-c", "rerere.enabled=false", "cherry-pick", commit], identity);
     }
-    for (const source of snapshots) {
-      if (fingerprintCandidate(source.path) !== source.fingerprint) {
-        throw new Error(`Candidate ${source.source.agentId} changed during integration. Revalidate it before retrying.`);
-      }
+    if (fingerprintCandidate(source.path) !== source.fingerprint) {
+      throw new Error("The candidate changed during preparation. Revalidate it before retrying.");
     }
     return {
       ...integration,
       fingerprint: fingerprintCandidate(integration.path),
-      sources: snapshots.map(({ source, head, fingerprint }) => ({ agentId: source.agentId, submissionId: source.submissionId, head, fingerprint })),
+      source: { agentId: candidate.agentId, submissionId: candidate.submissionId, head: source.head, fingerprint: source.fingerprint },
     };
   } catch (error) {
     removeFeatureWorktree(target.root, integration.path);
@@ -127,20 +119,9 @@ export function fingerprintIntegrationMembers(members: readonly Omit<Integration
   return fingerprintMemberSnapshots(members.map((member) => ({ ...member, fingerprint: fingerprintCandidate(member.path) })));
 }
 
-/** Prepare independent candidates per repository and pin them as a single testable delivery. */
-export function integrateProjectCandidates(
-  projects: readonly { id: string; path: string }[],
-  sources: ProjectSource[],
-): ProjectIntegration {
-  if (sources.length < 2 || new Set(sources.map((source) => source.agentId)).size !== sources.length) {
-    throw new Error("Choose at least two distinct accepted coder submissions to integrate.");
-  }
-  return prepareProjectCandidates(projects, sources, false);
-}
-
 /** Deliver a changed single-repository submission at its original baseline. */
 export function pinApprovedCandidate(project: string, source: IntegrationSource) {
-  const delivery = materializeCandidates(project, [source], source.base);
+  const delivery = materializeCandidate(project, source);
   try {
     const revision = git(delivery.path, ["rev-parse", "--verify", "HEAD^{commit}"]);
     if (revision === delivery.base) throw new Error("The coder finished without changes to the approved repository.");
@@ -152,36 +133,24 @@ export function pinApprovedCandidate(project: string, source: IntegrationSource)
 }
 
 /** Copy one coder's pinned submission into clean delivery worktrees without rebasing it. */
-export function pinDirectCandidates(projects: readonly { id: string; path: string }[], sources: ProjectSource[]) {
+export function pinDirectCandidates(projects: readonly { id: string; path: string }[], sources: ProjectSource[]): ProjectIntegration {
   if (sources.length < 2 || new Set(sources.map(({ projectId }) => projectId)).size !== sources.length) {
     throw new Error("Direct delivery needs one candidate per selected repository.");
   }
-  return prepareProjectCandidates(projects, sources, true);
-}
-
-function prepareProjectCandidates(projects: readonly { id: string; path: string }[], sources: ProjectSource[],
-  pinned: boolean): ProjectIntegration {
-  const groups = new Map<string, ProjectSource[]>();
-  for (const source of sources) {
-    const group = groups.get(source.projectId) ?? [];
-    group.push(source);
-    groups.set(source.projectId, group);
-  }
-  const selected = projects.filter(({ id }) => groups.has(id));
-  if (selected.length !== groups.size) throw new Error("Every integration source needs a configured project.");
-  if (selected.length === 1) return integrateCandidates(selected[0].path, sources);
+  const byProject = new Map(sources.map((source) => [source.projectId, source]));
+  const selected = projects.filter(({ id }) => byProject.has(id));
+  if (selected.length !== sources.length) throw new Error("Every integration source needs a configured project.");
 
   const created: { project: string; path: string }[] = [];
   const members: IntegrationMember[] = [];
   const submissions: ProjectIntegration["sources"] = [];
   try {
     for (const { id: projectId, path: project } of selected) {
-      const group = groups.get(projectId)!;
-      const combined = materializeCandidates(project, group, pinned ? group[0].base : undefined);
+      const combined = materializeCandidate(project, byProject.get(projectId)!);
       created.push({ project, path: combined.path });
       members.push({ projectId, path: combined.path, base: combined.base, fingerprint: combined.fingerprint,
-        ...(pinned && { revision: git(combined.path, ["rev-parse", "--verify", "HEAD^{commit}"]) }) });
-      submissions.push(...combined.sources.map((source) => ({ ...source, projectId })));
+        revision: git(combined.path, ["rev-parse", "--verify", "HEAD^{commit}"]) });
+      submissions.push({ ...combined.source, projectId });
     }
     const fingerprint = fingerprintMemberSnapshots(members);
     if (fingerprintIntegrationMembers(members) !== fingerprint ||

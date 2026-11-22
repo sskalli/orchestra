@@ -6,8 +6,6 @@
     "node": ">=22.18.0"
   },
   "scripts": {
-    "spike:codex": "node src/spike.ts",
-    "spike:delivery": "node src/delivery.ts",
     "build": "node src/build-workspace.mjs",
     "workspace": "npm run --silent build && node src/workspace-server.ts",
     "test": "node --test tests/*.test.ts"

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -9,13 +9,13 @@ function tokens(inputTokens: number, outputTokens = 0, cachedInputTokens = 0) {
   return { totalTokens: inputTokens + outputTokens, inputTokens, outputTokens, cachedInputTokens, reasoningOutputTokens: 0 };
 }
 
-test("the spike's multiple updates are cumulative and replay remains idempotent across restart", (t) => {
+test("multiple updates are cumulative and replay remains idempotent across restart", (t) => {
   const directory = mkdtempSync(join(tmpdir(), "orchestra-usage-ledger-"));
   t.after(() => rmSync(directory, { recursive: true, force: true }));
   const path = join(directory, "usage.json");
   let usage = new WorkspaceUsage(path);
   usage.registerThread("thread", true, "coder");
-  const attribution = { agentId: "coder", teamId: "team", runId: "run", model: "example" };
+  const attribution = { agentId: "coder", runId: "run", model: "example" };
   usage.registerTurn("thread", "first", attribution);
   const first = tokens(17_944, 9);
   usage.observe("thread", "first", { total: first });
@@ -32,7 +32,24 @@ test("the spike's multiple updates are cumulative and replay remains idempotent 
   assert.equal(exported.turns.find((turn) => turn.turnId === "skill")?.tokens?.totalTokens, 42_663);
   assert.equal(exported.byRun.run.tokens?.totalTokens, 79_793);
   assert.equal(exported.byAgent.coder.tokens?.cachedInputTokens, 36_864);
-  assert.equal(exported.byTeam.team.observedTurns, 3);
+});
+
+test("task-only usage imports retained sessions without rewriting the original history", (t) => {
+  const directory = mkdtempSync(join(tmpdir(), "orchestra-usage-migration-"));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const previousPath = join(directory, "previous.json");
+  const path = join(directory, "tasks.json");
+  const previous = new WorkspaceUsage(previousPath);
+  for (const id of ["direct", "coordinator"]) {
+    previous.registerThread(id, true, id);
+    previous.registerTurn(id, "turn", { agentId: id });
+    previous.observe(id, "turn", { total: tokens(20, 2) });
+  }
+  const original = readFileSync(previousPath, "utf8");
+  const migrated = new WorkspaceUsage(path, previousPath);
+  migrated.retainAgents(["direct"]);
+  assert.equal(new WorkspaceUsage(path).summary().total.tokens?.totalTokens, 22);
+  assert.equal(readFileSync(previousPath, "utf8"), original);
 });
 
 test("legacy resume establishes a baseline without charging historical usage", () => {
@@ -67,19 +84,17 @@ test("a cumulative gap across turns is counted at workspace level without chargi
   assert.deepEqual(usage.summary().unattributedTokens, tokens(60, 5));
 });
 
-test("deletion purges turns, checkpoints, and decisions for removed participants", () => {
+test("deletion purges turns and checkpoints for removed participants", () => {
   const usage = new WorkspaceUsage();
   usage.registerThread("pilot-thread", true, "pilot");
   usage.registerThread("worker-thread", true, "worker");
   usage.registerTurn("pilot-thread", "pilot", { agentId: "pilot" });
   usage.observe("pilot-thread", "pilot", { total: tokens(10) });
   usage.observe("worker-thread", "worker", { total: tokens(20) });
-  usage.recordDecision({ id: "assign", at: 1, agentId: "pilot", delegateId: "worker", reason: "Assigned work." });
   usage.retainAgents(["pilot"]);
   const exported = usage.snapshot();
   assert.equal(exported.total.tokens?.totalTokens, 10);
   assert.equal(exported.turns.length, 1);
-  assert.deepEqual(exported.decisions, []);
   usage.observe("worker-thread", "worker", { total: tokens(30) });
   assert.equal(usage.summary().total.tokens?.totalTokens, 10);
 });

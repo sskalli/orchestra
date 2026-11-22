@@ -1,4 +1,4 @@
-import { agentAppearance, numberAgentRoles } from "./workspace-agent-appearance.ts";
+import { agentAppearance } from "./workspace-agent-appearance.ts";
 import { effectiveAgentStatus } from "./workspace-status.ts";
 import { useEffect, useRef, useState } from "react";
 import type { CSSProperties, KeyboardEvent, PointerEvent } from "react";
@@ -14,7 +14,7 @@ import "./workspace.css";
 
 type Snapshot = ReturnType<WorkspaceRuntime["snapshot"]>;
 type UsageTotals = NonNullable<Snapshot["usage"]>["total"];
-type Agent = Snapshot["agents"][number] & { roleNumber: number };
+type Agent = Snapshot["agents"][number];
 type Command = Parameters<WorkspaceRuntime["command"]>[0];
 type Activity = { agent: Agent; messageId?: string; text: string };
 
@@ -57,15 +57,14 @@ function WorkspaceUsage({ usage }: { usage: NonNullable<Snapshot["usage"]> }) {
   </details>;
 }
 
-function providerLabel({ name, state }: Snapshot["provider"]) {
-  const title = name === "claude" ? "Claude Code" : "Codex";
+function providerLabel({ state }: Snapshot["provider"]) {
   return {
     demo: "Demo mode",
-    connecting: `Connecting to ${title}`,
-    ready: `${title} connected`,
-    "signed-out": `${title} sign-in required`,
-    error: `${title} unavailable`,
-    "usage-limit": `${title} usage limit`,
+    connecting: "Connecting to Codex",
+    ready: "Codex connected",
+    "signed-out": "Codex sign-in required",
+    error: "Codex unavailable",
+    "usage-limit": "Codex usage limit",
   }[state];
 }
 
@@ -85,18 +84,7 @@ function Folder() {
 function attention(agent: Agent): Activity[] {
   const questions = agent.messages.flatMap((message) => message.productQuestion?.status === "pending"
     ? [{ agent, messageId: message.id, text: message.text.split("\n", 1)[0].slice(0, 160) }] : []);
-  const proposal = agent.implementationProposal;
-  if (proposal?.status === "awaiting-approval" || proposal?.status === "blocked") {
-    return [...questions, {
-      agent,
-      messageId: agent.messages.findLast((message) => message.implementationProposalId === proposal.id)?.id,
-      text: proposal.status === "awaiting-approval" ? "Implementation approval requested" : proposal.detail ?? "Implementation blocked",
-    }];
-  }
-  const pending = agent.messages.filter((message) => message.approval?.state === "pending");
-  if (pending.length || questions.length) return [...questions, ...pending.map((message) => ({
-    agent, messageId: message.id, text: message.text.split("\n", 1)[0].slice(0, 160),
-  }))];
+  if (questions.length) return questions;
   if (agent.status === "attention" || agent.status === "error") {
     const message = agent.messages.findLast((entry) => entry.state === "failed" || entry.role === "system");
     return [{ agent, messageId: message?.id, text: message?.text ?? (agent.status === "error" ? "Run failed" : "Needs your response") }];
@@ -153,11 +141,11 @@ function Workspace() {
     return <main className="sw-loading"><Mark /><span>Connecting to Orchestra…</span></main>;
   }
 
-  const mode = snapshot.provider.state === "demo" ? "demo" : snapshot.provider.name;
+  const mode = snapshot.provider.state === "demo" ? "demo" : "codex";
   return <WorkspaceView key={JSON.stringify([snapshot.workspaceKey, mode, snapshot.modelProvider])} snapshot={snapshot} connected={connected} mode={mode} signals={signals} />;
 }
 
-function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snapshot; connected: boolean; mode: "demo" | Snapshot["provider"]["name"]; signals: AgentSignal[] }) {
+function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snapshot; connected: boolean; mode: "demo" | "codex"; signals: AgentSignal[] }) {
   const { project, provider } = snapshot;
   const [storageUnavailable, setStorageUnavailable] = useState(false);
   useEffect(() => {
@@ -165,7 +153,7 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
     window.addEventListener("orchestra-storage-unavailable", onFailure);
     return () => window.removeEventListener("orchestra-storage-unavailable", onFailure);
   }, []);
-  const agents = numberAgentRoles(snapshot.agents.map((agent) => ({ ...agent, status: effectiveAgentStatus(agent) })));
+  const agents = snapshot.agents.map((agent) => ({ ...agent, status: effectiveAgentStatus(agent) }));
   const [preferences] = useState(() => workspacePreferences(snapshot.workspaceKey, mode, snapshot.modelProvider));
   const [saved] = useState(preferences.readView);
   const [savedCamera] = useState(preferences.readCamera);
@@ -333,7 +321,6 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
     return () => window.removeEventListener("pagehide", persist);
   }, [preferences, leftOpen, selectedId]);
 
-  const projectAgent = agents.find((agent) => agent.role === "coordinator");
   const selected = agents.find((agent) => agent.id === selectedId);
   const dockAgent = agents.find((agent) => agent.id === dockId);
   const blocked = !connected || !["ready", "demo"].includes(provider.state);
@@ -352,17 +339,6 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
     return agents.filter((agent) => !agent.archivedAt && ids.has(agent.id)).flatMap(attention);
   }
 
-  function belongsTo(child: Agent, id: string) {
-    const visited = new Set<string>();
-    let parent = child.parentId;
-    while (parent && !visited.has(parent)) {
-      if (parent === id) return true;
-      visited.add(parent);
-      parent = agents.find((item) => item.id === parent)?.parentId;
-    }
-    return false;
-  }
-
   const inboxStatus = {
     idle: ["Idle", "notice"], working: ["Working", "working"], attention: ["Needs attention", "attention"],
     "awaiting-confirmation": ["Ready for review", "notice"], done: ["Complete", "done"],
@@ -370,8 +346,7 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
   } as const;
   const activeAgents = agents.filter((agent) => !agent.archivedAt);
   const activeIds = new Set(activeAgents.map(({ id }) => id));
-  const inboxEvents: InboxEvent[] = activeAgents.filter((agent) => agent.role !== "coordinator" &&
-    (!agent.parentId || agent.parentId === projectAgent?.id || !activeIds.has(agent.parentId))).flatMap((root) => {
+  const inboxEvents: InboxEvent[] = activeAgents.filter((agent) => !agent.parentId || !activeIds.has(agent.parentId)).flatMap((root) => {
     const agentName = root.name;
     const actions = activityFor(root.id);
     if (actions.length) return actions.map(({ agent, messageId, text }) => {
@@ -383,14 +358,9 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
     });
     const [status, tone] = inboxStatus[root.status];
     const message = root.messages.findLast((entry) => entry.role !== "user" && !entry.state);
-    const source = message?.role === "system" && activeAgents.find((agent) =>
-      agent.id === message.sourceAgentId && belongsTo(agent, root.id));
-    const sourceMessage = source ? source.messages.findLast((entry) =>
-      entry.role !== "user" && !entry.state && entry.text &&
-      (message?.text === entry.text || message?.text.endsWith("\n" + entry.text))) : message;
     return [{ id: root.id, agentName, status, tone,
       text: message?.text ?? root.goal ?? "Open the conversation for details.",
-      agentId: source ? source.id : root.id, messageId: sourceMessage?.id }];
+      agentId: root.id, messageId: message?.id }];
   });
 
   function select(id: string | null, messageId?: string) {
@@ -441,10 +411,7 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
       return;
     }
     const agent = agents.find((item) => item.id === id);
-    const proposal = agent?.implementationProposal;
-    select(id, agent?.messages.findLast((message) => proposal
-      ? message.implementationProposalId === proposal.id
-      : message.role !== "user")?.id);
+    select(id, agent?.messages.findLast((message) => message.role !== "user")?.id);
   }
 
   function toggleInbox(open: boolean) {
@@ -536,10 +503,10 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
       onPointerDown={start} onPointerMove={move} onPointerUp={end} onPointerCancel={end} onLostPointerCapture={end} onKeyDown={keyboard} />;
   }
 
-  const canvasAgents = agents.filter((agent) => agent.role !== "coordinator" && !agent.archivedAt).map((agent) => ({
+  const canvasAgents = agents.filter((agent) => !agent.archivedAt).map((agent) => ({
     ...agent,
     projectLabel: snapshot.projects.length > 1
-      ? (agent.directTask?.projectIds ?? agent.directCandidates?.map(({ projectId }) => projectId))?.join(", ") || (agent.directTask ? undefined : agent.projectId)
+      ? agent.directTask?.projectIds.join(", ") || agent.projectId
       : undefined,
   }));
   const archivedAgents = agents.filter((agent) => agent.archivedAt);
@@ -561,8 +528,7 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
 
   const lifecycleAgent = agents.find((agent) => agent.id === lifecycle?.agentId);
   const affected = lifecycleAgent ? subtree(lifecycleAgent.id) : [];
-  const hasRunning = affected.some((agent) => agent.status === "working" || agent.status === "attention" || agent.lifecycleBusy) ||
-    (affected.some((agent) => agent.simulation) && agents.some((agent) => agent.simulation && agent.status === "working"));
+  const hasRunning = affected.some((agent) => agent.status === "working" || agent.status === "attention" || agent.lifecycleBusy);
 
   async function applyLifecycle() {
     if (!lifecycle || lifecyclePending) return;
@@ -587,16 +553,8 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
     }
   }
 
-  function renderChat(agent: Agent, kind: "project" | "agent") {
-    const teamIdentity = kind === "agent" && agent.teamId ? snapshot.teams?.find((team) => team.id === agent.teamId) : undefined;
-    const team = kind === "agent" && agent.role !== "lead"
-      ? agents.find((item) => item.role === "lead" && (item.id === agent.parentId || belongsTo(agent, item.id)))
-      : undefined;
-    const integration = team?.integration;
-    const repositoryIds = agent.directTask?.projectIds ?? (agent.role === "lead" ? teamIdentity?.projectIds
-      : integration && agent.validationIntegrationId === integration.id ? integration.members?.map(({ projectId }) => projectId)
-      : agent.directCandidates?.map(({ projectId }) => projectId));
-    const repositoryScope = repositoryIds && (agent.directTask ? repositoryIds.length > 0 : repositoryIds.length > 1) ? repositoryIds : undefined;
+  function renderChat(agent: Agent) {
+    const repositories = agent.directTask?.projectIds;
 
     async function submit(type: "send" | "steer", value: string) {
       const revision = draftRevisions.current[agent.id] ?? 0;
@@ -610,42 +568,18 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
 
     const settings = agent.modelSettings;
     const model = settings?.reportedModel ?? settings?.requestedModel;
-    const effort = settings?.effort ?? settings?.reportedEffort;
-    const modelLabel = [model, effort && `${effort} effort${settings?.effort ? " requested" : ""}`].filter(Boolean).join(" · ");
+    const effort = settings?.reportedEffort;
+    const modelLabel = [model, effort && `${effort} effort`].filter(Boolean).join(" · ");
 
-    const scopedUsage = snapshot.usage?.byAgent[agent.id];
-    const teamUsage = agent.parentId === projectAgent?.id ? snapshot.usage?.byTeam[agent.teamId ?? agent.id] : undefined;
-    const usage = snapshot.usage ? usageLabel(scopedUsage, "Tokens") : undefined;
-    const teamTokens = teamUsage ? usageLabel(teamUsage, "Team tokens") : undefined;
+    const usage = snapshot.usage ? usageLabel(snapshot.usage.byAgent[agent.id], "Tokens") : undefined;
 
     return <WorkspaceChat
       key={agent.id}
-      agent={{ ...agent, messages: agent.messages.filter((entry) => {
-        if (entry.role !== "system" || !entry.sourceAgentId || entry.sourceAgentId === agent.id ||
-            entry.kind === "action" || entry.productQuestion || entry.approval || entry.implementationProposalId) return true;
-        const source = agents.find((item) => item.id === entry.sourceAgentId);
-        return kind !== "project" && (!source || !belongsTo(source, agent.id));
-      }).map((entry) => {
-        const source = agents.find((item) => item.id === entry.sourceAgentId);
-        const proposalOwner = kind === "project" ? source : agent;
-        const currentProposal = proposalOwner?.implementationProposal;
-        const implementation = proposalOwner && currentProposal && currentProposal.id === entry.implementationProposalId
-          ? { ...currentProposal, ownerId: proposalOwner.id, ownerArchived: Boolean(proposalOwner.archivedAt),
-            ownerBusy: Boolean(proposalOwner.canCancel || proposalOwner.lifecycleBusy) }
-          : undefined;
-        return source ? { ...entry, implementation, sourceName: `${snapshot.projects.length > 1 && source.projectId ? `${source.projectId} / ` : ""}${agentAppearance(source).displayName}` }
-          : entry.sourceAgentId ? { ...entry, implementation, sourceName: entry.sourceAgentName ?? "Deleted agent", sourceDeleted: true }
-          : { ...entry, implementation };
-      }) }}
-      kind={kind}
+      agent={agent}
       onOpenAgent={(id) => select(id)}
       onLifecycle={agent.nativeChild ? undefined : (action) => requestLifecycle(action, agent.id)}
-      title={kind === "project" ? projectName : team && snapshot.projects.length === 1
-        ? `${agentAppearance(team).displayName} / ${agentAppearance(agent).displayName}`
-        : `${agentAppearance(agent).displayName}${team ? ` / ${agentAppearance(team).displayName}`
-          : teamIdentity && teamIdentity.name !== agent.name ? ` / ${teamIdentity.name}` : ""}`}
-      projectLabel={kind === "agent" && !agent.directTask && snapshot.projects.length > 1 && !repositoryScope ? agent.projectId : undefined}
-      repositoryScope={repositoryScope}
+      projectLabel={agent.nativeChild && snapshot.projects.length > 1 ? agent.projectId : undefined}
+      repositoryScope={repositories?.length ? repositories : undefined}
       taskPhase={agent.directTask?.phase}
       taskDetail={agent.directTask?.detail}
       onStartImplementation={agent.directTask?.projectIds.length && agent.directTask.phase !== "implementing"
@@ -655,16 +589,14 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
         : undefined}
       delivery={agent.integration?.members?.length ? {
         members: agent.integration.members,
-        confirmed: agent.integration.confirmed,
-        direct: Boolean(agent.directCandidates?.length),
-        taskChecks: agent.directTask ? agent.integration.validationEvidence?.summary ?? "" : undefined,
+        taskChecks: agent.integration.validationEvidence?.summary,
       } : undefined}
       modelLabel={modelLabel}
-      usageLabel={[usage, teamTokens].filter(Boolean).join(" · ")}
+      usageLabel={usage}
       draft={drafts[agent.id] ?? ""}
-      composerHeight={composerSizes[kind]}
+      composerHeight={composerSizes.agent}
       onComposerHeightChange={(height) => {
-        const next = { ...composerSizesRef.current, [kind]: height };
+        const next = { ...composerSizesRef.current, agent: height };
         composerSizesRef.current = next;
         preferences.writeComposers(next);
         setComposerSizes(next);
@@ -677,8 +609,6 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
       onSend={(value) => submit("send", value)}
       onSteer={(value) => submit("steer", value)}
       onCancel={() => send({ type: "cancel", agentId: agent.id })}
-      onApproval={(approvalId, decision) => send({ type: "approval", agentId: agent.id, approvalId, decision })}
-      onApproveImplementation={(agentId, proposalId) => send({ type: "approveImplementation", agentId, proposalId })}
       onResumeQueue={() => send({ type: "resumeQueue", agentId: agent.id })}
       onAnswerProductQuestion={agent.directTask
         ? (questionId, text) => send({ type: "answerProductQuestion", agentId: agent.id, questionId, text })
@@ -708,9 +638,6 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
           </div>}
         </div>
         <div className={`sw-provider sw-provider--${connected ? provider.state : "connecting"}`} role="status"><span aria-hidden="true" />{connected ? providerLabel(provider) : "Reconnecting"}</div>
-        {projectAgent && <button type="button" className="sw-coordinator-link" onClick={() => select(projectAgent.id)}>
-          {mode === "claude" ? "Claude chat" : "Coordinator chat"}
-        </button>}
         {snapshot.usage && <WorkspaceUsage usage={snapshot.usage} />}
       </header>
       <main ref={bodyRef} className={`sw-body ${leftOpen ? "is-project-open" : ""} ${selected ? "is-agent-open" : ""} ${resizing ? "is-resizing" : ""}`}
@@ -727,8 +654,6 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
           {(blocked || storageUnavailable) && <div className="sw-banner" role="status">{blocked ? blockedReason : "Browser storage is unavailable. Drafts and layout changes may not survive reload."}</div>}
           <WorkspaceCanvas agents={canvasAgents} signals={signals} selectedId={selectedId} onSelect={select} onStatus={handleStatus}
             onCreateTask={mode === "codex" && !blocked ? openNewTask : undefined}
-            emptyMessage={mode === "claude" ? "Open Claude chat to message Claude Code."
-              : mode === "codex" ? "Select + to start a session." : undefined}
             initialCamera={savedCamera} onCameraChange={preferences.writeCamera} />
           {archiveOpen && <section className="sw-archive-list" aria-label="Archived agents" onKeyDown={(event) => {
             if (event.key === "Escape") { event.stopPropagation(); setArchiveOpen(false); archivedToggle.current?.focus(); }
@@ -736,18 +661,11 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
             <header><strong>Archived agents</strong><button type="button" aria-label="Close archived agents" onClick={() => { setArchiveOpen(false); archivedToggle.current?.focus(); }}>×</button></header>
             {!archivedAgents.length && <p>No archived agents.</p>}
             {archivedAgents.map((agent) => {
-              const team = snapshot.teams?.find((entry) => entry.id === agent.teamId);
               const parent = agents.find((entry) => entry.id === agent.parentId);
               return <article key={agent.id}>
                 <button type="button" onClick={() => { select(agent.id); setArchiveOpen(false); }}>{agentAppearance(agent).displayName}</button>
-                <small>Parent: {parent ? agentAppearance(parent).displayName : "Project"}</small>
-                {agent.directCandidates?.length ? <small>Repositories: {agent.directCandidates.map(({ projectId }) => projectId).join(", ")}</small> : null}
-                {team && <>
-                  <small>Team: {team.name}</small>
-                  <label className="sw-archived-team-id">Team ID
-                    <input value={team.id} readOnly onFocus={(event) => event.currentTarget.select()} />
-                  </label>
-                </>}
+                {parent && <small>Parent: {agentAppearance(parent).displayName}</small>}
+                {agent.directTask?.projectIds.length ? <small>Repositories: {agent.directTask.projectIds.join(", ")}</small> : null}
                 <small>Archived {new Date(agent.archivedAt!).toLocaleString()}</small>
                 {!agent.nativeChild && <div><button type="button" disabled={!connected || agent.lifecycleBusy} onClick={() => requestLifecycle("restore", agent.id)}>Restore</button>
                   <button type="button" disabled={!connected || agent.lifecycleBusy} onClick={() => requestLifecycle("delete", agent.id)}>Delete permanently…</button></div>}
@@ -764,7 +682,7 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
         <aside className="sw-dock sw-right" aria-label="Agent chat" inert={!selected} onKeyDown={(event) => {
           if (event.key === "Escape") { event.stopPropagation(); closeAgent(true); }
         }}>
-          <div className="sw-dock-inner">{dockAgent && renderChat(dockAgent, dockAgent.role === "coordinator" ? "project" : "agent")}</div>
+          <div className="sw-dock-inner">{dockAgent && renderChat(dockAgent)}</div>
           {selected && resizeHandle("right")}
         </aside>
       </main>

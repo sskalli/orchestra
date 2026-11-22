@@ -41,6 +41,7 @@ test("a normal task message can answer only an earlier question in its own task 
   };
 
   await start();
+  assert.deepEqual(runtime.snapshot().agents, []);
   const delegatedId = String(await runtime.command({ type: "createTask", name: "Release research", projectIds: [] }));
   const soloId = String(await runtime.command({ type: "createTask", name: "Solo draft", projectIds: [] }));
   const send = (agentId: string, text: string) => runtime.command({ type: "send", agentId, text });
@@ -101,17 +102,18 @@ test("a normal task message can answer only an earlier question in its own task 
   assert.equal(child()?.messages.filter(({ text }) => text.includes("ORBIT-42")).length, 1);
 
   await restart(() => {
-    const saved = store.loadWorkspace();
+    const saved = store.load();
     assert(saved);
-    const oldTask = saved.sessions.find(({ agent }) => agent.id === soloId);
+    const oldTask = saved.find(({ agent }) => agent.id === soloId);
     assert(oldTask);
     oldTask.toolVersion = undefined;
-    store.save(saved.sessions, saved.teams);
+    store.save(saved);
   });
   assert.deepEqual(pendingInputs(), [solo, fresh]);
   await settle(soloId, "Keep the draft unpublished.");
   assert.deepEqual(pendingInputs(), [fresh]);
   const trace = readFileSync(tracePath, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+  assert.equal(trace.filter(({ method }) => method === "thread/start").length, 2);
   const answered = trace.filter(({ method, params }) => method === "turn/start" && params.input?.[0]?.text === answer);
   assert.equal(answered.length, 1);
   assert.equal(answered[0].params.threadId,

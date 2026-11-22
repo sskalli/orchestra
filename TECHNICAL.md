@@ -1,15 +1,17 @@
 # Technical design
 
-This is the target architecture. The implemented browser workspace and current provider limitations are documented in [WORKSPACE.md](WORKSPACE.md), with milestone status in [ROADMAP.md](ROADMAP.md).
+Orchestra runs a local TypeScript server and a React browser UI. The server owns configured repositories, session identities, queues, isolated worktrees, pinned delivery revisions, and persistent task data. Codex App Server executes turns and owns its native child threads.
 
-Use TypeScript. A local Node runtime owns the Codex App Server process, project state, and worktrees. A React client renders the workspace and communicates with the runtime through a local command and event interface. Choose desktop packaging when implementing window close and explicit quit. The runtime should survive closing its window.
+## Sessions
 
-Orchestra owns team goals, agent relationships, squads, project assignments, worktree assignments, and queue state. A launch-configured workspace can contain several Git repositories and a single coordinator. A team can span configured repositories. A lead assigns each coder to one repository, and candidate checks inherit that assignment. The coordinator can assign one coder to several repositories for a cohesive change. That coder gets an isolated worktree per repository and reports a joint check. The coordinator accepts the resulting candidates together. A joint tester receives the pinned paths for the participating repositories. Codex owns execution and conversation threads. Start each visible agent as an addressable session so its chat can receive direct user messages. Give the coordinator and leads app-owned tools for delegation. Validate the tool registration and execution path on the installed App Server before locking in the protocol design. Preserve identities for workspace, project, team, agent, provider thread, and turn separately.
+A direct task maps to one addressable Codex thread. Use read-only access for planning and ordinary follow-ups. An explicit implementation turn supplies isolated writable worktrees for the selected repositories. Native child records track provider thread IDs, parent relationships, activity, replies, and observed usage. Child chats are inspected by ID and the parent coordinates their work.
 
-Separate hierarchy from acceptance authority: reviewer and tester sessions can be children of their target coder while the coordinator or lead that assigned the coder remains the acceptance owner. Bind each result to the coder submission and candidate snapshot assigned when the check starts. Multiple coders use independent worktrees. Combined delivery uses a separate integration candidate with recorded source submissions and an independent integration-test result; it never merges into the project branch automatically. Choose delegation based on separable scope and verification value, not a fixed agent count.
+Product questions bind a pending decision to its task and message. An accepted answer is persisted with the continuation. Interrupted and uncertain provider turns are reconciled without blindly resending input.
 
-Use local Codex App Server with provider-managed ChatGPT sign-in by default, or a separately configured Codex provider selected at launch. Surface usage limits. Route user input, streamed messages, approvals and interrupts through App Server. Use rollout parsing only for a demonstrated gap. See the [App Server protocol](https://learn.chatgpt.com/docs/app-server).
+## Delivery
 
-Persist enough app state to reopen sessions and recover drafts, pending messages, and camera state. Reconcile interrupted or uncertain turn state with the provider on reconnect. Avoid retrying a submission blindly after an ambiguous disconnect. Keep app queue state distinct from provider turn state and task completion.
+An implementation result must record passing checks against the same candidate contents Orchestra pins. Capture each repository separately in a clean detached worktree. The original checkout and its branch stay untouched until the user integrates the result.
 
-Use Codex for the first release. For Claude, validate the local Claude Code integration, subscription sign-in eligibility, streaming, approvals, and direct follow-ups. Design the provider boundary from both implementations once validated.
+## Local state
+
+Persist direct task history and enough queue and thread information to resume after restart. Track model settings and usage separately from workspace state. Browser preferences hold drafts and camera positions. Isolate live workspaces by their repository identity and Codex provider.
