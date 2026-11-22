@@ -2,6 +2,8 @@ import { agentAppearance } from "./workspace-agent-appearance.ts";
 import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { FormEvent, KeyboardEvent, PointerEvent } from "react";
 import Markdown from "react-markdown";
+import type { Components } from "react-markdown";
+import { LuMaximize2, LuMinimize2 } from "react-icons/lu";
 import type { SystemMessageKind, WorkspaceAgent } from "./workspace-runtime.ts";
 
 import "./workspace-chat.css";
@@ -29,6 +31,8 @@ type ChatProps = {
   onAnswerProductQuestion?: (questionId: string, text: string) => Promise<void> | void;
   onResumeQueue?: () => Promise<void>;
   onClose: () => void;
+  expanded?: boolean;
+  onToggleExpanded?: () => void;
   onOpenAgent?: (id: string) => void;
   onLifecycle?: (action: "archive" | "restore" | "delete") => void;
   disabled?: boolean;
@@ -55,9 +59,18 @@ const systemMessageLabels: Record<SystemMessageKind, string> = {
   success: "Success",
 };
 
+const markdownComponents: Components = {
+  a: ({ children, href }) => {
+    if (!href) return children;
+    const external = /^(?:https?:)?\/\//i.test(href);
+    return <a href={href} target={external ? "_blank" : undefined}
+      rel={external ? "noopener noreferrer" : undefined}>{children}</a>;
+  },
+};
+
 function Conversation({
   agent, projectLabel, repositoryScope, delivery, taskPhase, taskDetail, onStartImplementation, modelLabel, usageLabel, draft: initialDraft, composerHeight, onComposerHeightChange, onDraftInput, onDraftChange, onSend, onSteer, onCancel, onResumeQueue, onAnswerProductQuestion, onClose,
-  disabled, disabledReason, focusMessageId, focusRequest, onOpenAgent, onLifecycle,
+  disabled, disabledReason, focusMessageId, focusRequest, onOpenAgent, onLifecycle, expanded, onToggleExpanded,
 }: ChatProps) {
   const transcript = useRef<HTMLDivElement>(null);
   const [hiddenMessages, setHiddenMessages] = useState<Set<string>>(() => new Set());
@@ -371,7 +384,7 @@ function Conversation({
                   {message.state === "cancelled" ? <span className="chat-message-state">Stopped</span> : null}
                 </div>
                 <div className="chat-markdown">
-                  <Markdown skipHtml disallowedElements={["img"]}>{message.text}</Markdown>
+                  <Markdown skipHtml disallowedElements={["img"]} components={markdownComponents}>{message.text}</Markdown>
                   {message.state === "streaming" ? <span className="chat-stream-cursor" aria-label="Responding" /> : null}
                 </div>
                 {productQuestion?.status === "pending" && canAnswer && (
@@ -420,6 +433,13 @@ function Conversation({
             </>}
           </div>
         </details>
+        {onToggleExpanded && (
+          <button className="chat-icon-button" type="button" onClick={onToggleExpanded}
+            aria-label={expanded ? "Restore conversation size" : "Expand conversation"}
+            title={expanded ? "Restore conversation size" : "Expand conversation"}>
+            {expanded ? <LuMinimize2 aria-hidden="true" /> : <LuMaximize2 aria-hidden="true" />}
+          </button>
+        )}
         <button className="chat-icon-button" type="button" onClick={onClose}
           aria-label="Close conversation" title="Close conversation">
           <span aria-hidden="true">×</span>
