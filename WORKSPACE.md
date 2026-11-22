@@ -31,6 +31,15 @@ For a separately configured Codex provider, define it in Codex's configuration a
 - Product questions keep their source message and pending status across restart. Answer in the task chat and the agent can link your reply to the question. Unrelated replies leave it pending. Use **Answer question** to target a question explicitly.
 - A repository-backed task starts read-only. **Start implementation** lets that same session write only in isolated worktrees of its selected repos. **Revise candidate** authorizes another implementation turn after discussion. Orchestra requires passing coder-reported verification for the submitted contents before it pins a delivery revision. Review and merge changes manually.
 
+## UI review scenario
+
+Run `npm run workspace` without arguments to open the simulated scenario. It starts without a Codex connection and uses sample messages and delivery details. The search investigation and its child stay marked as running for layout review. Use **Release notes** or **Weeknight dinner** to try archiving and restoring. Restart the server to reset the tasks, and use a fresh browser profile or port to start with default layout and drafts.
+
+- Open **Release notes** from the inbox to locate the pending question, then inspect the reviewer's read-only transcript on the map.
+- Open **Dashboard empty state** and expand the delivery snapshots to inspect the candidate and checks.
+- Compare **Investigate slow search** and its running child with the completed **Weeknight dinner** task. Type an unsent draft, switch chats, and return to verify the draft is still there.
+- Collapse and expand the inbox, resize both docks, and reload to check that the layout and draft are retained.
+
 ## Recovery and usage
 
 Closing the browser tab leaves the local server running. On restart, Orchestra restores tasks, their native children, and queued messages. Interrupted or uncertain work may require review before resuming. An interrupted implementation cannot publish an unverified candidate. Archive a task from its conversation and restore it through **Archived**. Deleting an archived conversation does not delete its Git worktree.
