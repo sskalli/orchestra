@@ -556,9 +556,8 @@ function Conversation({
           </div>
         </details>
         <button className="chat-icon-button" type="button" onClick={onClose}
-          aria-label={kind === "project" ? "Collapse project chat" : "Close agent chat"}
-          title={kind === "project" ? "Collapse project chat" : "Close agent chat"}>
-          <span aria-hidden="true">{kind === "project" ? "«" : "×"}</span>
+          aria-label="Close conversation" title="Close conversation">
+          <span aria-hidden="true">×</span>
         </button>
       </header>
       {delivery && <details className="chat-delivery">

@@ -5,6 +5,8 @@ import type { CSSProperties, KeyboardEvent, PointerEvent } from "react";
 import { createRoot } from "react-dom/client";
 import { WorkspaceCanvas } from "./workspace-canvas.tsx";
 import { WorkspaceChat } from "./workspace-chat.tsx";
+import { WorkspaceInbox } from "./workspace-inbox.tsx";
+import type { InboxEvent } from "./workspace-inbox.tsx";
 import { workspacePreferences } from "./workspace-preferences.ts";
 import type { PanelSizes } from "./workspace-preferences.ts";
 import type { AgentSignal, WorkspaceRuntime } from "./workspace-runtime.ts";
@@ -350,6 +352,47 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
     return agents.filter((agent) => !agent.archivedAt && ids.has(agent.id)).flatMap(attention);
   }
 
+  function belongsTo(child: Agent, id: string) {
+    const visited = new Set<string>();
+    let parent = child.parentId;
+    while (parent && !visited.has(parent)) {
+      if (parent === id) return true;
+      visited.add(parent);
+      parent = agents.find((item) => item.id === parent)?.parentId;
+    }
+    return false;
+  }
+
+  const inboxStatus = {
+    idle: ["Idle", "notice"], working: ["Working", "working"], attention: ["Needs attention", "attention"],
+    "awaiting-confirmation": ["Ready for review", "notice"], done: ["Complete", "done"],
+    error: ["Failed", "error"], notice: ["Update available", "notice"],
+  } as const;
+  const activeAgents = agents.filter((agent) => !agent.archivedAt);
+  const activeIds = new Set(activeAgents.map(({ id }) => id));
+  const inboxEvents: InboxEvent[] = activeAgents.filter((agent) => agent.role !== "coordinator" &&
+    (!agent.parentId || agent.parentId === projectAgent?.id || !activeIds.has(agent.parentId))).flatMap((root) => {
+    const agentName = root.name;
+    const actions = activityFor(root.id);
+    if (actions.length) return actions.map(({ agent, messageId, text }) => {
+      const [status, tone] = inboxStatus[agent.status];
+      const source = agent.messages.find(({ id }) => id === messageId);
+      return { id: `${root.id}:${agent.id}:${messageId ?? "status"}`, agentName,
+        status: tone === "error" ? status : "Needs attention", tone: tone === "error" ? tone : "attention",
+        text: source?.text ?? text, agentId: agent.id, messageId };
+    });
+    const [status, tone] = inboxStatus[root.status];
+    const message = root.messages.findLast((entry) => entry.role !== "user" && !entry.state);
+    const source = message?.role === "system" && activeAgents.find((agent) =>
+      agent.id === message.sourceAgentId && belongsTo(agent, root.id));
+    const sourceMessage = source ? source.messages.findLast((entry) =>
+      entry.role !== "user" && !entry.state && entry.text &&
+      (message?.text === entry.text || message?.text.endsWith("\n" + entry.text))) : message;
+    return [{ id: root.id, agentName, status, tone,
+      text: message?.text ?? root.goal ?? "Open the conversation for details.",
+      agentId: source ? source.id : root.id, messageId: sourceMessage?.id }];
+  });
+
   function select(id: string | null, messageId?: string) {
     setSelectedId(id);
     if (id) setDockId(id);
@@ -404,10 +447,10 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
       : message.role !== "user")?.id);
   }
 
-  function toggleProjectChat(open: boolean) {
+  function toggleInbox(open: boolean) {
     setLeftOpen(open);
     requestAnimationFrame(() => {
-      const label = open ? "Collapse project chat" : "Expand project chat";
+      const label = open ? "Collapse inbox" : "Expand inbox";
       document.querySelector<HTMLButtonElement>(`[aria-label="${label}"]`)?.focus();
     });
   }
@@ -555,17 +598,6 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
       : agent.directCandidates?.map(({ projectId }) => projectId));
     const repositoryScope = repositoryIds && (agent.directTask ? repositoryIds.length > 0 : repositoryIds.length > 1) ? repositoryIds : undefined;
 
-    function belongsTo(child: Agent, id: string) {
-      const visited = new Set<string>();
-      let parent = child.parentId;
-      while (parent && !visited.has(parent)) {
-        if (parent === id) return true;
-        visited.add(parent);
-        parent = agents.find((item) => item.id === parent)?.parentId;
-      }
-      return false;
-    }
-
     async function submit(type: "send" | "steer", value: string) {
       const revision = draftRevisions.current[agent.id] ?? 0;
       await send({ type, agentId: agent.id, text: value });
@@ -588,7 +620,12 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
 
     return <WorkspaceChat
       key={agent.id}
-      agent={{ ...agent, messages: agent.messages.map((entry) => {
+      agent={{ ...agent, messages: agent.messages.filter((entry) => {
+        if (entry.role !== "system" || !entry.sourceAgentId || entry.sourceAgentId === agent.id ||
+            entry.kind === "action" || entry.productQuestion || entry.approval || entry.implementationProposalId) return true;
+        const source = agents.find((item) => item.id === entry.sourceAgentId);
+        return kind !== "project" && (!source || !belongsTo(source, agent.id));
+      }).map((entry) => {
         const source = agents.find((item) => item.id === entry.sourceAgentId);
         const proposalOwner = kind === "project" ? source : agent;
         const currentProposal = proposalOwner?.implementationProposal;
@@ -646,11 +683,11 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
       onAnswerProductQuestion={agent.directTask
         ? (questionId, text) => send({ type: "answerProductQuestion", agentId: agent.id, questionId, text })
         : undefined}
-      onClose={() => kind === "project" ? toggleProjectChat(false) : closeAgent(true)}
+      onClose={() => closeAgent(true)}
       disabled={blocked || Boolean(agent.unavailableReason) || Boolean(agent.archivedAt) || Boolean(agent.lifecycleBusy)}
       disabledReason={agent.unavailableReason ?? (blocked && !(connected && provider.state === "usage-limit") ? blockedReason : undefined)}
-      focusMessageId={kind === "agent" ? focus.id : undefined}
-      focusRequest={kind === "agent" ? focus.count : undefined}
+      focusMessageId={focus.id}
+      focusRequest={focus.count}
     />;
   }
 
@@ -671,15 +708,18 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
           </div>}
         </div>
         <div className={`sw-provider sw-provider--${connected ? provider.state : "connecting"}`} role="status"><span aria-hidden="true" />{connected ? providerLabel(provider) : "Reconnecting"}</div>
+        {projectAgent && <button type="button" className="sw-coordinator-link" onClick={() => select(projectAgent.id)}>
+          {mode === "claude" ? "Claude chat" : "Coordinator chat"}
+        </button>}
         {snapshot.usage && <WorkspaceUsage usage={snapshot.usage} />}
       </header>
       <main ref={bodyRef} className={`sw-body ${leftOpen ? "is-project-open" : ""} ${selected ? "is-agent-open" : ""} ${resizing ? "is-resizing" : ""}`}
         style={{ "--left-size": panelSizes.left ? `${panelSizes.left}px` : undefined,
           "--right-size": panelSizes.right ? `${panelSizes.right}px` : undefined,
           "--mobile-left-size": panelSizes.mobileLeft ? `${panelSizes.mobileLeft}px` : undefined } as CSSProperties}>
-        <aside className="sw-dock sw-left" aria-label="Project dock">
-          <div className="sw-dock-inner" inert={!leftOpen}>{projectAgent && renderChat(projectAgent, "project")}</div>
-          {!leftOpen && <button type="button" className="sw-rail-button" aria-label="Expand project chat" title="Expand project chat" onClick={() => toggleProjectChat(true)}>»</button>}
+        <aside className="sw-dock sw-left" aria-label="Inbox dock">
+          <div className="sw-dock-inner" inert={!leftOpen}><WorkspaceInbox events={inboxEvents} onOpen={select} onClose={() => toggleInbox(false)} /></div>
+          {!leftOpen && <button type="button" className="sw-rail-button" aria-label="Expand inbox" title="Expand inbox" onClick={() => toggleInbox(true)}>»</button>}
           {leftOpen && resizeHandle("left")}
         </aside>
         <section className="sw-canvas">
@@ -687,7 +727,7 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
           {(blocked || storageUnavailable) && <div className="sw-banner" role="status">{blocked ? blockedReason : "Browser storage is unavailable. Drafts and layout changes may not survive reload."}</div>}
           <WorkspaceCanvas agents={canvasAgents} signals={signals} selectedId={selectedId} onSelect={select} onStatus={handleStatus}
             onCreateTask={mode === "codex" && !blocked ? openNewTask : undefined}
-            emptyMessage={mode === "claude" ? "Use the project chat to message Claude Code."
+            emptyMessage={mode === "claude" ? "Open Claude chat to message Claude Code."
               : mode === "codex" ? "Select + to start a session." : undefined}
             initialCamera={savedCamera} onCameraChange={preferences.writeCamera} />
           {archiveOpen && <section className="sw-archive-list" aria-label="Archived agents" onKeyDown={(event) => {
@@ -724,7 +764,7 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
         <aside className="sw-dock sw-right" aria-label="Agent chat" inert={!selected} onKeyDown={(event) => {
           if (event.key === "Escape") { event.stopPropagation(); closeAgent(true); }
         }}>
-          <div className="sw-dock-inner">{dockAgent && renderChat(dockAgent, "agent")}</div>
+          <div className="sw-dock-inner">{dockAgent && renderChat(dockAgent, dockAgent.role === "coordinator" ? "project" : "agent")}</div>
           {selected && resizeHandle("right")}
         </aside>
       </main>

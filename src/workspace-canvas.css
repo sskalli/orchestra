@@ -28,13 +28,11 @@
 .swarm-canvas-guides {
   position: absolute;
   inset: 0 auto auto 0;
-  width: 0;
-  height: 0;
   transform-origin: 0 0;
 }
 
 /* Keep the map layers below controls and overlays outside the world. */
-.swarm-canvas-world { z-index: 0; }
+.swarm-canvas-world { z-index: 0; width: 0; height: 0; }
 .swarm-canvas-guides { z-index: 0; overflow: visible; pointer-events: none; }
 .swarm-canvas-guides circle { fill: none; stroke: #2a2e32; stroke-width: 1; vector-effect: non-scaling-stroke; }
 .swarm-canvas-guides line { stroke: #b9ae94; stroke-width: 1; stroke-dasharray: 5 5; vector-effect: non-scaling-stroke; }
