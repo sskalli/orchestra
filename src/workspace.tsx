@@ -1,14 +1,14 @@
 import { agentAppearance } from "./workspace-agent-appearance.ts";
 import { effectiveAgentStatus } from "./workspace-status.ts";
 import { useEffect, useRef, useState } from "react";
-import type { CSSProperties, KeyboardEvent, PointerEvent } from "react";
 import { createRoot } from "react-dom/client";
 import { WorkspaceCanvas } from "./workspace-canvas.tsx";
 import { WorkspaceChat } from "./workspace-chat.tsx";
 import { WorkspaceInbox } from "./workspace-inbox.tsx";
 import type { InboxEvent } from "./workspace-inbox.tsx";
 import { workspacePreferences } from "./workspace-preferences.ts";
-import type { PanelSizes } from "./workspace-preferences.ts";
+import { useDockResizing } from "./use-dock-resizing.tsx";
+import { NewTaskDialog, TaskLifecycleDialog } from "./workspace-task-dialogs.tsx";
 import type { AgentSignal, WorkspaceRuntime } from "./workspace-runtime.ts";
 import "./workspace.css";
 
@@ -157,18 +157,9 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
   const [preferences] = useState(() => workspacePreferences(snapshot.workspaceKey, mode, snapshot.modelProvider));
   const [saved] = useState(preferences.readView);
   const [savedCamera] = useState(preferences.readCamera);
-  const [panelSizes, setPanelSizes] = useState(preferences.readPanels);
+  const { bodyRef, resizing, style: dockStyle, resizeHandle } = useDockResizing(preferences);
   const [composerSizes, setComposerSizes] = useState(preferences.readComposers);
   const composerSizesRef = useRef(composerSizes);
-  const panelSizesRef = useRef(panelSizes);
-  const [mobile, setMobile] = useState(() => window.matchMedia("(max-width: 650px)").matches);
-  const [resizing, setResizing] = useState(false);
-  const bodyRef = useRef<HTMLElement>(null);
-  const resizeRef = useRef<{ pointerId: number; start: number; size: number; side: "left" | "right"; vertical: boolean } | null>(null);
-  const [panelMetrics, setPanelMetrics] = useState({ width: 0, height: 0, left: 0, right: 0, leftHeight: 0 });
-  const panelMetricsRef = useRef(panelMetrics);
-  const resizeFrame = useRef<number | null>(null);
-  const pendingResize = useRef<{ key: keyof PanelSizes; value: number; handle: HTMLDivElement } | null>(null);
   const [leftOpen, setLeftOpen] = useState(saved.leftOpen);
   const [selectedId, setSelectedId] = useState(saved.selectedId);
   const [dockId, setDockId] = useState(saved.selectedId);
@@ -180,16 +171,8 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
   const [projectDetails, setProjectDetails] = useState(false);
   const [archiveOpen, setArchiveOpen] = useState(false);
   const [newTaskOpen, setNewTaskOpen] = useState(false);
-  const [newTaskPending, setNewTaskPending] = useState(false);
-  const [newTaskError, setNewTaskError] = useState("");
-  const [taskProjectIds, setTaskProjectIds] = useState<string[]>([]);
-  const [taskName, setTaskName] = useState("");
   const [newTaskId, setNewTaskId] = useState<string>();
-  const newTaskDialog = useRef<HTMLDialogElement>(null);
   const [lifecycle, setLifecycle] = useState<{ action: "archive" | "restore" | "delete"; agentId: string }>();
-  const [lifecycleError, setLifecycleError] = useState("");
-  const [lifecyclePending, setLifecyclePending] = useState(false);
-  const lifecycleDialog = useRef<HTMLDialogElement>(null);
   const archivedToggle = useRef<HTMLButtonElement>(null);
 
   useEffect(() => {
@@ -234,16 +217,6 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
   }, []);
 
   useEffect(() => {
-    if (lifecycle) lifecycleDialog.current?.showModal();
-    else lifecycleDialog.current?.close();
-  }, [lifecycle]);
-
-  useEffect(() => {
-    if (newTaskOpen) newTaskDialog.current?.showModal();
-    else newTaskDialog.current?.close();
-  }, [newTaskOpen]);
-
-  useEffect(() => {
     if (!newTaskId || !snapshot.agents.some((agent) => agent.id === newTaskId)) return;
     setSelectedId(newTaskId);
     setDockId(newTaskId);
@@ -259,57 +232,6 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
       setDockId(null);
     }
   }, [snapshot.agents, selectedId]);
-
-  useEffect(() => {
-    const media = window.matchMedia("(max-width: 650px)");
-    const update = () => {
-      flushResize();
-      if (resizeRef.current) setPanelSizes(panelSizesRef.current);
-      resizeRef.current = null;
-      setResizing(false);
-      setMobile(media.matches);
-    };
-    media.addEventListener("change", update);
-    return () => media.removeEventListener("change", update);
-  }, []);
-
-  useEffect(() => {
-    const timer = setTimeout(() => preferences.writePanels(panelSizes), 200);
-    return () => clearTimeout(timer);
-  }, [panelSizes, preferences]);
-
-  useEffect(() => {
-    const persist = () => preferences.writePanels(panelSizesRef.current);
-    window.addEventListener("pagehide", persist);
-    return () => {
-      window.removeEventListener("pagehide", persist);
-      if (resizeFrame.current !== null) cancelAnimationFrame(resizeFrame.current);
-      persist();
-    };
-  }, [preferences]);
-
-  useEffect(() => {
-    const body = bodyRef.current;
-    const left = body?.querySelector<HTMLElement>(".sw-left");
-    const right = body?.querySelector<HTMLElement>(".sw-right");
-    if (!body || !left || !right) return;
-    const measure = () => {
-      const bounds = body.getBoundingClientRect();
-      const leftBounds = left.getBoundingClientRect();
-      const rightBounds = right.getBoundingClientRect();
-      const next = { width: bounds.width, height: bounds.height, left: leftBounds.width, right: rightBounds.width, leftHeight: leftBounds.height };
-      panelMetricsRef.current = next;
-      if (resizeRef.current) return;
-      setPanelMetrics((current) => Object.keys(next).every((key) =>
-        current[key as keyof typeof current] === next[key as keyof typeof next]) ? current : next);
-    };
-    const observer = new ResizeObserver(measure);
-    observer.observe(body);
-    observer.observe(left);
-    observer.observe(right);
-    measure();
-    return () => observer.disconnect();
-  }, []);
 
   useEffect(() => {
     preferences.writeView({ leftOpen, selectedId, drafts: draftsRef.current });
@@ -370,28 +292,11 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
     setFocus((previous) => ({ id: messageId, count: previous.count + 1 }));
   }
 
-  function openNewTask() {
-    setTaskName("");
-    setTaskProjectIds([]);
-    setNewTaskError("");
-    setNewTaskOpen(true);
-  }
-
-  async function createTask() {
-    if (newTaskPending || blocked) return;
-    setNewTaskPending(true);
-    setNewTaskError("");
-    try {
-      const response = await sendRequest({ type: "createTask", name: taskName.trim() || "New session", projectIds: taskProjectIds });
-      const result = await response.json();
-      if (typeof result.agentId !== "string") throw new Error("Orchestra did not return the new session ID.");
-      setNewTaskId(result.agentId);
-      setNewTaskOpen(false);
-    } catch (error) {
-      setNewTaskError(error instanceof Error ? error.message : "The session could not be created.");
-    } finally {
-      setNewTaskPending(false);
-    }
+  async function createTask(name: string, projectIds: string[]) {
+    const response = await sendRequest({ type: "createTask", name, projectIds });
+    const result = await response.json();
+    if (typeof result.agentId !== "string") throw new Error("Orchestra did not return the new session ID.");
+    setNewTaskId(result.agentId);
   }
 
   function closeAgent(restoreFocus: boolean) {
@@ -422,87 +327,6 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
     });
   }
 
-  function panelBounds(side: "left" | "right") {
-    const vertical = mobile && side === "left";
-    const metrics = panelMetricsRef.current;
-    const length = vertical ? metrics.height : metrics.width;
-    const current = vertical ? metrics.leftHeight : metrics[side];
-    const minimum = vertical ? 160 : side === "left" ? 200 : 230;
-    const maximum = Math.max(0, vertical ? length - 130 : mobile ? length - 48 : length * 0.44);
-    return { min: Math.min(minimum, maximum), max: maximum, current };
-  }
-
-  function resizePanel(side: "left" | "right", value: number) {
-    const { min, max } = panelBounds(side);
-    const key: keyof PanelSizes = mobile && side === "left" ? "mobileLeft" : side;
-    const next = { ...panelSizesRef.current, [key]: Math.round(Math.max(min, Math.min(max, value))) };
-    panelSizesRef.current = next;
-    setPanelSizes(next);
-  }
-
-  function flushResize() {
-    if (resizeFrame.current !== null) cancelAnimationFrame(resizeFrame.current);
-    resizeFrame.current = null;
-    const pending = pendingResize.current;
-    if (!pending) return;
-    const property = pending.key === "mobileLeft" ? "--mobile-left-size" : `--${pending.key}-size`;
-    bodyRef.current?.style.setProperty(property, `${pending.value}px`);
-    pending.handle.setAttribute("aria-valuenow", String(pending.value));
-    pendingResize.current = null;
-  }
-
-  function resizeHandle(side: "left" | "right") {
-    const vertical = mobile && side === "left";
-    const { min, max, current } = panelBounds(side);
-    const start = (event: PointerEvent<HTMLDivElement>) => {
-      if (event.button !== 0) return;
-      event.preventDefault();
-      event.currentTarget.focus();
-      const size = panelBounds(side).current;
-      event.currentTarget.setPointerCapture(event.pointerId);
-      resizeRef.current = { pointerId: event.pointerId, start: vertical ? event.clientY : event.clientX, size, side, vertical };
-      setResizing(true);
-    };
-    const move = (event: PointerEvent<HTMLDivElement>) => {
-      const drag = resizeRef.current;
-      if (!drag || drag.pointerId !== event.pointerId) return;
-      const distance = (drag.vertical ? event.clientY : event.clientX) - drag.start;
-      const { min, max } = panelBounds(drag.side);
-      const value = Math.round(Math.max(min, Math.min(max,
-        drag.size + (drag.side === "right" || drag.vertical ? -distance : distance))));
-      const key: keyof PanelSizes = drag.vertical ? "mobileLeft" : drag.side;
-      panelSizesRef.current = { ...panelSizesRef.current, [key]: value };
-      pendingResize.current = { key, value, handle: event.currentTarget };
-      if (resizeFrame.current === null) resizeFrame.current = requestAnimationFrame(flushResize);
-    };
-    const end = (event: PointerEvent<HTMLDivElement>) => {
-      if (resizeRef.current?.pointerId !== event.pointerId) return;
-      flushResize();
-      resizeRef.current = null;
-      setPanelSizes(panelSizesRef.current);
-      setPanelMetrics(panelMetricsRef.current);
-      setResizing(false);
-    };
-    const keyboard = (event: KeyboardEvent<HTMLDivElement>) => {
-      const increment = event.shiftKey ? 50 : 10;
-      const direction = vertical ? (event.key === "ArrowUp" ? 1 : event.key === "ArrowDown" ? -1 : 0)
-        : (event.key === "ArrowRight" ? 1 : event.key === "ArrowLeft" ? -1 : 0) * (side === "right" ? -1 : 1);
-      if (event.key === "Home" || event.key === "End" || direction) {
-        event.preventDefault();
-        if (resizeRef.current) return;
-        const bounds = panelBounds(side);
-        const key: keyof PanelSizes = vertical ? "mobileLeft" : side;
-        const size = Math.max(bounds.min, Math.min(bounds.max, panelSizesRef.current[key] ?? bounds.current));
-        resizePanel(side, event.key === "Home" ? bounds.min : event.key === "End" ? bounds.max : size + direction * increment);
-      }
-    };
-    return <div className={`sw-resize sw-resize--${side}`} role="separator" tabIndex={0}
-      aria-label={`Resize ${side === "left" ? "project" : "agent"} chat`} aria-orientation={vertical ? "horizontal" : "vertical"}
-      aria-valuemin={max ? Math.round(min) : undefined} aria-valuemax={max ? Math.round(max) : undefined}
-      aria-valuenow={max ? Math.round(Math.max(min, Math.min(max, current))) : undefined}
-      onPointerDown={start} onPointerMove={move} onPointerUp={end} onPointerCancel={end} onLostPointerCapture={end} onKeyDown={keyboard} />;
-  }
-
   const canvasAgents = agents.filter((agent) => !agent.archivedAt).map((agent) => ({
     ...agent,
     projectLabel: snapshot.projects.length > 1
@@ -522,7 +346,6 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
   }
 
   function requestLifecycle(action: "archive" | "restore" | "delete", agentId: string) {
-    setLifecycleError("");
     setLifecycle({ action, agentId });
   }
 
@@ -531,25 +354,18 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
   const hasRunning = affected.some((agent) => agent.status === "working" || agent.status === "attention" || agent.lifecycleBusy);
 
   async function applyLifecycle() {
-    if (!lifecycle || lifecyclePending) return;
-    setLifecyclePending(true);
-    setLifecycleError("");
-    try {
-      await send(lifecycle.action === "archive"
-        ? { type: "archive", agentId: lifecycle.agentId, stopRunning: hasRunning }
-        : { type: lifecycle.action, agentId: lifecycle.agentId });
-      setLifecycle(undefined);
-      if (lifecycle.action === "delete") requestAnimationFrame(() => archivedToggle.current?.focus());
-      if (lifecycle.action === "delete") {
-        const ids = new Set(affected.map((agent) => agent.id));
-        draftsRef.current = Object.fromEntries(Object.entries(draftsRef.current).filter(([id]) => !ids.has(id)));
-        setDrafts(draftsRef.current);
-        if (selectedId && ids.has(selectedId)) select(null);
-      }
-    } catch (error) {
-      setLifecycleError(error instanceof Error ? error.message : "The action could not be completed.");
-    } finally {
-      setLifecyclePending(false);
+    if (!lifecycle) return;
+    const { action, agentId } = lifecycle;
+    await send(action === "archive"
+      ? { type: "archive", agentId, stopRunning: hasRunning }
+      : { type: action, agentId });
+
+    if (action === "delete") {
+      const ids = new Set(affected.map((agent) => agent.id));
+      draftsRef.current = Object.fromEntries(Object.entries(draftsRef.current).filter(([id]) => !ids.has(id)));
+      setDrafts(draftsRef.current);
+      if (selectedId && ids.has(selectedId)) select(null);
+      requestAnimationFrame(() => archivedToggle.current?.focus());
     }
   }
 
@@ -641,9 +457,7 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
         {snapshot.usage && <WorkspaceUsage usage={snapshot.usage} />}
       </header>
       <main ref={bodyRef} className={`sw-body ${leftOpen ? "is-project-open" : ""} ${selected ? "is-agent-open" : ""} ${resizing ? "is-resizing" : ""}`}
-        style={{ "--left-size": panelSizes.left ? `${panelSizes.left}px` : undefined,
-          "--right-size": panelSizes.right ? `${panelSizes.right}px` : undefined,
-          "--mobile-left-size": panelSizes.mobileLeft ? `${panelSizes.mobileLeft}px` : undefined } as CSSProperties}>
+        style={dockStyle}>
         <aside className="sw-dock sw-left" aria-label="Inbox dock">
           <div className="sw-dock-inner" inert={!leftOpen}><WorkspaceInbox events={inboxEvents} onOpen={select} onClose={() => toggleInbox(false)} /></div>
           {!leftOpen && <button type="button" className="sw-rail-button" aria-label="Expand inbox" title="Expand inbox" onClick={() => toggleInbox(true)}>»</button>}
@@ -653,7 +467,7 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
           <button ref={archivedToggle} className="sw-archived-toggle" type="button" aria-expanded={archiveOpen} onClick={() => setArchiveOpen(!archiveOpen)}>Archived ({archivedAgents.length})</button>
           {(blocked || storageUnavailable) && <div className="sw-banner" role="status">{blocked ? blockedReason : "Browser storage is unavailable. Drafts and layout changes may not survive reload."}</div>}
           <WorkspaceCanvas agents={canvasAgents} signals={signals} selectedId={selectedId} onSelect={select} onStatus={handleStatus}
-            onCreateTask={mode === "codex" && !blocked ? openNewTask : undefined}
+            onCreateTask={mode === "codex" && !blocked ? () => setNewTaskOpen(true) : undefined}
             initialCamera={savedCamera} onCameraChange={preferences.writeCamera} />
           {archiveOpen && <section className="sw-archive-list" aria-label="Archived agents" onKeyDown={(event) => {
             if (event.key === "Escape") { event.stopPropagation(); setArchiveOpen(false); archivedToggle.current?.focus(); }
@@ -686,47 +500,12 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
           {selected && resizeHandle("right")}
         </aside>
       </main>
-      <dialog ref={newTaskDialog} className="sw-lifecycle-dialog sw-new-task" aria-labelledby="new-task-heading" onCancel={(event) => {
-        if (newTaskPending) event.preventDefault();
-        else setNewTaskOpen(false);
-      }}>
-        <h2 id="new-task-heading">New session</h2>
-        <form onSubmit={(event) => { event.preventDefault(); void createTask(); }}>
-          <label className="sw-new-task-name">Name <input value={taskName} onChange={(event) => setTaskName(event.target.value)}
-            placeholder="New session" maxLength={60} disabled={newTaskPending} autoFocus /></label>
-          <fieldset disabled={newTaskPending}>
-            <legend>Repositories</legend>
-            <p>Select the repositories this session may work in. Leave them unchecked for a general chat.</p>
-            {snapshot.projects.map(({ id }) => <label key={id}>
-              <input type="checkbox" checked={taskProjectIds.includes(id)} onChange={(event) => {
-                const checked = event.target.checked;
-                setTaskProjectIds((current) => checked ? [...current, id] : current.filter((selected) => selected !== id));
-              }} />
-              {id}
-            </label>)}
-          </fieldset>
-          {newTaskError && <p role="alert">{newTaskError}</p>}
-          <footer>
-            <button type="button" disabled={newTaskPending} onClick={() => setNewTaskOpen(false)}>Cancel</button>
-            <button type="submit" disabled={newTaskPending || blocked}>{newTaskPending ? "Starting…" : "Start session"}</button>
-          </footer>
-        </form>
-      </dialog>
-      <dialog ref={lifecycleDialog} className="sw-lifecycle-dialog" aria-labelledby="lifecycle-heading" onCancel={(event) => {
-        if (lifecyclePending) event.preventDefault(); else setLifecycle(undefined);
-      }}>
-        <h2 id="lifecycle-heading">{lifecycle?.action === "delete" ? "Delete permanently?" : lifecycle?.action === "restore" ? "Restore agents?" : hasRunning ? "Stop and archive?" : "Archive agents?"}</h2>
-        <p>{lifecycleAgent && agentAppearance(lifecycleAgent).displayName}</p>
-        <p>{affected.length} agent{affected.length === 1 ? "" : "s"} in the selected subtree, including all descendants.</p>
-        {lifecycle?.action === "delete" ? <p>Their Orchestra records, conversations, and reports will be permanently removed. Project files, branches, and worktrees stay on disk.</p>
-          : lifecycle?.action === "restore" ? <p>Return this subtree to the active map. Any archived ancestors it needs will also be restored. Queued work stays paused.</p>
-          : <p>{hasRunning ? "Running work must stop before these agents are hidden. " : ""}Conversations and reports remain available in Archived.</p>}
-        {lifecycleError && <p role="alert">{lifecycleError}</p>}
-        <footer><button type="button" autoFocus disabled={lifecyclePending} onClick={() => setLifecycle(undefined)}>Cancel</button>
-          <button type="button" disabled={!connected || lifecyclePending || !lifecycleAgent} onClick={() => void applyLifecycle()}>
-            {lifecyclePending ? "Please wait…" : lifecycle?.action === "delete" ? "Delete permanently" : lifecycle?.action === "restore" ? "Restore" : hasRunning ? "Stop and archive" : "Archive"}
-          </button></footer>
-      </dialog>
+      <NewTaskDialog open={newTaskOpen} blocked={blocked} projects={snapshot.projects}
+        onDismiss={() => setNewTaskOpen(false)} onCreate={createTask} />
+      <TaskLifecycleDialog action={lifecycle?.action}
+        agentName={lifecycleAgent && agentAppearance(lifecycleAgent).displayName}
+        affectedCount={affected.length} hasRunning={hasRunning} connected={connected}
+        onDismiss={() => setLifecycle(undefined)} onConfirm={applyLifecycle} />
     </div>
   );
 }
