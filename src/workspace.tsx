@@ -141,7 +141,7 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
   const [preferences] = useState(() => workspacePreferences(snapshot.workspaceKey, mode, snapshot.modelProvider));
   const [saved] = useState(preferences.readView);
   const [savedCamera] = useState(preferences.readCamera);
-  const { bodyRef, resizing, style: dockStyle, resizeHandle } = useDockResizing(preferences);
+  const { bodyRef, resizing, style: dockStyle, resizeHandle, chatExpanded, toggleChatWidth } = useDockResizing(preferences);
   const [composerSizes, setComposerSizes] = useState(preferences.readComposers);
   const composerSizesRef = useRef(composerSizes);
   const [leftOpen, setLeftOpen] = useState(saved.leftOpen);
@@ -155,7 +155,6 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
   const [projectDetails, setProjectDetails] = useState(false);
   const [archiveOpen, setArchiveOpen] = useState(false);
   const [newTaskOpen, setNewTaskOpen] = useState(false);
-  const [chatExpanded, setChatExpanded] = useState(false);
   const [newTaskId, setNewTaskId] = useState<string>();
   const [lifecycle, setLifecycle] = useState<{ action: "archive" | "restore" | "delete"; agentId: string }>();
   const archivedToggle = useRef<HTMLButtonElement>(null);
@@ -221,9 +220,8 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
     if (selectedId && !snapshot.agents.some((agent) => agent.id === selectedId)) {
       setSelectedId(null);
       setDockId(null);
-      if (!newTaskOpen) setChatExpanded(false);
     }
-  }, [snapshot.agents, selectedId, newTaskOpen]);
+  }, [snapshot.agents, selectedId]);
 
   useEffect(() => {
     preferences.writeView({ leftOpen, selectedId, drafts: draftsRef.current });
@@ -279,7 +277,6 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
 
   function select(id: string | null, messageId?: string) {
     setNewTaskOpen(false);
-    if (!id) setChatExpanded(false);
     setSelectedId(id);
     if (id) setDockId(id);
     setChooser(undefined);
@@ -288,7 +285,6 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
 
   function dismissNewTask() {
     setNewTaskOpen(false);
-    if (!selected) setChatExpanded(false);
     requestAnimationFrame(() => document.querySelector<HTMLButtonElement>('button[aria-label="New session"]')?.focus());
   }
 
@@ -423,7 +419,7 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
         ? (questionId, text) => send({ type: "answerProductQuestion", agentId: agent.id, questionId, text })
         : undefined}
       expanded={chatExpanded}
-      onToggleExpanded={() => setChatExpanded((current) => !current)}
+      onToggleExpanded={toggleChatWidth}
       onClose={() => closeAgent(true)}
       disabled={blocked || Boolean(agent.unavailableReason) || Boolean(agent.archivedAt) || Boolean(agent.lifecycleBusy)}
       disabledReason={agent.unavailableReason ?? (blocked && !(connected && provider.state === "usage-limit") ? blockedReason : undefined)}
@@ -451,7 +447,7 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
         <div className={`sw-provider sw-provider--${connected ? provider.state : "connecting"}`} role="status"><span aria-hidden="true" />{connected ? providerLabel(provider) : "Reconnecting"}</div>
         {snapshot.usage && <WorkspaceUsage usage={snapshot.usage} />}
       </header>
-      <main ref={bodyRef} className={`sw-body ${leftOpen ? "is-project-open" : ""} ${selected || newTaskOpen ? "is-agent-open" : ""} ${chatExpanded && (selected || newTaskOpen) ? "is-chat-expanded" : ""} ${resizing ? "is-resizing" : ""}`}
+      <main ref={bodyRef} className={`sw-body ${leftOpen ? "is-project-open" : ""} ${selected || newTaskOpen ? "is-agent-open" : ""} ${resizing ? "is-resizing" : ""}`}
         style={dockStyle}>
         <aside className="sw-dock sw-left" aria-label="Inbox dock">
           <div className="sw-dock-inner" inert={!leftOpen}><WorkspaceInbox events={inboxEvents} onOpen={select} onClose={() => toggleInbox(false)} /></div>
@@ -492,18 +488,18 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
           inert={!selected && !newTaskOpen} onKeyDown={(event) => {
             if (event.key !== "Escape") return;
             event.stopPropagation();
-            if (chatExpanded) setChatExpanded(false);
+            if (chatExpanded) toggleChatWidth();
             else if (!newTaskOpen) closeAgent(true);
           }}>
           <div className="sw-dock-inner">
             <div className="sw-conversation" hidden={newTaskOpen}>{dockAgent && renderChat(dockAgent)}</div>
             <NewSessionComposer open={newTaskOpen} blocked={blocked} projects={snapshot.projects}
-              expanded={chatExpanded} onToggleExpanded={() => setChatExpanded((current) => !current)}
+              expanded={chatExpanded} onToggleExpanded={toggleChatWidth}
               onCancel={dismissNewTask} onCreate={createTask}
               onSend={(agentId, text) => send({ type: "send", agentId, text })}
               onStarted={setNewTaskId} />
           </div>
-          {(selected || newTaskOpen) && !chatExpanded && resizeHandle("right")}
+          {(selected || newTaskOpen) && resizeHandle("right")}
         </aside>
       </main>
       <TaskLifecycleDialog action={lifecycle?.action}

@@ -20,7 +20,7 @@
 
 .new-session-field :is(textarea, input) {
   width: 100%;
-  background: #10141c;
+  background: var(--sw-inset);
   color: inherit;
   font: inherit;
   padding: 10px;
@@ -38,9 +38,9 @@
   padding: 6px 12px;
   border: 1px solid var(--sw-line);
   border-radius: 8px;
-  background: #202631;
+  background: var(--sw-surface);
   cursor: pointer;
 }
 
-.new-session footer button[type="submit"] { background: #26374b; border-color: #48627f; }
+.new-session footer button[type="submit"] { background: var(--sw-control-hover); border-color: #65605a; }
 .new-session button:disabled { opacity: .55; cursor: default; }

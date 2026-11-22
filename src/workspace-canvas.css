@@ -278,8 +278,8 @@
   gap: 3px;
   padding: 4px;
   border: 1px solid #353535;
-  border-radius: 4px;
-  background: #101214;
+  border-radius: 9px;
+  background: var(--sw-surface);
   color: var(--sw-active);
   cursor: default;
   font-size: 12px;
@@ -287,7 +287,7 @@
 
 .swarm-canvas-controls button {
   border: 0;
-  border-radius: 4px;
+  border-radius: 6px;
   background: transparent;
   color: inherit;
   min-height: 27px;
