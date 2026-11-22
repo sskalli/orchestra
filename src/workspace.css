@@ -189,7 +189,7 @@ button:focus-visible { outline: 2px solid #b8bcb8; outline-offset: 3px; }
 .sw-archive-list button { padding: 4px 6px; min-height: 24px; font-size: 11px; overflow-wrap: anywhere; }
 
 /* Ordinary controls share the quiet map-control hover treatment. */
-.sw-app button:not(.swarm-node-target):not(.swarm-node-status):not(:disabled):hover,
+.sw-app button:not(.swarm-node-target):not(:disabled):hover,
 .sw-app .chat-lifecycle-menu > summary:hover {
   background: var(--sw-control-hover);
   color: #fff;
