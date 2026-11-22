@@ -1,0 +1,57 @@
+.workspace-inbox-feed {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+
+.workspace-inbox-events {
+  padding: 0 16px 0 21px;
+  margin: 0;
+  list-style: none;
+}
+
+.workspace-inbox-event {
+  padding: 12px 0;
+  border-bottom: 1px solid var(--sw-line);
+  overflow-wrap: anywhere;
+}
+
+.workspace-inbox-heading {
+  font-size: .74rem;
+  line-height: 1.5;
+}
+
+.workspace-inbox-status { font-weight: 700; }
+.workspace-inbox-status.is-working { color: #c7cbd1; }
+.workspace-inbox-status.is-attention { color: #efcd43; }
+.workspace-inbox-status.is-done { color: #8be384; }
+.workspace-inbox-status.is-error { color: #ff7773; }
+.workspace-inbox-status.is-notice { color: #85b6ff; }
+
+.workspace-inbox-details {
+  margin-top: 5px;
+  color: var(--sw-muted);
+  font-size: .69rem;
+  line-height: 1.6;
+}
+
+.workspace-inbox-details summary { width: fit-content; cursor: pointer; }
+.workspace-inbox-details summary:hover { color: var(--sw-text); }
+.workspace-inbox-details p { margin: 6px 0; white-space: pre-wrap; }
+.workspace-inbox-details button {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--sw-text);
+  text-align: left;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.workspace-inbox-empty {
+  margin: 0;
+  padding: 14px 16px 14px 21px;
+  color: var(--sw-muted);
+  font-size: .74rem;
+}

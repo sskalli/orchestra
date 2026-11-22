@@ -80,6 +80,8 @@ button:focus-visible { outline: 2px solid #b8bcb8; outline-offset: 3px; }
 .sw-provider--ready > span { background: #68ca84; }
 .sw-provider--error > span { background: #ec7474; }
 .sw-provider--usage-limit > span, .sw-provider--signed-out > span { background: #e5bb68; }
+.sw-coordinator-link { flex: none; color: var(--sw-muted); font-size: 11px; }
+.sw-coordinator-link:hover { color: var(--sw-text); }
 .sw-usage-menu { position: relative; flex: none; }
 .sw-usage-menu summary { cursor: pointer; font-size: 11px; padding: 4px; border-radius: 4px; }
 .sw-usage-menu summary:hover { background: var(--sw-control-hover); }
