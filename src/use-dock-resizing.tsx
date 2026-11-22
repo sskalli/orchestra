@@ -82,10 +82,7 @@ export function useDockResizing(preferences: DockPreferences) {
       return { min, max: width * 0.75, current: metrics.right };
     }
 
-    const mapReserve = Math.min(96, metrics.width * 0.08);
-    const maximum = mobile
-      ? metrics.height - 130
-      : Math.min(metrics.width * 0.44, Math.max(43, metrics.width - metrics.right - mapReserve));
+    const maximum = mobile ? metrics.height - 130 : metrics.width * 0.44;
     const max = Math.max(0, maximum);
     return {
       min: Math.min(mobile ? 160 : 200, max),
@@ -181,5 +178,9 @@ export function useDockResizing(preferences: DockPreferences) {
     "--mobile-left-size": panelSizes.mobileLeft ? `${panelSizes.mobileLeft}px` : undefined,
   };
 
-  return { bodyRef, resizing, style, resizeHandle, chatExpanded, toggleChatWidth };
+  function openChatWidth() {
+    if (panelMetricsRef.current.width) resizePanel("right", panelMetricsRef.current.width * 0.65);
+  }
+
+  return { bodyRef, resizing, style, resizeHandle, chatExpanded, toggleChatWidth, openChatWidth };
 }

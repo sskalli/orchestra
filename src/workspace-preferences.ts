@@ -32,7 +32,7 @@ export function workspacePreferences(projectPath: string, mode: "demo" | "codex"
       const value = read("view") as Partial<View> | null;
       const drafts = value?.drafts;
       return {
-        leftOpen: value?.leftOpen !== false,
+        leftOpen: value?.leftOpen === true,
         selectedId: typeof value?.selectedId === "string" ? value.selectedId : null,
         drafts: drafts && typeof drafts === "object" && !Array.isArray(drafts)
           ? Object.fromEntries(Object.entries(drafts).filter(([, draft]) => typeof draft === "string"))

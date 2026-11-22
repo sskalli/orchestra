@@ -1,6 +1,6 @@
 import { agentAppearance } from "./workspace-agent-appearance.ts";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import type { CSSProperties, KeyboardEvent, PointerEvent } from "react";
+import type { CSSProperties, KeyboardEvent, PointerEvent, RefObject } from "react";
 import { LuCircleAlert, LuCircleCheck, LuInfo, LuLoaderCircle, LuTriangleAlert } from "react-icons/lu";
 import type { IconType } from "react-icons";
 import type { Camera } from "./workspace-preferences.ts";
@@ -21,7 +21,7 @@ export type CanvasAgent = {
 
 type Point = { x: number; y: number };
 type Node = Point & { agent: CanvasAgent; taskRoot: boolean };
-type Team = Point & { depth: number };
+type Team = Point & { id: string; depth: number };
 type Layout = { nodes: Node[]; teams: Team[] };
 type TaskDrag = { id: string; pointerId: number; start: Point; center: Point; scale: number; moved: boolean };
 type Gesture = { start: Point; previous: Point; dragged: boolean };
@@ -72,7 +72,7 @@ export function radialLayout(agents: CanvasAgent[], taskPositions: ReadonlyMap<s
   const visited = new Set<string>();
   const centers = teamCenters(roots.length);
   roots.forEach((root, index) => {
-    const team = { ...(taskPositions.get(root.id) ?? centers[index]), depth: 0 };
+    const team = { ...(taskPositions.get(root.id) ?? centers[index]), id: root.id, depth: 0 };
     const walk = (agent: CanvasAgent, depth: number, angle: number, sector: number) => {
       if (visited.has(agent.id)) return;
       visited.add(agent.id);
@@ -94,6 +94,16 @@ export function radialLayout(agents: CanvasAgent[], taskPositions: ReadonlyMap<s
     teams.push(team);
   });
   return { nodes, teams };
+}
+
+function visibleMapFrame(rect: DOMRect, chatWindow?: HTMLElement | null) {
+  const chat = chatWindow?.getBoundingClientRect();
+  if (!chat) return { width: rect.width, height: rect.height };
+  const left = chat.left - rect.left;
+  const above = chat.top - rect.top;
+  if (left >= 96) return { width: Math.min(rect.width, left), height: rect.height };
+  if (above >= 96) return { width: rect.width, height: Math.min(rect.height, above) };
+  return { width: rect.width, height: rect.height };
 }
 
 function zoom(camera: Camera, anchor: Point, factor: number): Camera {
@@ -187,6 +197,7 @@ export function WorkspaceCanvas({
   agents,
   signals,
   selectedId,
+  chatWindowRef,
   onSelect,
   onStatus,
   onCreateTask,
@@ -197,6 +208,7 @@ export function WorkspaceCanvas({
   agents: CanvasAgent[];
   signals: AgentSignal[];
   selectedId?: string | null;
+  chatWindowRef?: RefObject<HTMLElement | null>;
   onSelect: (id: string | null) => void;
   onStatus: (id: string) => void;
   onCreateTask?: () => void;
@@ -212,21 +224,39 @@ export function WorkspaceCanvas({
   const nodes = useRef(new Map<string, HTMLButtonElement>());
   const pointers = useRef(new Map<number, Point>());
   const gesture = useRef<Gesture | null>(null);
-  const [camera, setCamera] = useState<Camera>(initialCamera ?? { x: 0, y: 0, scale: 1 });
+  const [camera, renderCamera] = useState<Camera>(initialCamera ?? { x: 0, y: 0, scale: 1 });
+  const cameraRef = useRef(camera);
+  const setCamera = useCallback((value: Camera | ((current: Camera) => Camera)) => {
+    const next = typeof value === "function" ? value(cameraRef.current) : value;
+    cameraRef.current = next;
+    renderCamera(next);
+  }, []);
   const [origin, setOrigin] = useState<Point>({ x: 0, y: 0 });
   const [hovered, setHovered] = useState<string | null>(null);
   const [statusHovered, setStatusHovered] = useState<string | null>(null);
   const [focused, setFocused] = useState<string | null>(null);
   const [dragging, setDragging] = useState(false);
   const firstFit = useRef(Boolean(initialCamera));
+  const overviewCamera = useRef<Camera | null>(null);
+  const manualCamera = useRef(false);
+  const [cameraTransition, setCameraTransition] = useState(false);
+  const positions = useMemo(() => new Map(layout.nodes.map((node) => [node.agent.id, node])), [layout]);
+  let taskRoot = selectedId ? positions.get(selectedId) : undefined;
+  while (taskRoot && !taskRoot.taskRoot) taskRoot = positions.get(taskRoot.agent.parentId ?? "");
+  const taskId = taskRoot?.agent.id;
+  const taskX = taskRoot?.x;
+  const taskY = taskRoot?.y;
+  const taskDepth = layout.teams.find(({ id }) => id === taskId)?.depth;
+  const lastFocusedTask = useRef<string>();
 
   useEffect(() => {
-    if (firstFit.current) onCameraChange?.(camera);
+    if (firstFit.current) onCameraChange?.(overviewCamera.current ?? camera);
   }, [camera, onCameraChange]);
 
-  const fit = useCallback(() => {
+  const fit = useCallback((besideChat = false) => {
     const rect = viewport.current?.getBoundingClientRect();
     if (!rect?.width || !rect.height || layout.teams.length === 0) return false;
+    const { width, height } = visibleMapFrame(rect, besideChat ? chatWindowRef?.current : null);
     const bounds = layout.teams.map((team) => {
       const radius = team.depth > 1 ? radiusAt(team.depth) : radiusAt(2);
       return { left: team.x - radius, right: team.x + Math.max(radius, 240), top: team.y - radius, bottom: team.y + radius };
@@ -235,14 +265,14 @@ export function WorkspaceCanvas({
     const right = Math.max(...bounds.map((bound) => bound.right));
     const top = Math.min(...bounds.map((bound) => bound.top));
     const bottom = Math.max(...bounds.map((bound) => bound.bottom));
-    const scale = Math.max(MIN_SCALE, Math.min(1.05, (rect.width - 60) / (right - left), (rect.height - 92) / (bottom - top)));
+    const scale = Math.max(MIN_SCALE, Math.min(1.05, (width - 60) / (right - left), (height - 92) / (bottom - top)));
     setCamera({
-      x: rect.left + rect.width / 2 - (left + right) * scale / 2,
-      y: rect.top + (rect.height - 38) / 2 - (top + bottom) * scale / 2,
+      x: rect.left + width / 2 - (left + right) * scale / 2,
+      y: rect.top + (height - 38) / 2 - (top + bottom) * scale / 2,
       scale,
     });
     return true;
-  }, [layout]);
+  }, [chatWindowRef, layout, setCamera]);
 
   useLayoutEffect(() => {
     const element = viewport.current;
@@ -267,21 +297,79 @@ export function WorkspaceCanvas({
     };
   }, [fit]);
 
+  useLayoutEffect(() => {
+    const element = viewport.current;
+    if (!element || !chatWindowRef) return;
+    if (!taskId || taskX === undefined || taskY === undefined || taskDepth === undefined) {
+      const previous = overviewCamera.current;
+      if (previous) {
+        overviewCamera.current = null;
+        lastFocusedTask.current = undefined;
+        setCameraTransition(true);
+        setCamera(previous);
+      }
+      return;
+    }
+
+    if (lastFocusedTask.current !== taskId) {
+      lastFocusedTask.current = taskId;
+      manualCamera.current = false;
+    }
+    const chatWindow = chatWindowRef.current;
+    const frame = () => {
+      if (manualCamera.current) return;
+      const rect = element.getBoundingClientRect();
+      if (!rect.width || !rect.height) return;
+      const { width, height } = visibleMapFrame(rect, chatWindow);
+      const radius = taskDepth ? radiusAt(taskDepth) : 36;
+      const scale = Math.max(MIN_SCALE, Math.min(
+        taskDepth ? 1.15 : 1.35,
+        (width - 40) / (radius * 2),
+        (height - Math.min(132, height * 0.3)) / (radius * 2),
+      ));
+      const next = {
+        x: rect.left + width / 2 - taskX * scale,
+        y: rect.top + (height - Math.min(30, height * 0.12)) / 2 - taskY * scale,
+        scale,
+      };
+      setCameraTransition(true);
+      const current = cameraRef.current;
+      overviewCamera.current ??= current;
+      if (current.x !== next.x || current.y !== next.y || current.scale !== next.scale) setCamera(next);
+    };
+
+    frame();
+    const observer = new ResizeObserver(frame);
+    observer.observe(element);
+    if (chatWindow) observer.observe(chatWindow);
+    return () => observer.disconnect();
+  }, [chatWindowRef, setCamera, taskId, taskX, taskY, taskDepth]);
+
+  const takeCameraControl = useCallback(() => {
+    manualCamera.current = true;
+    setCameraTransition(false);
+  }, []);
+
+  function fitAllTasks() {
+    takeCameraControl();
+    fit(Boolean(selectedId));
+  }
+
   useEffect(() => {
     const element = viewport.current;
     if (!element) return;
     const handleWheel = (event: WheelEvent) => {
       event.preventDefault();
       if (taskDrag.current) return;
+      takeCameraControl();
       const units = event.deltaMode === WheelEvent.DOM_DELTA_LINE ? 16 : event.deltaMode === WheelEvent.DOM_DELTA_PAGE ? element.clientHeight : 1;
       const factor = Math.exp(-Math.max(-110, Math.min(110, event.deltaY * units)) * 0.0035);
       setCamera((value) => zoom(value, { x: event.clientX, y: event.clientY }, factor));
     };
     element.addEventListener("wheel", handleWheel, { passive: false });
     return () => element.removeEventListener("wheel", handleWheel);
-  }, []);
+  }, [setCamera, takeCameraControl]);
 
-  const positions = useMemo(() => new Map(layout.nodes.map((node) => [node.agent.id, node])), [layout]);
   const highlighted = new Set([selectedId, hovered, focused]);
   const children = new Map<string, CanvasAgent[]>();
   for (const { agent } of layout.nodes) {
@@ -356,6 +444,7 @@ export function WorkspaceCanvas({
     const dx = event.clientX - drag.start.x;
     const dy = event.clientY - drag.start.y;
     if (!drag.moved && Math.hypot(dx, dy) < DRAG_THRESHOLD) return;
+    takeCameraControl();
     drag.moved = true;
     suppressTaskClick.current = drag.id;
     setTaskPositions((previous) => new Map(previous).set(drag.id, {
@@ -388,6 +477,7 @@ export function WorkspaceCanvas({
     pointers.current.set(event.pointerId, point);
     const next = pair(pointers.current);
     if (prior && next && prior.distance > 0 && next.distance > 0) {
+      takeCameraControl();
       setCamera((value) => {
         const scaled = zoom(value, prior.center, next.distance / prior.distance);
         return { ...scaled, x: scaled.x + next.center.x - prior.center.x, y: scaled.y + next.center.y - prior.center.y };
@@ -395,6 +485,7 @@ export function WorkspaceCanvas({
       return;
     }
     if (!tracking.dragged && Math.hypot(point.x - tracking.start.x, point.y - tracking.start.y) < DRAG_THRESHOLD) return;
+    takeCameraControl();
     tracking.dragged = true;
     setDragging(true);
     const offset = { x: point.x - tracking.previous.x, y: point.y - tracking.previous.y };
@@ -451,8 +542,11 @@ export function WorkspaceCanvas({
   }
 
   function zoomCenter(factor: number) {
+    takeCameraControl();
     const rect = viewport.current?.getBoundingClientRect();
-    if (rect) setCamera((value) => zoom(value, { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 }, factor));
+    if (!rect) return;
+    const { width, height } = visibleMapFrame(rect, selectedId ? chatWindowRef?.current : null);
+    setCamera((value) => zoom(value, { x: rect.left + width / 2, y: rect.top + height / 2 }, factor));
   }
 
   return (
@@ -474,7 +568,7 @@ export function WorkspaceCanvas({
       <Starfield />
       {layout.nodes.length === 0 && <div className="swarm-canvas-empty">{emptyMessage}</div>}
       <div
-        className="swarm-canvas-world"
+        className={`swarm-canvas-world${cameraTransition ? " is-focusing" : ""}`}
         style={{
           transform: `translate(${camera.x - origin.x}px, ${camera.y - origin.y}px) scale(${camera.scale})`,
           "--swarm-overlay-scale": String(1 / camera.scale),
@@ -600,7 +694,7 @@ export function WorkspaceCanvas({
           <button type="button" aria-label="Zoom out" onClick={() => zoomCenter(1 / 1.2)}>−</button>
           <output aria-label="Zoom level">{Math.round(camera.scale * 100)}%</output>
           <button type="button" aria-label="Zoom in" onClick={() => zoomCenter(1.2)}>+</button>
-          <button type="button" className="swarm-fit" onClick={fit}>Fit all tasks</button>
+          <button type="button" className="swarm-fit" onClick={fitAllTasks}>Fit all tasks</button>
         </>}
       </div>}
     </div>

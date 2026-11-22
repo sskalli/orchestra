@@ -330,3 +330,7 @@
 @media (prefers-reduced-motion: reduce) {
   .swarm-message-dot { display: none; }
 }
+
+@media (prefers-reduced-motion: no-preference) {
+  .swarm-canvas-world.is-focusing { transition: transform 220ms ease-out; }
+}

@@ -434,7 +434,7 @@ function Conversation({
           </div>
         </details>
         {onToggleExpanded && (
-          <button className="chat-icon-button" type="button" onClick={onToggleExpanded}
+          <button className="chat-icon-button chat-width-toggle" type="button" onClick={onToggleExpanded}
             aria-label={expanded ? "Restore conversation size" : "Expand conversation"}
             title={expanded ? "Restore conversation size" : "Expand conversation"}>
             {expanded ? <LuMinimize2 aria-hidden="true" /> : <LuMaximize2 aria-hidden="true" />}
