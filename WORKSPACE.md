@@ -58,7 +58,7 @@ Use the map’s **+** control to open a top-level task chat. Choose the reposito
 
 A direct task can delegate to Codex-native children. Orchestra shows each child below its parent on the map and keeps the child's transcript available for inspection. Send feedback and follow-up instructions to the parent task. The parent controls its Codex children.
 
-If a direct task asks a product question, use **Answer question** on that message and reply in the task chat. The question stays pending after a restart, and an accepted answer clears that question while keeping the exchange in the transcript.
+If a direct task asks a product question, answer in the task chat. The agent can link your reply to the question and clear it from pending activity. Unrelated replies leave the question open. Use **Answer question** when you want to target a question explicitly. Pending questions survive restart, and the transcript retains the exchange after resolution.
 
 ### From investigation to implementation
 
