@@ -139,50 +139,6 @@ function MessageDot({ from, to }: { from: Point; to: Point }) {
     style={{ left: 0, top: 0 }} />;
 }
 
-function Starfield() {
-  const layer = useRef<HTMLCanvasElement>(null);
-
-  useEffect(() => {
-    const canvas = layer.current;
-    const context = canvas?.getContext("2d");
-    if (!canvas || !context) return;
-    const draw = () => {
-      const { width, height } = canvas.getBoundingClientRect();
-      const density = Math.min(window.devicePixelRatio || 1, 2);
-      canvas.width = Math.round(width * density);
-      canvas.height = Math.round(height * density);
-      context.setTransform(density, 0, 0, density, 0, 0);
-      context.fillStyle = "#e8e4d8";
-      const spacing = 76;
-      for (let y = 0; y < height; y += spacing) {
-        for (let x = 0; x < width; x += spacing) {
-          let seed = Math.imul(x + 31, 73856093) ^ Math.imul(y + 41, 19349663);
-          const random = () => {
-            seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
-            return seed / 4294967296;
-          };
-          for (let i = 0; i < 4; i++) {
-            const cx = x + random() * spacing;
-            const cy = y + random() * spacing;
-            const size = random();
-            context.globalAlpha = 0.13 + size * size * 0.57;
-            context.beginPath();
-            context.arc(cx, cy, 0.35 + size * 0.82, 0, Math.PI * 2);
-            context.fill();
-          }
-        }
-      }
-      context.globalAlpha = 1;
-    };
-    const observer = new ResizeObserver(draw);
-    observer.observe(canvas);
-    draw();
-    return () => observer.disconnect();
-  }, []);
-
-  return <canvas className="swarm-starfield" ref={layer} aria-hidden="true" />;
-}
-
 export function WorkspaceCanvas({
   agents,
   signals,
@@ -471,7 +427,6 @@ export function WorkspaceCanvas({
       onLostPointerCapture={(event) => pointerEnd(event, true)}
       onKeyDown={keyboard}
     >
-      <Starfield />
       {layout.nodes.length === 0 && <div className="swarm-canvas-empty">{emptyMessage}</div>}
       <div
         className="swarm-canvas-world"
