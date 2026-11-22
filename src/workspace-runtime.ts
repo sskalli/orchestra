@@ -1,3 +1,4 @@
+import { demoTasks } from "./workspace-demo.ts";
 import { WorkspaceUsage } from "./workspace-usage.ts";
 import { randomUUID } from "node:crypto";
 import { basename, resolve } from "node:path";
@@ -1382,24 +1383,9 @@ export class WorkspaceRuntime {
   }
 
   private seedDemo() {
-    const task = this.createAgent("demo-release", "Release notes", "worker", undefined, "Draft the release notes");
-    task.agent.directTask = { projectIds: [], phase: "planning" };
-    task.agent.status = "done";
-    task.agent.messages.push(
-      message("user", "Draft a release note for the workspace updates."),
-      message("assistant", "The draft is ready. It highlights task sessions, native subagents, and the workspace inbox."),
-      { ...message("system", "Should the release note be terse or detailed?", "action"),
-        productQuestion: { status: "pending" } },
-    );
-    const child = this.createAgent("demo-review", "Check the draft", "worker", task.agent.id);
-    child.agent.nativeChild = true;
-    child.agent.duty = "reviewer";
-    child.agent.status = "done";
-    child.agent.messages.push(message("assistant", "The draft covers all three workspace changes."));
-    const solo = this.createAgent("demo-recipe", "Weeknight dinner", "worker");
-    solo.agent.directTask = { projectIds: [], phase: "planning" };
-    solo.agent.status = "done";
-    solo.agent.messages.push(message("assistant", "Try lemon chickpeas with roasted vegetables."));
+    for (const task of demoTasks(this.projects[0].id)) {
+      const { agent } = this.createAgent(task.id, task.name, "worker", task.parentId);
+      Object.assign(agent, task);
+    }
   }
-
 }
