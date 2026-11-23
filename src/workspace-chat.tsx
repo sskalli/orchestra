@@ -362,7 +362,7 @@ function Conversation({
     try {
       await onApproveImplementation(requestId);
     } catch (failure) {
-      setError(failure instanceof Error ? failure.message : "Could not approve edits.");
+      setError(failure instanceof Error ? failure.message : "Could not allow edits.");
     } finally {
       setApprovingImplementation(false);
     }
@@ -387,8 +387,8 @@ function Conversation({
                   {productQuestion ? (
                     <span className="chat-message-state">{productQuestion.status === "pending" ? "Question awaiting answer" : "Question answered"}</span>
                   ) : implementationRequest ? <span className="chat-message-state">
-                    {implementationRequest.status === "pending" ? "Awaiting your approval to edit files"
-                      : implementationRequest.status === "approved" ? "Edits approved" : "Request superseded"}
+                    {implementationRequest.status === "pending" ? "Awaiting your permission to edit files"
+                      : implementationRequest.status === "approved" ? "Edits allowed" : "Request superseded"}
                   </span> : systemKind ? <span className="chat-message-state">{systemMessageLabels[systemKind]}</span> : null}
                   {message.state === "queued" ? <span className="chat-message-state">Queued</span> : null}
                   {message.state === "failed" ? <span className="chat-message-state chat-message-state--failed">Failed</span> : null}
@@ -404,7 +404,7 @@ function Conversation({
                   <button className="chat-steer" type="button"
                     disabled={blocked || approvingImplementation || Boolean(agent.canCancel) || agent.queueDepth > 0}
                     onClick={() => void approveImplementation(message.id)}>
-                    {approvingImplementation ? "Approving write access…" : "Approve write access"}
+                    {approvingImplementation ? "Allowing edits…" : "Allow edits"}
                   </button>
                 )}
               </div>
