@@ -8,14 +8,15 @@ import { WorkspaceInbox } from "./workspace-inbox.tsx";
 import type { InboxEvent } from "./workspace-inbox.tsx";
 import { workspacePreferences } from "./workspace-preferences.ts";
 import { useDockResizing } from "./use-dock-resizing.tsx";
-import { NewTaskDialog, TaskLifecycleDialog } from "./workspace-task-dialogs.tsx";
+import { TaskLifecycleDialog } from "./workspace-task-dialogs.tsx";
+import { NewSessionComposer } from "./workspace-new-session.tsx";
 import type { AgentSignal, WorkspaceRuntime } from "./workspace-runtime.ts";
+import { createTask, send } from "./workspace-commands.ts";
 import "./workspace.css";
 
 type Snapshot = ReturnType<WorkspaceRuntime["snapshot"]>;
 type UsageTotals = NonNullable<Snapshot["usage"]>["total"];
 type Agent = Snapshot["agents"][number];
-type Command = Parameters<WorkspaceRuntime["command"]>[0];
 type Activity = { agent: Agent; messageId?: string; text: string };
 
 const formatTokens = new Intl.NumberFormat().format;
@@ -92,23 +93,6 @@ function attention(agent: Agent): Activity[] {
   return [];
 }
 
-async function sendRequest(command: Command) {
-  const response = await fetch("/api/command", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(command),
-  });
-  if (!response.ok) {
-    const body = await response.json().catch(() => ({}));
-    throw new Error(body.error ?? "The workspace could not accept that command");
-  }
-  return response;
-}
-
-async function send(command: Command) {
-  await sendRequest(command);
-}
-
 function Workspace() {
   const [snapshot, setSnapshot] = useState<Snapshot>();
   const [connected, setConnected] = useState(false);
@@ -157,7 +141,7 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
   const [preferences] = useState(() => workspacePreferences(snapshot.workspaceKey, mode, snapshot.modelProvider));
   const [saved] = useState(preferences.readView);
   const [savedCamera] = useState(preferences.readCamera);
-  const { bodyRef, resizing, style: dockStyle, resizeHandle } = useDockResizing(preferences);
+  const { bodyRef, resizing, style: dockStyle, resizeHandle, chatExpanded, toggleChatWidth, openChatWidth } = useDockResizing(preferences);
   const [composerSizes, setComposerSizes] = useState(preferences.readComposers);
   const composerSizesRef = useRef(composerSizes);
   const [leftOpen, setLeftOpen] = useState(saved.leftOpen);
@@ -173,6 +157,7 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
   const [newTaskOpen, setNewTaskOpen] = useState(false);
   const [newTaskId, setNewTaskId] = useState<string>();
   const [lifecycle, setLifecycle] = useState<{ action: "archive" | "restore" | "delete"; agentId: string }>();
+  const chatWindowRef = useRef<HTMLElement>(null);
   const archivedToggle = useRef<HTMLButtonElement>(null);
 
   useEffect(() => {
@@ -217,14 +202,20 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
   }, []);
 
   useEffect(() => {
-    if (!newTaskId || !snapshot.agents.some((agent) => agent.id === newTaskId)) return;
+    if (!newTaskId) return;
+    if (!newTaskOpen) {
+      setNewTaskId(undefined);
+      return;
+    }
+    if (!snapshot.agents.some((agent) => agent.id === newTaskId)) return;
+    setNewTaskOpen(false);
     setSelectedId(newTaskId);
     setDockId(newTaskId);
     setChooser(undefined);
     setFocus((previous) => ({ count: previous.count + 1 }));
     setNewTaskId(undefined);
     requestAnimationFrame(() => document.querySelector<HTMLTextAreaElement>(".sw-right textarea")?.focus());
-  }, [snapshot.agents, newTaskId]);
+  }, [snapshot.agents, newTaskId, newTaskOpen]);
 
   useEffect(() => {
     if (selectedId && !snapshot.agents.some((agent) => agent.id === selectedId)) {
@@ -286,17 +277,20 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
   });
 
   function select(id: string | null, messageId?: string) {
+    if (id) {
+      if (!selectedId && !newTaskOpen) openChatWidth();
+      setLeftOpen(false);
+    }
+    setNewTaskOpen(false);
     setSelectedId(id);
     if (id) setDockId(id);
     setChooser(undefined);
     setFocus((previous) => ({ id: messageId, count: previous.count + 1 }));
   }
 
-  async function createTask(name: string, projectIds: string[]) {
-    const response = await sendRequest({ type: "createTask", name, projectIds });
-    const result = await response.json();
-    if (typeof result.agentId !== "string") throw new Error("Orchestra did not return the new session ID.");
-    setNewTaskId(result.agentId);
+  function dismissNewTask() {
+    setNewTaskOpen(false);
+    requestAnimationFrame(() => document.querySelector<HTMLButtonElement>('button[aria-label="New session"]')?.focus());
   }
 
   function closeAgent(restoreFocus: boolean) {
@@ -322,7 +316,7 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
   function toggleInbox(open: boolean) {
     setLeftOpen(open);
     requestAnimationFrame(() => {
-      const label = open ? "Collapse inbox" : "Expand inbox";
+      const label = open ? "Collapse inbox" : "Inbox";
       document.querySelector<HTMLButtonElement>(`[aria-label="${label}"]`)?.focus();
     });
   }
@@ -429,6 +423,8 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
       onAnswerProductQuestion={agent.directTask
         ? (questionId, text) => send({ type: "answerProductQuestion", agentId: agent.id, questionId, text })
         : undefined}
+      expanded={chatExpanded}
+      onToggleExpanded={toggleChatWidth}
       onClose={() => closeAgent(true)}
       disabled={blocked || Boolean(agent.unavailableReason) || Boolean(agent.archivedAt) || Boolean(agent.lifecycleBusy)}
       disabledReason={agent.unavailableReason ?? (blocked && !(connected && provider.state === "usage-limit") ? blockedReason : undefined)}
@@ -456,19 +452,22 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
         <div className={`sw-provider sw-provider--${connected ? provider.state : "connecting"}`} role="status"><span aria-hidden="true" />{connected ? providerLabel(provider) : "Reconnecting"}</div>
         {snapshot.usage && <WorkspaceUsage usage={snapshot.usage} />}
       </header>
-      <main ref={bodyRef} className={`sw-body ${leftOpen ? "is-project-open" : ""} ${selected ? "is-agent-open" : ""} ${resizing ? "is-resizing" : ""}`}
+      <main ref={bodyRef} className={`sw-body ${selected || newTaskOpen ? "is-agent-open" : ""} ${resizing ? "is-resizing" : ""}`}
         style={dockStyle}>
-        <aside className="sw-dock sw-left" aria-label="Inbox dock">
-          <div className="sw-dock-inner" inert={!leftOpen}><WorkspaceInbox events={inboxEvents} onOpen={select} onClose={() => toggleInbox(false)} /></div>
-          {!leftOpen && <button type="button" className="sw-rail-button" aria-label="Expand inbox" title="Expand inbox" onClick={() => toggleInbox(true)}>»</button>}
+        <button type="button" className="sw-inbox-toggle" aria-label="Inbox" aria-expanded={leftOpen}
+          aria-controls="workspace-inbox-window" onClick={() => toggleInbox(!leftOpen)}>Inbox</button>
+        <aside id="workspace-inbox-window" className="sw-dock sw-left" aria-label="Inbox window" hidden={!leftOpen}>
+          <div className="sw-dock-inner">
+            <WorkspaceInbox events={inboxEvents} onOpen={select} onClose={() => toggleInbox(false)} />
+          </div>
           {leftOpen && resizeHandle("left")}
         </aside>
         <section className="sw-canvas">
           <button ref={archivedToggle} className="sw-archived-toggle" type="button" aria-expanded={archiveOpen} onClick={() => setArchiveOpen(!archiveOpen)}>Archived ({archivedAgents.length})</button>
           {(blocked || storageUnavailable) && <div className="sw-banner" role="status">{blocked ? blockedReason : "Browser storage is unavailable. Drafts and layout changes may not survive reload."}</div>}
           <WorkspaceCanvas agents={canvasAgents} signals={signals} selectedId={selectedId} onSelect={select} onStatus={handleStatus}
-            onCreateTask={mode === "codex" && !blocked ? () => setNewTaskOpen(true) : undefined}
-            initialCamera={savedCamera} onCameraChange={preferences.writeCamera} />
+            onCreateTask={mode === "codex" && !blocked ? () => { if (!selectedId) openChatWidth(); setNewTaskOpen(true); } : undefined}
+            chatWindowRef={chatWindowRef} initialCamera={savedCamera} onCameraChange={preferences.writeCamera} />
           {archiveOpen && <section className="sw-archive-list" aria-label="Archived agents" onKeyDown={(event) => {
             if (event.key === "Escape") { event.stopPropagation(); setArchiveOpen(false); archivedToggle.current?.focus(); }
           }}>
@@ -493,15 +492,23 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
             {activityFor(chooser.agentId).map((event, index) => <button key={`${event.agent.id}:${event.messageId}`} type="button" autoFocus={index === 0} onClick={() => select(event.agent.id, event.messageId)}><strong>{snapshot.projects.length > 1 && event.agent.projectId ? `${event.agent.projectId} / ` : ""}{agentAppearance(event.agent).displayName}</strong><span>{event.text}</span></button>)}
           </div>}
         </section>
-        <aside className="sw-dock sw-right" aria-label="Agent chat" inert={!selected} onKeyDown={(event) => {
-          if (event.key === "Escape") { event.stopPropagation(); closeAgent(true); }
-        }}>
-          <div className="sw-dock-inner">{dockAgent && renderChat(dockAgent)}</div>
-          {selected && resizeHandle("right")}
+        <aside ref={chatWindowRef} className="sw-dock sw-right" aria-label={newTaskOpen ? "Session composer" : "Agent chat"}
+          inert={!selected && !newTaskOpen} onKeyDown={(event) => {
+            if (event.key !== "Escape") return;
+            event.stopPropagation();
+            if (!newTaskOpen) closeAgent(true);
+          }}>
+          <div className="sw-dock-inner">
+            <div className="sw-conversation" hidden={newTaskOpen}>{dockAgent && renderChat(dockAgent)}</div>
+            <NewSessionComposer open={newTaskOpen} blocked={blocked} projects={snapshot.projects}
+              expanded={chatExpanded} onToggleExpanded={toggleChatWidth}
+              onCancel={dismissNewTask} onCreate={createTask}
+              onSend={(agentId, text) => send({ type: "send", agentId, text })}
+              onStarted={setNewTaskId} />
+          </div>
+          {(selected || newTaskOpen) && resizeHandle("right")}
         </aside>
       </main>
-      <NewTaskDialog open={newTaskOpen} blocked={blocked} projects={snapshot.projects}
-        onDismiss={() => setNewTaskOpen(false)} onCreate={createTask} />
       <TaskLifecycleDialog action={lifecycle?.action}
         agentName={lifecycleAgent && agentAppearance(lifecycleAgent).displayName}
         affectedCount={affected.length} hasRunning={hasRunning} connected={connected}

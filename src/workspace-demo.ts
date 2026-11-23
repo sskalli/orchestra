@@ -132,7 +132,14 @@ export function demoTasks(projectId: string): DemoTask[] {
       name: "Weeknight dinner",
       status: "done",
       directTask: { projectIds: [], phase: "planning" },
-      messages: [{ id: "demo-recipe-result", role: "assistant", text: "Try lemon chickpeas with roasted vegetables." }],
+      messages: [{ id: "demo-recipe-result", role: "assistant", text: [
+          "## Lemon chickpeas with roasted vegetables",
+          "A quick dinner with a crisp finish and a bright lemon dressing.",
+          "1. Roast the vegetables at **220°C** until the edges brown.",
+          "2. Toss the chickpeas with lemon juice, olive oil, and a pinch of salt.",
+          "3. Serve with yogurt or a spoonful of tahini.",
+          "> Add the dressing just before serving to keep the vegetables crisp.",
+        ].join("\n\n") }],
     },
   ];
 }

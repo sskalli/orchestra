@@ -8,9 +8,9 @@
   touch-action: none;
   user-select: none;
   background:
-    linear-gradient(90deg, #23262a55 1px, transparent 1px) 50% 50% / 126px 126px,
-    linear-gradient(0deg, #23262a55 1px, transparent 1px) 50% 50% / 126px 126px,
-    #0c0e10;
+    linear-gradient(90deg, #43577029 1px, transparent 1px) 50% 50% / 126px 126px,
+    linear-gradient(0deg, #43577029 1px, transparent 1px) 50% 50% / 126px 126px,
+    #0c1421;
   cursor: grab;
 }
 
@@ -278,8 +278,8 @@
   gap: 3px;
   padding: 4px;
   border: 1px solid #353535;
-  border-radius: 4px;
-  background: #101214;
+  border-radius: 9px;
+  background: var(--sw-surface);
   color: var(--sw-active);
   cursor: default;
   font-size: 12px;
@@ -287,7 +287,7 @@
 
 .swarm-canvas-controls button {
   border: 0;
-  border-radius: 4px;
+  border-radius: 6px;
   background: transparent;
   color: inherit;
   min-height: 27px;
@@ -329,4 +329,8 @@
 }
 @media (prefers-reduced-motion: reduce) {
   .swarm-message-dot { display: none; }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .swarm-canvas-world.is-focusing { transition: transform 220ms ease-out; }
 }

@@ -25,8 +25,8 @@ For a separately configured Codex provider, define it in Codex's configuration a
 
 ## Task flow
 
-- Use **+** to start a chat. Select any configured repos the task needs. You can also start a general session with no repository.
-- The left inbox shows task status and details. **Open conversation** opens the relevant chat. The right panel shows the selected conversation.
+- Use **+** to open a new-session composer. Write the first message, add an optional name, and select any repositories the task needs before starting the session. Leave repository scope empty for a general chat.
+- Open the floating **Inbox** from the map’s top-left corner. **Open conversation** jumps to the relevant message. Selecting a task opens a floating conversation at about 65% width and frames its group in the space beside it. Drag the conversation’s left edge to resize it on desktop. Closing the chat restores the previous map view.
 - Native Codex children orbit their parent. Their transcripts are available for inspection, and you give further instructions in the parent chat.
 - Product questions keep their source message and pending status across restart. Answer in the task chat and the agent can link your reply to the question. Unrelated replies leave it pending. Use **Answer question** to target a question explicitly.
 - A repository-backed task starts read-only. **Start implementation** lets that same session write only in isolated worktrees of its selected repos. **Revise candidate** authorizes another implementation turn after discussion. Orchestra requires passing coder-reported verification for the submitted contents before it pins a delivery revision. Review and merge changes manually.

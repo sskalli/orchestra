@@ -75,21 +75,37 @@ export function useDockResizing(preferences: DockPreferences) {
   }, []);
 
   function panelBounds(side: DockSide) {
-    const vertical = mobile && side === "left";
     const metrics = panelMetricsRef.current;
-    const length = vertical ? metrics.height : metrics.width;
-    const current = vertical ? metrics.leftHeight : metrics[side];
-    const minimum = vertical ? 160 : side === "left" ? 200 : 230;
-    const maximum = Math.max(0, vertical ? length - 130 : mobile ? length - 48 : length * 0.44);
-    return { min: Math.min(minimum, maximum), max: maximum, current };
+    if (side === "right") {
+      const width = metrics.width;
+      const min = mobile ? Math.min(230, width * 0.60) : Math.min(230, width * 0.25);
+      return { min, max: width * 0.75, current: metrics.right };
+    }
+
+    const maximum = mobile ? metrics.height - 130 : metrics.width * 0.44;
+    const max = Math.max(0, maximum);
+    return {
+      min: Math.min(mobile ? 160 : 200, max),
+      max,
+      current: mobile ? metrics.leftHeight : metrics.left,
+    };
   }
 
   function resizePanel(side: DockSide, value: number) {
     const { min, max } = panelBounds(side);
     const key: keyof PanelSizes = mobile && side === "left" ? "mobileLeft" : side;
-    const next = { ...panelSizesRef.current, [key]: Math.round(Math.max(min, Math.min(max, value))) };
+    const next = { ...panelSizesRef.current, [key]: Math.max(min, Math.min(max, value)) };
     panelSizesRef.current = next;
     setPanelSizes(next);
+  }
+
+  const rightBounds = panelBounds("right");
+  const compactWidth = Math.max(rightBounds.min, panelMetricsRef.current.width * 0.25);
+  const chatExpanded = (panelSizes.right ?? rightBounds.current) > (compactWidth + rightBounds.max) / 2;
+
+  function toggleChatWidth() {
+    if (!panelMetricsRef.current.width) return;
+    resizePanel("right", chatExpanded ? compactWidth : rightBounds.max);
   }
 
   function flushResize() {
@@ -100,7 +116,7 @@ export function useDockResizing(preferences: DockPreferences) {
     const property = pending.key === "mobileLeft" ? "--mobile-left-size" : `--${pending.key}-size`;
     // Update the drag preview without re-rendering the workspace on every pointer move.
     bodyRef.current?.style.setProperty(property, `${pending.value}px`);
-    pending.handle.setAttribute("aria-valuenow", String(pending.value));
+    pending.handle.setAttribute("aria-valuenow", String(Math.round(pending.value)));
     pendingResize.current = null;
   }
 
@@ -121,8 +137,8 @@ export function useDockResizing(preferences: DockPreferences) {
       if (!drag || drag.pointerId !== event.pointerId) return;
       const distance = (drag.vertical ? event.clientY : event.clientX) - drag.start;
       const { min, max } = panelBounds(drag.side);
-      const value = Math.round(Math.max(min, Math.min(max,
-        drag.size + (drag.side === "right" || drag.vertical ? -distance : distance))));
+      const value = Math.max(min, Math.min(max,
+        drag.size + (drag.side === "right" || drag.vertical ? -distance : distance)));
       const key: keyof PanelSizes = drag.vertical ? "mobileLeft" : drag.side;
       panelSizesRef.current = { ...panelSizesRef.current, [key]: value };
       pendingResize.current = { key, value, handle: event.currentTarget };
@@ -162,5 +178,9 @@ export function useDockResizing(preferences: DockPreferences) {
     "--mobile-left-size": panelSizes.mobileLeft ? `${panelSizes.mobileLeft}px` : undefined,
   };
 
-  return { bodyRef, resizing, style, resizeHandle };
+  function openChatWidth() {
+    if (panelMetricsRef.current.width) resizePanel("right", panelMetricsRef.current.width * 0.65);
+  }
+
+  return { bodyRef, resizing, style, resizeHandle, chatExpanded, toggleChatWidth, openChatWidth };
 }
