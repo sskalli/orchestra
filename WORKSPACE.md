@@ -21,7 +21,7 @@ All configured repos share one map and Inbox. Define each repository ID once. Th
 | `CODEX_BIN` | Set the Codex executable path. |
 | `CODEX_MODEL` | Override Codex model selection for new tasks. |
 
-For a separately configured Codex provider, define it in Codex's configuration and pass `--provider ID` alongside `--live` or `--project`. Use a dedicated environment variable for that provider's credentials. Orchestra strips `OPENAI_API_KEY` and `CODEX_API_KEY` from the App Server process. Each provider has separate saved sessions.
+For a separately configured Codex provider, define it in Codex's configuration and pass `--provider ID`. On its own it opens a live workspace for the current Git repository. Use `--live /path/to/repository` or `--project ID=/path/to/repository` to select other repositories. Use a dedicated environment variable for that provider's credentials. Orchestra strips `OPENAI_API_KEY` and `CODEX_API_KEY` from the App Server process. Each provider has separate saved sessions.
 
 ## Task flow
 

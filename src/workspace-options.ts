@@ -44,9 +44,6 @@ export function parseWorkspaceArgs(args: string[]): WorkspaceOptions {
   }
 
   if (projects.length && projectPath) throw new Error("Use either --live with a project path or --project, not both.");
-  if (projects.length) live = true;
-  if (!live && args.length) {
-    throw new Error("Usage: npm run workspace -- [--live [project-path] | --project ID=path ...] [--provider provider-id]");
-  }
+  if (projects.length || providerSpecified) live = true;
   return { live, projectPath, projects, provider };
 }

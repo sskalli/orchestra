@@ -12,7 +12,7 @@ import { parseWorkspaceArgs } from "../src/workspace-options.ts";
 import { workspacePreferences } from "../src/workspace-preferences.ts";
 import { resolveProjects, workspaceIdentity } from "../src/workspace-projects.ts";
 
-test("workspace launch options select a Codex provider only in live mode", () => {
+test("workspace launch options start a live workspace when a Codex provider is selected", () => {
   assert.deepEqual(parseWorkspaceArgs([]), { live: false, projectPath: undefined, projects: [], provider: "openai" });
   assert.deepEqual(parseWorkspaceArgs(["--live", "/project", "--provider", "company-gateway"]), {
     live: true, projectPath: "/project", projects: [], provider: "company-gateway",
@@ -22,7 +22,10 @@ test("workspace launch options select a Codex provider only in live mode", () =>
     { id: "app", path: "/app" }, { id: "api", path: "/api" },
   ]);
   assert.equal(parseWorkspaceArgs(["--project", "app=/app"]).live, true);
-  assert.throws(() => parseWorkspaceArgs(["--provider", "company-gateway"]), /Usage:/);
+  assert.deepEqual(parseWorkspaceArgs(["--provider", "company-gateway"]), {
+    live: true, projectPath: undefined, projects: [], provider: "company-gateway",
+  });
+  assert.equal(parseWorkspaceArgs(["--project", "app=/app", "--project", "api=/api", "--provider", "company"]).provider, "company");
   assert.throws(() => parseWorkspaceArgs(["--live", "--provider"]), /provider ID/);
   assert.throws(() => parseWorkspaceArgs(["--project", "app=/app", "--project", "app=/other"]), /Duplicate project/);
   assert.throws(() => parseWorkspaceArgs(["--live", "/app", "--project", "api=/api"]), /either/);
