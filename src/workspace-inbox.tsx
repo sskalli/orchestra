@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { LuListFilter, LuMinus, LuTrash2 } from "react-icons/lu";
 import "./workspace-inbox.css";
@@ -24,6 +24,8 @@ type WorkspaceInboxProps = {
 };
 
 export function WorkspaceInbox({ events, toggle, onOpen, onClose, onClear, canClear }: WorkspaceInboxProps) {
+  const feed = useRef<HTMLDivElement>(null);
+  const followLatest = useRef(true);
   const filters = useRef<HTMLDivElement>(null);
   const filterButton = useRef<HTMLButtonElement>(null);
   const [filtersOpen, setFiltersOpen] = useState(false);
@@ -32,7 +34,23 @@ export function WorkspaceInbox({ events, toggle, onOpen, onClose, onClear, canCl
   const tones = new Map(events.map(({ status, tone }) => [status, tone]));
   if (filter && !tones.has(filter.status)) tones.set(filter.status, filter.tone);
   const statuses = [...tones.keys()].sort();
-  const visibleEvents = statusFilter ? events.filter(({ status }) => status === statusFilter) : events;
+  // The log is stored newest-first, but the Inbox reads like a conversation.
+  const visibleEvents = (statusFilter ? events.filter(({ status }) => status === statusFilter) : events).toReversed();
+
+  useLayoutEffect(() => {
+    const element = feed.current;
+    if (element && followLatest.current) element.scrollTop = element.scrollHeight;
+  }, [events, statusFilter]);
+
+  useLayoutEffect(() => {
+    const element = feed.current;
+    if (!element) return;
+    const observer = new ResizeObserver(() => {
+      if (followLatest.current) element.scrollTop = element.scrollHeight;
+    });
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, []);
 
   useEffect(() => {
     if (!filtersOpen) return;
@@ -64,6 +82,7 @@ export function WorkspaceInbox({ events, toggle, onOpen, onClose, onClear, canCl
           <div className="workspace-inbox-filter-options" id="inbox-filter" role="group" aria-label="Status filters" hidden={!filtersOpen}>
             {["", ...statuses].map((status) => <button type="button" key={status} aria-pressed={statusFilter === status}
               onClick={() => {
+                followLatest.current = true;
                 const tone = tones.get(status);
                 setFilter(tone ? { status, tone } : undefined);
                 setFiltersOpen(false);
@@ -84,7 +103,12 @@ export function WorkspaceInbox({ events, toggle, onOpen, onClose, onClear, canCl
           <LuMinus aria-hidden="true" strokeWidth={1.5} />
         </button>
       </header>
-      <div className="workspace-inbox-feed">
+      <div className="workspace-inbox-feed" ref={feed} onScroll={(event) => {
+        const element = event.currentTarget;
+        if (element.clientHeight) {
+          followLatest.current = element.scrollHeight - element.scrollTop - element.clientHeight < 24;
+        }
+      }}>
         {visibleEvents.length === 0 ? <p className="workspace-inbox-empty" role="status">
           {statusFilter ? "No tasks with this status." : "No activity in the Inbox."}
         </p> : (

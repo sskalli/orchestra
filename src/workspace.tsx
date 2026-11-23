@@ -1,6 +1,6 @@
-import { LuArchive, LuMessageSquare, LuMessageSquareDot } from "react-icons/lu";
+import { LuArchive, LuMessageSquare, LuMessageSquareDot, LuPlus } from "react-icons/lu";
 import { agentAppearance } from "./workspace-agent-appearance.ts";
-import { effectiveAgentStatus } from "./workspace-status.ts";
+import { effectiveAgentStatus, needsUserInput } from "./workspace-status.ts";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { WorkspaceCanvas } from "./workspace-canvas.tsx";
@@ -85,9 +85,9 @@ function Folder() {
 }
 
 function attention(agent: Agent): Activity[] {
-  const questions = agent.messages.flatMap((message) => message.productQuestion?.status === "pending"
+  const requests = agent.messages.flatMap((message) => needsUserInput(message)
     ? [{ agent, messageId: message.id, text: message.text.split("\n", 1)[0].slice(0, 160) }] : []);
-  if (questions.length) return questions;
+  if (requests.length) return requests;
   if (agent.status === "attention" || agent.status === "error") {
     const message = agent.messages.findLast((entry) => entry.state === "failed" || entry.role === "system");
     return [{ agent, messageId: message?.id, text: message?.text ?? (agent.status === "error" ? "Run failed" : "Needs your response") }];
@@ -125,7 +125,7 @@ function flightLogEvents(agents: Agent[]): InboxEvent[] {
       return { id: `${root.id}:${agent.id}:${messageId ?? "status"}`, agentName,
         status: tone === "error" ? status : "Needs attention", tone: tone === "error" ? tone : "attention",
         text: source?.text ?? text, agentId: agent.id, messageId,
-        needsInput: source?.productQuestion?.status === "pending" };
+        needsInput: source ? needsUserInput(source) : false };
     });
     const [status, tone] = inboxStatus[root.status];
     const message = root.messages.findLast((entry) => entry.role !== "user" && !entry.state);
@@ -183,7 +183,6 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
   const [preferences] = useState(() => workspacePreferences(snapshot.workspaceKey, mode, snapshot.modelProvider));
   const [saved] = useState(preferences.readView);
   const [savedCamera] = useState(preferences.readCamera);
-  const { bodyRef, resizing, style: dockStyle, resizeHandle, chatExpanded, toggleChatWidth } = useDockResizing(preferences);
   const [composerSizes, setComposerSizes] = useState(preferences.readComposers);
   const composerSizesRef = useRef(composerSizes);
   const [leftOpen, setLeftOpen] = useState(saved.leftOpen);
@@ -199,6 +198,9 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
   const [projectDetails, setProjectDetails] = useState(false);
   const [archiveOpen, setArchiveOpen] = useState(false);
   const [newTaskOpen, setNewTaskOpen] = useState(false);
+  const chatOpen = newTaskOpen || agents.some((agent) => agent.id === selectedId);
+  const { bodyRef, resizing, style: dockStyle, resizeHandle } =
+    useDockResizing(preferences, leftOpen, chatOpen);
   const [newTaskId, setNewTaskId] = useState<string>();
   const [lifecycle, setLifecycle] = useState<{ action: "archive" | "restore" | "delete"; agentId: string }>();
   const chatWindowRef = useRef<HTMLElement>(null);
@@ -327,9 +329,6 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
   }, [leftOpen, flightLog.sequence, inboxReadSequence, preferences]);
 
   function select(id: string | null, messageId?: string) {
-    if (id) {
-      setLeftOpen(false);
-    }
     setNewTaskOpen(false);
     setSelectedId(id);
     if (id) setDockId(id);
@@ -345,7 +344,7 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
   function closeAgent(restoreFocus: boolean) {
     const node = restoreFocus && selectedId ? document.querySelector<HTMLElement>(`[data-agent-id="${CSS.escape(selectedId)}"]`) : undefined;
     select(null);
-    node?.focus();
+    node?.focus({ preventScroll: true });
   }
 
   function handleStatus(id: string) {
@@ -437,6 +436,9 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
       agent={agent}
       onOpenAgent={(id) => select(id)}
       onLifecycle={agent.nativeChild ? undefined : (action) => requestLifecycle(action, agent.id)}
+      onApproveImplementation={agent.directTask?.projectIds.length
+        ? (requestId) => send({ type: "approveImplementation", agentId: agent.id, requestId })
+        : undefined}
       projectLabel={agent.nativeChild && snapshot.projects.length > 1 ? agent.projectId : undefined}
       repositoryScope={repositories?.length ? repositories : undefined}
       taskPhase={agent.directTask?.phase}
@@ -464,8 +466,6 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
       onSteer={(value) => submit("steer", value)}
       onCancel={() => send({ type: "cancel", agentId: agent.id })}
       onResumeQueue={() => send({ type: "resumeQueue", agentId: agent.id })}
-      expanded={chatExpanded}
-      onToggleExpanded={toggleChatWidth}
       onClose={() => closeAgent(true)}
       disabled={blocked || Boolean(agent.unavailableReason) || Boolean(agent.archivedAt) || Boolean(agent.lifecycleBusy)}
       disabledReason={agent.unavailableReason ?? (blocked && !(connected && provider.state === "usage-limit") ? blockedReason : undefined)}
@@ -477,9 +477,9 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
   const inboxToggleLabel = leftOpen ? "Hide agent inbox" : "Open agent inbox";
   const InboxIcon = inboxHasActivity ? LuMessageSquareDot : LuMessageSquare;
   const inboxToggle = (
-    <button type="button" className={leftOpen ? "interface-icon-button" : "interface-icon-button sw-inbox-toggle"}
+    <button type="button" className={`interface-icon-button sw-inbox-button${leftOpen ? "" : " sw-inbox-toggle"}`}
       aria-label={inboxToggleLabel} title={inboxToggleLabel} aria-expanded={leftOpen}
-      aria-controls="workspace-inbox-window" data-active={inboxHasActivity}
+      aria-controls="workspace-inbox-window" data-inbox-alert={inboxHasActivity}
       onClick={() => toggleInbox(!leftOpen)}>
       <InboxIcon aria-hidden="true" strokeWidth={1.5} />
     </button>
@@ -504,7 +504,7 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
         <div className={`sw-provider sw-provider--${connected ? provider.state : "connecting"}`} role="status"><span aria-hidden="true" />{connected ? providerLabel(provider) : "Reconnecting"}</div>
         {snapshot.usage && <WorkspaceUsage usage={snapshot.usage} />}
       </header>
-      <main ref={bodyRef} className={`sw-body ${selected || newTaskOpen ? "is-agent-open" : ""} ${resizing ? "is-resizing" : ""}`}
+      <main ref={bodyRef} className={`sw-body ${chatOpen ? "is-agent-open" : ""} ${leftOpen ? "is-inbox-open" : ""} ${resizing ? "is-resizing" : ""}`}
         style={dockStyle}>
         {!leftOpen && inboxToggle}
         <aside id="workspace-inbox-window" className="sw-dock sw-left" aria-label="Inbox window" hidden={!leftOpen}>
@@ -513,15 +513,24 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
               onClear={clearLog}
               canClear={canClearLog} />
           </div>
-          {leftOpen && resizeHandle("left")}
+          {leftOpen && <>
+            {resizeHandle("left")}
+            {resizeHandle("bottom")}
+            {resizeHandle("corner")}
+          </>}
         </aside>
         <section className="sw-canvas">
-          <button ref={archivedToggle} className="sw-archived-toggle" type="button" aria-expanded={archiveOpen}
-            aria-label={`Archived (${archivedAgents.length})`} title={`Archived (${archivedAgents.length})`}
-            onClick={() => setArchiveOpen(!archiveOpen)}><LuArchive aria-hidden="true" /></button>
+          <div className="sw-map-actions">
+            <button ref={archivedToggle} className="sw-map-action sw-archived-toggle" type="button" aria-expanded={archiveOpen}
+              aria-label={`Archived (${archivedAgents.length})`} title={`Archived (${archivedAgents.length})`}
+              onClick={() => setArchiveOpen(!archiveOpen)}><LuArchive aria-hidden="true" /></button>
+            {mode === "codex" && !blocked && <button className="sw-map-action" type="button"
+              aria-label="New session" title="New session" onClick={() => setNewTaskOpen(true)}>
+              <LuPlus aria-hidden="true" />
+            </button>}
+          </div>
           {(blocked || storageUnavailable) && <div className="sw-banner" role="status">{blocked ? blockedReason : "Browser storage is unavailable. Drafts and layout changes may not survive reload."}</div>}
           <WorkspaceCanvas agents={canvasAgents} signals={signals} selectedId={selectedId} onSelect={select} onStatus={handleStatus}
-            onCreateTask={mode === "codex" && !blocked ? () => setNewTaskOpen(true) : undefined}
             chatWindowRef={chatWindowRef} initialCamera={savedCamera} onCameraChange={preferences.writeCamera} />
           {archiveOpen && <section className="sw-archive-list" aria-label="Archived agents" onKeyDown={(event) => {
             if (event.key === "Escape") { event.stopPropagation(); setArchiveOpen(false); archivedToggle.current?.focus(); }
@@ -556,7 +565,6 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
           <div className="sw-dock-inner">
             <div className="sw-conversation" hidden={newTaskOpen}>{dockAgent && renderChat(dockAgent)}</div>
             <NewSessionComposer open={newTaskOpen} blocked={blocked} projects={snapshot.projects}
-              expanded={chatExpanded} onToggleExpanded={toggleChatWidth}
               onCancel={dismissNewTask} onCreate={createTask}
               onSend={(agentId, text) => send({ type: "send", agentId, text })}
               onStarted={setNewTaskId} />

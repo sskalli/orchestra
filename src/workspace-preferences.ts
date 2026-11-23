@@ -2,7 +2,7 @@ import { readFlightLog } from "./workspace-flight-log.ts";
 import type { FlightLog } from "./workspace-flight-log.ts";
 
 export type Camera = { x: number; y: number; scale: number };
-export type PanelSizes = { left?: number; right?: number; mobileLeft?: number };
+export type PanelSizes = { left?: number; right?: number; leftHeight?: number; mobileLeft?: number; mobileLeftWidth?: number };
 export type ComposerSizes = { agent?: number };
 
 type View = { leftOpen: boolean; selectedId: string | null; drafts: Record<string, string> };
@@ -73,7 +73,11 @@ export function workspacePreferences(projectPath: string, mode: "demo" | "codex"
     readPanels(): PanelSizes {
       const value = read("panels") as PanelSizes | null;
       const size = (entry: unknown) => typeof entry === "number" && Number.isFinite(entry) && entry > 0 ? entry : undefined;
-      return { left: size(value?.left), right: size(value?.right), mobileLeft: size(value?.mobileLeft) };
+      return {
+        left: size(value?.left), right: size(value?.right),
+        leftHeight: size(value?.leftHeight), mobileLeft: size(value?.mobileLeft),
+        mobileLeftWidth: size(value?.mobileLeftWidth),
+      };
     },
     writePanels: (panels: PanelSizes) => write("panels", panels),
     readComposers(): ComposerSizes {

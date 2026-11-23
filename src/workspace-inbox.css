@@ -62,8 +62,7 @@
 }
 
 .workspace-inbox-details summary::-webkit-details-marker { display: none; }
-.workspace-inbox-details summary:hover { background: var(--inbox-row-hover); }
-.workspace-inbox-details[open] > summary { background: var(--inbox-row-selected); }
+.workspace-inbox-details:not([open]) > summary:hover { background: var(--inbox-row-hover); }
 
 .workspace-inbox-details summary::before {
   content: "";

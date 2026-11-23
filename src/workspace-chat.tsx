@@ -1,9 +1,10 @@
+import { needsUserInput } from "./workspace-status.ts";
 import { agentAppearance } from "./workspace-agent-appearance.ts";
-import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { FormEvent, KeyboardEvent, PointerEvent } from "react";
 import Markdown from "react-markdown";
 import type { Components } from "react-markdown";
-import { LuEllipsis, LuMessageSquareX, LuPanelRightClose, LuPanelRightOpen } from "react-icons/lu";
+import { LuEllipsis, LuLoaderCircle, LuMessageSquareX } from "react-icons/lu";
 import type { SystemMessageKind, WorkspaceAgent } from "./workspace-runtime.ts";
 
 import "./workspace-chat.css";
@@ -27,10 +28,9 @@ type ChatProps = {
   onSend: (text: string) => Promise<void> | void;
   onSteer?: (text: string) => Promise<void> | void;
   onCancel?: () => Promise<void>;
+  onApproveImplementation?: (requestId: string) => Promise<void>;
   onResumeQueue?: () => Promise<void>;
   onClose: () => void;
-  expanded?: boolean;
-  onToggleExpanded?: () => void;
   onOpenAgent?: (id: string) => void;
   onLifecycle?: (action: "archive" | "restore" | "delete") => void;
   disabled?: boolean;
@@ -67,8 +67,8 @@ const markdownComponents: Components = {
 };
 
 function Conversation({
-  agent, projectLabel, repositoryScope, delivery, taskPhase, taskDetail, modelLabel, usageLabel, draft: initialDraft, composerHeight, onComposerHeightChange, onDraftInput, onDraftChange, onSend, onSteer, onCancel, onResumeQueue, onClose,
-  disabled, disabledReason, focusMessageId, focusRequest, onOpenAgent, onLifecycle, expanded, onToggleExpanded,
+  agent, projectLabel, repositoryScope, delivery, taskPhase, taskDetail, modelLabel, usageLabel, draft: initialDraft, composerHeight, onComposerHeightChange, onDraftInput, onDraftChange, onSend, onSteer, onCancel, onResumeQueue, onApproveImplementation, onClose,
+  disabled, disabledReason, focusMessageId, focusRequest, onOpenAgent, onLifecycle,
 }: ChatProps) {
   const transcript = useRef<HTMLDivElement>(null);
   const actions = useRef<HTMLDivElement>(null);
@@ -126,6 +126,7 @@ function Conversation({
   const [sending, setSending] = useState(false);
   const [cancelling, setCancelling] = useState(false);
   const [resumingQueue, setResumingQueue] = useState(false);
+  const [approvingImplementation, setApprovingImplementation] = useState(false);
   const [error, setError] = useState("");
   const { displayName } = agentAppearance(agent);
   const recipient = `${projectLabel ? `${projectLabel} / ` : ""}${displayName}`;
@@ -354,12 +355,25 @@ function Conversation({
     void send(onSend);
   }
 
+  const approveImplementation = useCallback(async (requestId: string) => {
+    if (!onApproveImplementation || approvingImplementation || blocked || agent.canCancel || agent.queueDepth) return;
+    setApprovingImplementation(true);
+    setError("");
+    try {
+      await onApproveImplementation(requestId);
+    } catch (failure) {
+      setError(failure instanceof Error ? failure.message : "Could not approve edits.");
+    } finally {
+      setApprovingImplementation(false);
+    }
+  }, [agent.canCancel, agent.queueDepth, approvingImplementation, blocked, onApproveImplementation]);
+
   const messageElements = useMemo(() => agent.messages.filter((message) =>
-    message.productQuestion?.status === "pending" || !hiddenMessages.has(message.id)).map((message) => {
+    needsUserInput(message) || !hiddenMessages.has(message.id)).map((message) => {
           const sender = message.role === "user" ? "USER" : message.role === "system" ? "SYSTEM" : "COMPUTER";
-          const { productQuestion } = message;
+          const { productQuestion, implementationRequest } = message;
           const systemKind = message.role === "system"
-            ? productQuestion?.status === "answered" ? "notice" : message.kind
+            ? productQuestion?.status === "answered" || implementationRequest && implementationRequest.status !== "pending" ? "notice" : message.kind
             : undefined;
           return (
             <article key={message.id} tabIndex={-1} className={`chat-message chat-message--${message.role}${systemKind ? ` chat-message--${systemKind}` : ""}`}
@@ -372,19 +386,31 @@ function Conversation({
                   <strong><span aria-hidden="true">&gt; </span>{sender}:</strong>
                   {productQuestion ? (
                     <span className="chat-message-state">{productQuestion.status === "pending" ? "Question awaiting answer" : "Question answered"}</span>
-                  ) : systemKind ? <span className="chat-message-state">{systemMessageLabels[systemKind]}</span> : null}
+                  ) : implementationRequest ? <span className="chat-message-state">
+                    {implementationRequest.status === "pending" ? "Write access requested"
+                      : implementationRequest.status === "approved" ? "Edits approved" : "Request superseded"}
+                  </span> : systemKind ? <span className="chat-message-state">{systemMessageLabels[systemKind]}</span> : null}
                   {message.state === "queued" ? <span className="chat-message-state">Queued</span> : null}
                   {message.state === "failed" ? <span className="chat-message-state chat-message-state--failed">Failed</span> : null}
                   {message.state === "cancelled" ? <span className="chat-message-state">Stopped</span> : null}
                 </div>
                 <div className="chat-markdown">
-                  <Markdown skipHtml disallowedElements={["img"]} components={markdownComponents}>{message.text}</Markdown>
+                  {implementationRequest
+                    ? <p className="chat-implementation-summary">{message.text}</p>
+                    : <Markdown skipHtml disallowedElements={["img"]} components={markdownComponents}>{message.text}</Markdown>}
                   {message.state === "streaming" ? <span className="chat-stream-cursor" aria-label="Responding" /> : null}
                 </div>
+                {implementationRequest?.status === "pending" && onApproveImplementation && !archived && (
+                  <button className="chat-steer" type="button"
+                    disabled={blocked || approvingImplementation || Boolean(agent.canCancel) || agent.queueDepth > 0}
+                    onClick={() => void approveImplementation(message.id)}>
+                    {approvingImplementation ? "Allowing edits…" : "Allow edits"}
+                  </button>
+                )}
               </div>
             </article>
           );
-        }), [agent.messages, hiddenMessages]);
+        }), [agent.messages, agent.canCancel, agent.queueDepth, approveImplementation, approvingImplementation, archived, blocked, hiddenMessages, onApproveImplementation]);
 
   const headerStatus = archived ? "Archived" : agent.lifecycleBusy ? "Updating…" : statusLabels[agent.status];
   const headerTone = archived || agent.lifecycleBusy ? "idle" : agent.status;
@@ -405,6 +431,7 @@ function Conversation({
             <span className="chat-agent-name">{displayName}</span>
             <span className="chat-agent-divider" aria-hidden="true">|</span>
             <span className="chat-agent-status" data-status={headerTone}>{headerStatus.toLowerCase()}</span>
+            {(headerTone === "working" || (!archived && agent.canCancel)) && <LuLoaderCircle className="chat-working-spinner" aria-hidden="true" />}
           </h2>
           <div className="chat-agent-tooltip" id={agentTooltipId} role="tooltip">
             <strong>{displayName}</strong>
@@ -422,7 +449,7 @@ function Conversation({
               setActionsOpen(false);
               actionsButton.current?.focus();
               setHiddenMessages(new Set(agent.messages
-                .filter((message) => message.productQuestion?.status !== "pending")
+                .filter((message) => !needsUserInput(message))
                 .map((message) => message.id)));
               pinToBottom.current = true;
             }}><LuMessageSquareX aria-hidden="true" strokeWidth={1.5} /></button>
@@ -438,13 +465,6 @@ function Conversation({
             </>}
           </div>
         </div>
-        {onToggleExpanded && (
-          <button className="interface-icon-button chat-width-toggle" type="button" onClick={onToggleExpanded}
-            aria-label={expanded ? "Reduce chat to 25%" : "Expand chat to 75%"}
-            title={expanded ? "Reduce chat to 25%" : "Expand chat to 75%"}>
-            {expanded ? <LuPanelRightClose aria-hidden="true" strokeWidth={1.5} /> : <LuPanelRightOpen aria-hidden="true" strokeWidth={1.5} />}
-          </button>
-        )}
         <button className="chat-icon-button" type="button" onClick={onClose}
           aria-label="Close conversation" title="Close conversation">
           <span aria-hidden="true">×</span>
@@ -507,7 +527,7 @@ function Conversation({
         <div className="chat-composer-box">
           <span className="chat-input-prompt" aria-hidden="true">&gt;</span>
           <textarea aria-label={`Message ${recipient}`}
-            placeholder={repositoryScope?.length ? "Ask a question or say “Go ahead and implement that”" : undefined} rows={3} disabled={Boolean(agent.lifecycleBusy)}
+            placeholder={repositoryScope?.length ? "Ask a question or describe a change" : undefined} rows={3} disabled={Boolean(agent.lifecycleBusy)}
             value={draft} onChange={(event) => updateDraft(event.target.value)} onBlur={flushDraft} onKeyDown={handleComposerKey} />
         </div>
         {agent.canSteer && onSteer ? (

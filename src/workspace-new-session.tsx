@@ -1,13 +1,10 @@
 import { useEffect, useRef, useState } from "react";
-import { LuPanelRightClose, LuPanelRightOpen } from "react-icons/lu";
 import { UnknownCommandOutcome } from "./workspace-commands.ts";
 import "./workspace-new-session.css";
 
 type NewSessionComposerProps = {
   open: boolean;
   blocked: boolean;
-  expanded: boolean;
-  onToggleExpanded: () => void;
   projects: readonly { id: string }[];
   onCancel: () => void;
   onCreate: (name: string, projectIds: string[]) => Promise<string>;
@@ -15,7 +12,7 @@ type NewSessionComposerProps = {
   onStarted: (agentId: string) => void;
 };
 
-export function NewSessionComposer({ open, blocked, expanded, onToggleExpanded, projects, onCancel, onCreate, onSend, onStarted }: NewSessionComposerProps) {
+export function NewSessionComposer({ open, blocked, projects, onCancel, onCreate, onSend, onStarted }: NewSessionComposerProps) {
   const prompt = useRef<HTMLTextAreaElement>(null);
   const [text, setText] = useState("");
   const [name, setName] = useState("");
@@ -24,8 +21,6 @@ export function NewSessionComposer({ open, blocked, expanded, onToggleExpanded, 
   const [pending, setPending] = useState(false);
   const [error, setError] = useState("");
   const [unknownOutcome, setUnknownOutcome] = useState(false);
-  const widthToggleLabel = expanded ? "Reduce chat to 25%" : "Expand chat to 75%";
-  const WidthToggleIcon = expanded ? LuPanelRightClose : LuPanelRightOpen;
 
   useEffect(() => {
     if (open) prompt.current?.focus();
@@ -81,10 +76,6 @@ export function NewSessionComposer({ open, blocked, expanded, onToggleExpanded, 
   }}>
     <header className="chat-header">
       <div className="chat-header-copy"><h2 id="new-session-heading">New session</h2></div>
-      <button className="chat-icon-button interface-icon-button chat-width-toggle" type="button" onClick={onToggleExpanded}
-        aria-label={widthToggleLabel} title={widthToggleLabel}>
-        <WidthToggleIcon aria-hidden="true" size={15} strokeWidth={1.5} fill="none" />
-      </button>
       <button type="button" className="chat-icon-button" aria-label="Close new session" onClick={cancel} disabled={pending}>×</button>
     </header>
     <form onSubmit={(event) => { event.preventDefault(); void submit(); }}>

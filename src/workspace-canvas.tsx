@@ -200,7 +200,6 @@ export function WorkspaceCanvas({
   chatWindowRef,
   onSelect,
   onStatus,
-  onCreateTask,
   emptyMessage = "Select + to start a session.",
   initialCamera,
   onCameraChange,
@@ -211,7 +210,6 @@ export function WorkspaceCanvas({
   chatWindowRef?: RefObject<HTMLElement | null>;
   onSelect: (id: string | null) => void;
   onStatus: (id: string) => void;
-  onCreateTask?: () => void;
   emptyMessage?: string;
   initialCamera?: Camera;
   onCameraChange?: (camera: Camera) => void;
@@ -236,7 +234,6 @@ export function WorkspaceCanvas({
   const [focused, setFocused] = useState<string | null>(null);
   const [dragging, setDragging] = useState(false);
   const firstFit = useRef(Boolean(initialCamera));
-  const overviewCamera = useRef<Camera | null>(null);
   const manualCamera = useRef(false);
   const [cameraTransition, setCameraTransition] = useState(false);
   const positions = useMemo(() => new Map(layout.nodes.map((node) => [node.agent.id, node])), [layout]);
@@ -249,7 +246,7 @@ export function WorkspaceCanvas({
   const lastFocusedTask = useRef<string>();
 
   useEffect(() => {
-    if (firstFit.current) onCameraChange?.(overviewCamera.current ?? camera);
+    if (firstFit.current) onCameraChange?.(camera);
   }, [camera, onCameraChange]);
 
   const fit = useCallback((besideChat = false) => {
@@ -300,13 +297,7 @@ export function WorkspaceCanvas({
     const element = viewport.current;
     if (!element || !chatWindowRef) return;
     if (!taskId || taskX === undefined || taskY === undefined || taskDepth === undefined) {
-      const previous = overviewCamera.current;
-      if (previous) {
-        overviewCamera.current = null;
-        lastFocusedTask.current = undefined;
-        setCameraTransition(true);
-        setCamera(previous);
-      }
+      lastFocusedTask.current = undefined;
       return;
     }
 
@@ -333,7 +324,6 @@ export function WorkspaceCanvas({
       };
       setCameraTransition(true);
       const current = cameraRef.current;
-      overviewCamera.current ??= current;
       if (current.x !== next.x || current.y !== next.y || current.scale !== next.scale) setCamera(next);
     };
 
@@ -511,7 +501,7 @@ export function WorkspaceCanvas({
     if (event.key === "Escape" && selectedId) {
       event.stopPropagation();
       onSelect(null);
-      nodes.current.get(selectedId)?.focus();
+      nodes.current.get(selectedId)?.focus({ preventScroll: true });
       return;
     }
     const directions: Record<string, Point> = {
@@ -671,14 +661,11 @@ export function WorkspaceCanvas({
           );
         })}
       </div>
-      {(onCreateTask || layout.nodes.length > 0) && <div className="swarm-canvas-controls" aria-label="Canvas controls">
-        {onCreateTask && <button type="button" aria-label="New session" title="New session" onClick={onCreateTask}>+</button>}
-        {layout.nodes.length > 0 && <>
-          <button type="button" aria-label="Zoom out" onClick={() => zoomCenter(1 / 1.2)}>−</button>
-          <output aria-label="Zoom level">{Math.round(camera.scale * 100)}%</output>
-          <button type="button" aria-label="Zoom in" onClick={() => zoomCenter(1.2)}>+</button>
-          <button type="button" className="swarm-fit" onClick={fitAllTasks}>Fit all tasks</button>
-        </>}
+      {layout.nodes.length > 0 && <div className="swarm-canvas-controls" aria-label="Canvas controls">
+        <button type="button" aria-label="Zoom out" onClick={() => zoomCenter(1 / 1.2)}>−</button>
+        <output aria-label="Zoom level">{Math.round(camera.scale * 100)}%</output>
+        <button type="button" aria-label="Zoom in" onClick={() => zoomCenter(1.2)}>+</button>
+        <button type="button" className="swarm-fit" onClick={fitAllTasks}>Fit all tasks</button>
       </div>}
     </div>
   );
