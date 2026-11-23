@@ -28,7 +28,7 @@
 
 .new-session textarea { resize: vertical; min-height: 7rem; }
 .new-session fieldset { margin: 0; padding: 8px 10px 10px; }
-.new-session fieldset label { display: flex; align-items: baseline; gap: 6px; overflow-wrap: anywhere; }
+.new-session fieldset label { display: flex; align-items: center; gap: 6px; overflow-wrap: anywhere; }
 .new-session fieldset p { margin: 0 0 8px; overflow-wrap: anywhere; }
 .new-session-error { color: #ff9393; margin: 0; }
 .new-session footer { display: flex; flex-wrap: wrap; gap: 8px; justify-content: flex-end; }
@@ -46,3 +46,34 @@
 .new-session button:disabled { opacity: .55; cursor: default; }
 
 .new-session-field :is(textarea, input)::placeholder { color: var(--text-muted); }
+
+.new-session-field :is(textarea, input):focus,
+.new-session input[type="checkbox"]:focus {
+  outline: none;
+  border-color: var(--control-highlight);
+}
+
+.new-session input[type="checkbox"] {
+  appearance: none;
+  display: grid;
+  place-content: center;
+  flex: none;
+  width: 14px;
+  height: 14px;
+  margin: 0;
+  border: 1px solid var(--floating-frame);
+  border-radius: 3px;
+  background: var(--panel-input-bg);
+  color: var(--control-highlight);
+}
+
+.new-session input[type="checkbox"]:checked { background: var(--inbox-row-selected); }
+.new-session input[type="checkbox"]:checked::before {
+  content: "";
+  width: 6px;
+  height: 3px;
+  border: solid currentColor;
+  border-width: 0 0 1.5px 1.5px;
+  transform: translateY(-1px) rotate(-45deg);
+}
+.new-session input[type="checkbox"]:disabled { opacity: .55; }

@@ -1,4 +1,3 @@
-import { requestsImplementation } from "./workspace-implementation-intent.ts";
 import { demoTasks } from "./workspace-demo.ts";
 import { WorkspaceUsage } from "./workspace-usage.ts";
 import { randomUUID } from "node:crypto";
@@ -26,6 +25,7 @@ export type WorkspaceMessage = {
   state?: "queued" | "streaming" | "failed" | "cancelled";
   productQuestion?: { status: "pending" } | { status: "answered"; answerMessageId: string };
   answersProductQuestionId?: string;
+  implementationRequest?: { status: "pending" | "approved" | "superseded" };
 };
 export type WorkspaceAgent = {
   id: string;
@@ -66,7 +66,7 @@ export type AgentSignal = { id: string; senderId: string; recipientId: string };
 export type WorkspaceCommand =
   | { type: "createTask"; name: string; projectIds: string[] }
   | { type: "answerProductQuestion"; agentId: string; questionId: string; text: string }
-  | { type: "startImplementation"; agentId: string; text?: string }
+  | { type: "approveImplementation"; agentId: string; requestId: string }
   | { type: "send" | "steer"; agentId: string; text: string }
   | { type: "resumeQueue" | "cancel" | "restore" | "delete"; agentId: string }
   | { type: "archive"; agentId: string; stopRunning?: boolean };
@@ -96,7 +96,9 @@ type AgentSession = {
   stream: Map<string, WorkspaceMessage>;
 };
 
-const taskToolVersion = 14;
+const questionResolutionToolVersion = 14;
+const taskToolVersion = 15;
+const legacyImplementationRequestPrefix = "Request implementation: ";
 const legacyQuestionResolutionPrefix = "Resolve product question: ";
 const workspaceThreadConfig = { "features.multi_agent": true, "features.multi_agent_v2": true };
 const input = (text: string) => [{ type: "text", text, text_elements: [] }];
@@ -124,6 +126,14 @@ const resolveQuestionTool = {
     required: ["questionId"],
     additionalProperties: false,
   },
+};
+const implementationRequestTool = {
+  type: "function",
+  deferLoading: false,
+  name: "request_implementation",
+  description: "Ask the user to allow edits in isolated worktrees. Summarize the intended changes, then end the turn and wait for approval in the workspace.",
+  inputSchema: { type: "object", properties: { summary: { type: "string" } },
+    required: ["summary"], additionalProperties: false },
 };
 const decisionTool = {
   type: "function",
@@ -330,8 +340,12 @@ export class WorkspaceRuntime {
       return;
     }
     if (!this.isActive(session)) throw new Error("Restore this archived conversation before messaging it.");
-    if (command.type === "startImplementation") {
-      await this.startDirectTaskImplementation(session, command.text);
+    if (command.type === "approveImplementation") {
+      const request = session.agent.messages.find(({ id }) => id === command.requestId);
+      if (request?.implementationRequest?.status !== "pending") {
+        throw new Error("This implementation request is no longer pending.");
+      }
+      await this.startDirectTaskImplementation(session, request);
       return;
     }
     if (command.type === "cancel") {
@@ -361,14 +375,16 @@ export class WorkspaceRuntime {
       this.answerProductQuestion(session, command.questionId, text);
       return;
     }
-    const hasPendingQuestion = session.agent.messages.some((entry) => entry.productQuestion?.status === "pending");
-    if (session.agent.directTask?.projectIds.length && !hasPendingQuestion && requestsImplementation(text)) {
-      await this.startDirectTaskImplementation(session, text, { fromChat: true });
-      return;
-    }
+    this.supersedeImplementationRequest(session);
     const next = message("user", text);
     session.agent.messages.push(next);
     await this.enqueue(session, next);
+  }
+
+  private supersedeImplementationRequest(session: AgentSession) {
+    const request = session.agent.messages.find((entry) => entry.implementationRequest?.status === "pending");
+    if (request) request.implementationRequest = { status: "superseded" };
+    return request;
   }
 
   private answerProductQuestion(session: AgentSession, questionId: string, text: string) {
@@ -378,6 +394,7 @@ export class WorkspaceRuntime {
     if (question?.productQuestion?.status !== "pending") {
       throw new Error("This product question is no longer awaiting an answer in this task.");
     }
+    const superseded = this.supersedeImplementationRequest(session);
     const answer = { ...message("user", text), answersProductQuestionId: question.id, state: "queued" as const };
     question.productQuestion = { status: "answered", answerMessageId: answer.id };
     session.agent.messages.push(answer);
@@ -385,6 +402,7 @@ export class WorkspaceRuntime {
     if (!this.persist()) {
       session.queue.pop();
       session.agent.messages.pop();
+      if (superseded) superseded.implementationRequest = { status: "pending" };
       question.productQuestion = { status: "pending" };
       this.publish(false);
       throw new Error("Orchestra could not save the answer. The question remains pending.");
@@ -421,7 +439,7 @@ export class WorkspaceRuntime {
     }
   }
 
-  private async startDirectTaskImplementation(session: AgentSession, text?: string, { fromChat = false } = {}) {
+  private async startDirectTaskImplementation(session: AgentSession, request: WorkspaceMessage) {
     const task = session.agent.directTask;
     if (!task?.projectIds.length) throw new Error("Choose at least one repository for an implementation task.");
     if (!this.available || this.storageFailed || !session.threadId || session.agent.unavailableReason) {
@@ -434,11 +452,8 @@ export class WorkspaceRuntime {
     if (this.hasRunningNativeChildren(session)) {
       throw new Error("Wait for this task's Codex subagents to finish before approving implementation.");
     }
-    if (!fromChat && !session.agent.messages.some((entry) => entry.role === "assistant" && !entry.state)) {
-      throw new Error("Discuss the task in this chat before approving implementation.");
-    }
-    if (text !== undefined && (typeof text !== "string" || text.length > 24_000)) {
-      throw new Error("Keep the implementation instruction within 24,000 characters.");
+    if (session.agent.messages.some((entry) => entry.productQuestion?.status === "pending")) {
+      throw new Error("Answer the pending product questions before approving implementation.");
     }
     if (!session.agent.candidate) {
       const candidates: NonNullable<WorkspaceAgent["directCandidates"]> = [];
@@ -462,12 +477,13 @@ export class WorkspaceRuntime {
       const project = this.projects.find(({ id }) => id === candidate.projectId)!;
       validateCandidateWorktree(project.path, candidate);
     }
-    const assignment = message("user", text?.trim() || "Implement the plan we agreed in this chat.");
+    const assignment = message("user", "I approve the requested implementation.");
+    request.implementationRequest = { status: "approved" };
     task.phase = "implementing";
     delete task.detail;
     delete session.agent.integration;
     session.agent.messages.push(assignment);
-    await this.begin(session, assignment, true);
+    await this.begin(session, assignment, request.text);
   }
 
   private directTaskCandidates(session: AgentSession) {
@@ -873,9 +889,20 @@ export class WorkspaceRuntime {
       (roots.length ? `The selected repositories for read-only investigation are ${JSON.stringify(roots)}. ` : "No repositories are selected. ") +
       "Plan and discuss by default. Use raise_product_decision if you need the user to choose, then end the turn. " +
       "When orchestra_pending_questions is supplied, use its question IDs and the resolution tool it indicates only if the current user reply answers that question. Leave unrelated questions open. " +
+      "Never ask the user to type a trigger phrase to continue implementation. " +
       "Perform code changes only in a turn explicitly approved for implementation, using its isolated worktree paths. " +
-      "If editing is intended but the current turn is read-only, resolve any answered product question and ask the user to send the standalone reply Implement that plan. " +
+      (roots.length ? this.implementationRequestInstructions(session) : "") +
       "Follow the repository instructions. Verify the candidate, call submit_check_result with the actual result, and report blockers concisely.";
+  }
+
+  private implementationRequestInstructions(session: AgentSession) {
+    const toolVersion = session.threadId ? session.toolVersion ?? 0 : taskToolVersion;
+    const requestTool = toolVersion >= taskToolVersion
+      ? "call request_implementation with a summary of the intended changes"
+      : `call raise_product_decision with a question starting with "${legacyImplementationRequestPrefix}" followed by a summary of the intended changes`;
+    return "If the user asks for code changes, confirms a plan, or asks you to proceed with implementation during a read-only turn, " +
+      `resolve any answered product questions first, then ${requestTool}. ` +
+      "Use this tool instead of asking the user to type a specific phrase. End the turn and wait for the workspace approval button. ";
   }
 
   private selectModelSettings(): ModelSettings {
@@ -902,7 +929,7 @@ export class WorkspaceRuntime {
       ...this.threadPermissions(session),
       config: workspaceThreadConfig,
       ephemeral: false,
-      dynamicTools: [decisionTool, checkTool, resolveQuestionTool],
+      dynamicTools: [decisionTool, checkTool, resolveQuestionTool, implementationRequestTool],
       developerInstructions: this.instructions(session),
     });
     const { thread, modelProvider } = response;
@@ -934,7 +961,7 @@ export class WorkspaceRuntime {
       .filter((entry) => entry.productQuestion?.status === "pending");
     if (!questions.length) return undefined;
     // Existing Codex threads retain their original tool definitions.
-    const resolve = session.toolVersion === taskToolVersion
+    const resolve = (session.toolVersion ?? 0) >= questionResolutionToolVersion
       ? "call resolve_product_question with its questionId"
       : `call raise_product_decision with its question argument set to "${legacyQuestionResolutionPrefix}<question ID>"`;
     return {
@@ -984,15 +1011,17 @@ export class WorkspaceRuntime {
       : entry.text;
   }
 
-  private implementationInput(session: AgentSession, text: string) {
+  private implementationInput(session: AgentSession, text: string, approvedScope: string) {
     const roots = this.directTaskCandidates(session);
     return text + "\n\nImplementation is explicitly approved for this turn. Write only in these isolated worktrees: " +
       JSON.stringify(roots.map(({ projectId, path }) => ({ projectId, path }))) +
+      ". The approved scope is " + JSON.stringify(approvedScope) +
       ". Keep implementation edits in this session. Wait for any subagents to finish, then run the agreed verification and call submit_check_result before ending the turn.";
   }
 
-  private async begin(session: AgentSession, next: WorkspaceMessage, taskImplementation = false) {
+  private async begin(session: AgentSession, next: WorkspaceMessage, approvedScope?: string) {
     if (!this.isActive(session)) return;
+    const taskImplementation = approvedScope !== undefined;
     const run: Run = { message: next, taskImplementation };
     session.run = run;
     delete next.state;
@@ -1010,7 +1039,7 @@ export class WorkspaceRuntime {
         threadId: session.threadId,
         approvalPolicy: "never",
         ...this.directTaskTurnScope(session, taskImplementation),
-        input: input(taskImplementation ? this.implementationInput(session, next.text) : this.answerInput(session, next)),
+        input: input(approvedScope !== undefined ? this.implementationInput(session, next.text, approvedScope) : this.answerInput(session, next)),
         additionalContext: this.pendingQuestionContext(session, next, taskImplementation),
       });
       session.freshThread = false;
@@ -1046,7 +1075,10 @@ export class WorkspaceRuntime {
 
   private async steer(session: AgentSession, text: string) {
     if (!session.agent.canSteer) throw new Error("There is no active turn to steer.");
-    if (session.agent.directTask && session.run) session.run.steered = true;
+    if (session.agent.directTask && session.run) {
+      session.run.steered = true;
+      if (this.supersedeImplementationRequest(session)) this.publish();
+    }
     if (!this.demo) {
       try {
         await this.server!.call("turn/steer", {
@@ -1073,6 +1105,7 @@ export class WorkspaceRuntime {
   private finish(session: AgentSession, completed: boolean, detail?: string, cancelled = false) {
     const directTaskRun = session.run?.taskImplementation ? session.run : undefined;
     if (session.run && !completed) {
+      this.supersedeImplementationRequest(session);
       const answer = session.run.message;
       answer.state = cancelled ? "cancelled" : "failed";
       if (!session.recovery) this.reopenProductQuestion(session, answer);
@@ -1316,6 +1349,32 @@ export class WorkspaceRuntime {
     }
   }
 
+  private requestImplementation(session: AgentSession, rawSummary: unknown) {
+    if (!session.agent.directTask?.projectIds.length || session.run?.taskImplementation) {
+      throw new Error("Only a read-only repository task can request implementation.");
+    }
+    const summary = typeof rawSummary === "string" ? rawSummary.trim() : "";
+    if (!summary || summary.length > 2400) throw new Error("Provide a summary of up to 2,400 characters.");
+    if (session.agent.messages.some((entry) => entry.productQuestion?.status === "pending")) {
+      throw new Error("Resolve pending product questions before requesting implementation.");
+    }
+    if (session.queue.length) throw new Error("Wait for newer queued instructions before requesting implementation.");
+    const pending = session.agent.messages.find((entry) => entry.implementationRequest?.status === "pending");
+    if (pending) return pending.id;
+    const request: WorkspaceMessage = {
+      ...message("system", summary, "action"),
+      implementationRequest: { status: "pending" },
+    };
+    session.agent.messages.push(request);
+    if (!this.persist()) {
+      session.agent.messages.pop();
+      this.publish(false);
+      throw new Error("Orchestra could not save the implementation request.");
+    }
+    this.publish(false);
+    return request.id;
+  }
+
   private async onRequest({ id, method, params }: Event & { id: Id }) {
     const session = params.threadId ? this.threadSessions.get(params.threadId) : undefined;
     const run = session?.run;
@@ -1337,6 +1396,11 @@ export class WorkspaceRuntime {
       return;
     }
     try {
+      if (params.tool === implementationRequestTool.name) {
+        const requestId = this.requestImplementation(session, params.arguments?.summary);
+        reply(true, JSON.stringify({ requestId, message: "End the turn and wait for approval in the workspace." }));
+        return;
+      }
       if (params.tool === resolveQuestionTool.name) {
         this.resolveProductQuestion(session, params.arguments?.questionId);
         reply(true, "Question marked answered.");
@@ -1345,7 +1409,12 @@ export class WorkspaceRuntime {
       if (params.tool === decisionTool.name) {
         const question = typeof params.arguments?.question === "string" ? params.arguments.question.trim() : "";
         if (!question || question.length > 4000) throw new Error("Provide a product question of up to 4,000 characters.");
-        if (session.toolVersion !== taskToolVersion && question.startsWith(legacyQuestionResolutionPrefix)) {
+        if ((session.toolVersion ?? 0) < taskToolVersion && question.startsWith(legacyImplementationRequestPrefix)) {
+          const requestId = this.requestImplementation(session, question.slice(legacyImplementationRequestPrefix.length));
+          reply(true, JSON.stringify({ requestId, message: "End the turn and wait for approval in the workspace." }));
+          return;
+        }
+        if ((session.toolVersion ?? 0) < questionResolutionToolVersion && question.startsWith(legacyQuestionResolutionPrefix)) {
           this.resolveProductQuestion(session, question.slice(legacyQuestionResolutionPrefix.length).trim());
           reply(true, "Question marked answered.");
           return;

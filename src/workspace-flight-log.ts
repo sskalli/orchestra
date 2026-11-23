@@ -39,9 +39,16 @@ export function recordFlightLog(log: FlightLog, events: InboxEvent[], agents: { 
   const previouslyArchived = new Set(log.archivedAgentIds);
   const entries = log.entries.filter(({ event }) => activeIds.has(event.agentId)).map((entry) =>
     entry.event.text ? { ...entry, event: { ...entry.event, text: "" } } : entry);
-  const latest = Object.fromEntries(events.map((event) => [
-    event.id, JSON.stringify([event.status, event.agentId, event.messageId]),
-  ]));
+  const latest = Object.fromEntries(events.map((event) => {
+    const previous = log.latest[event.id];
+    const identity = JSON.stringify([event.status, event.agentId]);
+    // A working session can publish several messages before its status changes.
+    // Keep its current signature, including signatures saved by earlier versions.
+    if (event.tone === "working" && previous?.startsWith(identity.slice(0, -1) + ",")) {
+      return [event.id, previous];
+    }
+    return [event.id, JSON.stringify([event.status, event.agentId, event.messageId])];
+  }));
   const newEntries = events.flatMap((event) => {
     if (latest[event.id] === log.latest[event.id] || (previouslyArchived.has(event.agentId) && !event.needsInput)) return [];
     return [{ sequence: ++sequence, event: { ...event, text: "" } }];

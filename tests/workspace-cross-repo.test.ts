@@ -84,7 +84,7 @@ function crossRepoFixture(t: TestContext, sources: Record<string, string> = {
 test("a direct task without repositories starts in a single read-only thread", async (t) => {
   const fixture = crossRepoFixture(t);
   if (!fixture) return;
-  const { runtime, internal, requests, complete } = fixture;
+  const { runtime, internal, requests, call, complete } = fixture;
   const agentId = await runtime.command({ type: "createTask", name: "Dinner ideas", projectIds: [] });
   assert.equal(typeof agentId, "string");
   const task = internal.sessions.get(agentId);
@@ -95,8 +95,9 @@ test("a direct task without repositories starts in a single read-only thread", a
   assert.equal(started.threadId, task.threadId);
   assert.equal(started.sandboxPolicy.type, "readOnly");
   assert.equal(started.approvalPolicy, "never");
+  assert.equal((await call(task, "request_implementation", { summary: "Write a recipe." })).success, false);
   complete(task);
-  await assert.rejects(runtime.command({ type: "startImplementation", agentId }));
+  await assert.rejects(runtime.command({ type: "approveImplementation", agentId, requestId: "missing" }));
   assert.equal(runtime.snapshot().agents.length, 1);
 });
 
@@ -125,15 +126,20 @@ test("one direct task plans and delivers an isolated cross-repo change in the sa
     threadId: task.threadId, turnId: task.run.turn.id,
     item: { type: "agentMessage", id: "proposed-plan", text: "Update both exports, then run the shared assertion." },
   } });
+  const request = await call(task, "request_implementation", { summary: "Update both exports, then run the shared assertion." });
+  assert.equal(request.success, true, request.text);
+  const { requestId } = JSON.parse(request.text);
+  assert.deepEqual(projects.map(({ path }) => git(path, "worktree", "list", "--porcelain")), initial);
+  await assert.rejects(runtime.command({ type: "approveImplementation", agentId, requestId }));
   complete(task);
 
-  await runtime.command({ type: "send", agentId, text: "Go ahead and implement that." });
+  await runtime.command({ type: "approveImplementation", agentId, requestId });
   const implementation = requests.findLast(({ method }) => method === "turn/start")?.params;
   assert.equal(implementation.threadId, planning.threadId);
   assert.equal(requests.filter(({ method }) => method === "thread/start").length, 1);
   assert.equal(requests.filter(({ method }) => method === "turn/start").length, 2);
   assert.equal(getTask().directTask.phase, "implementing");
-  await assert.rejects(runtime.command({ type: "startImplementation", agentId }));
+  await assert.rejects(runtime.command({ type: "approveImplementation", agentId, requestId }));
   assert.equal(requests.filter(({ method }) => method === "turn/start").length, 2);
   assert.equal(implementation.sandboxPolicy.type, "workspaceWrite");
   assert.equal(implementation.sandboxPolicy.networkAccess, false);
@@ -186,54 +192,64 @@ test("one direct task plans and delivers an isolated cross-repo change in the sa
   assert.equal(getTask().integration?.id, delivery.integration?.id);
 });
 
-test("a detailed request stays read-only until standalone chat approval", async (t) => {
+test("implementation approval is tied to a pending request in its own conversation", async (t) => {
   const fixture = crossRepoFixture(t);
   if (!fixture) return;
-  const { runtime, internal, projects, requests, complete } = fixture;
-  const [api] = projects;
+  const { root, runtime, internal, projects, requests, call, complete } = fixture;
+  const store = workspaceStore(root, join(root, "state"));
+  internal.store = store;
+  internal.storageReady = true;
+  const [api, ui] = projects;
   const agentId = String(await runtime.command({ type: "createTask", name: "Fix status", projectIds: ["api"] }));
-  const firstMessage = "Implement now: Fix the status message in index.mjs.";
-  await runtime.command({ type: "send", agentId, text: firstMessage });
-  assert.equal(requests.findLast(({ method }) => method === "turn/start")?.params.sandboxPolicy.type, "readOnly");
-  complete(internal.sessions.get(agentId));
+  const otherId = String(await runtime.command({ type: "createTask", name: "Discuss status", projectIds: ["ui"] }));
+  const task = internal.sessions.get(agentId);
+  const initial = projects.map(({ path }) => git(path, "worktree", "list", "--porcelain"));
+  const lastTurn = () => requests.findLast(({ method }) => method === "turn/start")?.params;
+  const prompts = [
+    "Implement now: Make no edits. I only want a review.",
+    "Implement now: Fix the footer. Get my go-ahead before touching files.",
+    "Go ahead and implement that.",
+    "Please fix the status message in index.mjs.",
+  ];
+  for (const [index, text] of prompts.entries()) {
+    await runtime.command({ type: "send", agentId, text });
+    assert.equal(lastTurn().sandboxPolicy.type, "readOnly", text);
+    if (index < prompts.length - 1) complete(task);
+  }
 
-  const approval = "Go ahead and implement that.";
-  await runtime.command({ type: "send", agentId, text: approval });
-  const implementation = requests.findLast(({ method }) => method === "turn/start")?.params;
-  assert.equal(implementation.threadId, internal.sessions.get(agentId).threadId);
+  const summary = "Fix only the status message in index.mjs.";
+  const request = await call(task, "request_implementation", { summary });
+  assert.equal(request.success, true, request.text);
+  const { requestId } = JSON.parse(request.text);
+  complete(task);
+  const getRequest = () => runtime.snapshot().agents.find(({ id }) => id === agentId)?.messages
+    .find(({ id }) => id === requestId);
+  const savedRequestStatus = () => store.load()?.find(({ agent }) => agent.id === agentId)?.agent.messages
+    .find(({ id }) => id === requestId)?.implementationRequest?.status;
+  assert.equal(getRequest()?.implementationRequest?.status, "pending");
+  assert.equal(savedRequestStatus(), "pending");
+
+  await assert.rejects(runtime.command({ type: "approveImplementation", agentId, requestId: "missing" }));
+  await assert.rejects(runtime.command({ type: "approveImplementation", agentId: otherId, requestId }));
+  assert.deepEqual(projects.map(({ path }) => git(path, "worktree", "list", "--porcelain")), initial);
+  assert.equal(lastTurn().sandboxPolicy.type, "readOnly");
+  await runtime.command({ type: "approveImplementation", agentId, requestId });
+
+  const implementation = lastTurn();
+  assert.equal(implementation.threadId, task.threadId);
   assert.equal(implementation.sandboxPolicy.type, "workspaceWrite");
   const [writableRoot] = implementation.sandboxPolicy.writableRoots;
   assert.equal(implementation.sandboxPolicy.writableRoots.length, 1);
   assert.notEqual(writableRoot, api.path);
   assert(git(api.path, "worktree", "list", "--porcelain").split("\n").includes("worktree " + writableRoot));
-  assert(implementation.input[0].text.includes(approval));
-  assert.deepEqual(runtime.snapshot().agents.find(({ id }) => id === agentId)?.messages
-    .filter(({ role }) => role === "user").map(({ text }) => text), [firstMessage, approval]);
+  assert.equal(git(ui.path, "worktree", "list", "--porcelain"), initial[1]);
+  assert(implementation.input[0].text.includes(summary));
+  assert.equal(getRequest()?.implementationRequest?.status, "approved");
+  assert.equal(savedRequestStatus(), "approved");
+  complete(task);
 
-  const discussionId = String(await runtime.command({ type: "createTask", name: "Discuss status", projectIds: ["ui"] }));
-  for (const text of [
-    "How would you fix the status message?",
-    "Fix the status message?",
-    "Fix the status message only after I confirm.",
-    "Fix this after approval.",
-    "Fix the footer but wait for my approval before editing.",
-    "Implement later, just outline the plan now.",
-    "Fix this — just show me the plan first.",
-    "Implement now: Fix the footer, but wait for my approval before editing.",
-    "Implement now: Just outline the plan.",
-    "Implement now: Make no edits. I only want a review.",
-    "Implement now: Fix the footer. Get my go-ahead before touching files.",
-    "Implement now:",
-    "Show what \"Fix the status message\" would do.",
-    "Don't fix the status message.",
-  ]) {
-    await runtime.command({ type: "send", agentId: discussionId, text });
-    const discussion = requests.findLast(({ method }) => method === "turn/start")?.params;
-    assert.equal(discussion.sandboxPolicy.type, "readOnly", text);
-    complete(internal.sessions.get(discussionId));
-  }
-  assert.equal(git(projects[1].path, "worktree", "list", "--porcelain").split("\n")
-    .filter((line) => line.startsWith("worktree ")).length, 1);
+  await assert.rejects(runtime.command({ type: "approveImplementation", agentId, requestId }));
+  assert.equal(lastTurn(), implementation);
 });
 
 test("an imperative answer resolves a product question in a read-only turn before implementation", async (t) => {
@@ -264,9 +280,12 @@ test("an imperative answer resolves a product question in a read-only turn befor
     .find(({ role, text }) => role === "user" && text === answer);
   assert(answerMessage);
   assert.deepEqual(getQuestion()?.productQuestion, { status: "answered", answerMessageId: answerMessage.id });
+  const request = await call(task, "request_implementation", { summary: "Fix the footer." });
+  assert.equal(request.success, true, request.text);
+  const { requestId } = JSON.parse(request.text);
   complete(task);
 
-  await runtime.command({ type: "send", agentId, text: "Go ahead and implement that." });
+  await runtime.command({ type: "approveImplementation", agentId, requestId });
   const implementation = requests.findLast(({ method }) => method === "turn/start")?.params;
   assert.equal(implementation.threadId, answerTurn.threadId);
   assert.equal(implementation.sandboxPolicy.type, "workspaceWrite");

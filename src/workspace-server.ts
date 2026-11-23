@@ -50,8 +50,8 @@ async function readCommand(request: IncomingMessage) {
       typeof command.text === "string" && command.text.trim()) {
     return { type: "answerProductQuestion" as const, agentId: command.agentId, questionId: command.questionId, text: command.text };
   }
-  if (command.type === "startImplementation" && (command.text === undefined || typeof command.text === "string")) {
-    return { type: "startImplementation" as const, agentId: command.agentId, text: command.text };
+  if (command.type === "approveImplementation" && typeof command.requestId === "string" && command.requestId) {
+    return { type: "approveImplementation" as const, agentId: command.agentId, requestId: command.requestId };
   }
   throw new Error("Invalid workspace command");
 }
