@@ -127,7 +127,7 @@ test("one direct task plans and delivers an isolated cross-repo change in the sa
   } });
   complete(task);
 
-  await runtime.command({ type: "startImplementation", agentId, text: "Implement the agreed status payload and verify both repos together." });
+  await runtime.command({ type: "send", agentId, text: "Go ahead and implement that." });
   const implementation = requests.findLast(({ method }) => method === "turn/start")?.params;
   assert.equal(implementation.threadId, planning.threadId);
   assert.equal(requests.filter(({ method }) => method === "thread/start").length, 1);
@@ -184,6 +184,92 @@ test("one direct task plans and delivers an isolated cross-repo change in the sa
   complete(task);
   assert.equal(getTask().directTask.phase, "ready-for-review");
   assert.equal(getTask().integration?.id, delivery.integration?.id);
+});
+
+test("a detailed request stays read-only until standalone chat approval", async (t) => {
+  const fixture = crossRepoFixture(t);
+  if (!fixture) return;
+  const { runtime, internal, projects, requests, complete } = fixture;
+  const [api] = projects;
+  const agentId = String(await runtime.command({ type: "createTask", name: "Fix status", projectIds: ["api"] }));
+  const firstMessage = "Implement now: Fix the status message in index.mjs.";
+  await runtime.command({ type: "send", agentId, text: firstMessage });
+  assert.equal(requests.findLast(({ method }) => method === "turn/start")?.params.sandboxPolicy.type, "readOnly");
+  complete(internal.sessions.get(agentId));
+
+  const approval = "Go ahead and implement that.";
+  await runtime.command({ type: "send", agentId, text: approval });
+  const implementation = requests.findLast(({ method }) => method === "turn/start")?.params;
+  assert.equal(implementation.threadId, internal.sessions.get(agentId).threadId);
+  assert.equal(implementation.sandboxPolicy.type, "workspaceWrite");
+  const [writableRoot] = implementation.sandboxPolicy.writableRoots;
+  assert.equal(implementation.sandboxPolicy.writableRoots.length, 1);
+  assert.notEqual(writableRoot, api.path);
+  assert(git(api.path, "worktree", "list", "--porcelain").split("\n").includes("worktree " + writableRoot));
+  assert(implementation.input[0].text.includes(approval));
+  assert.deepEqual(runtime.snapshot().agents.find(({ id }) => id === agentId)?.messages
+    .filter(({ role }) => role === "user").map(({ text }) => text), [firstMessage, approval]);
+
+  const discussionId = String(await runtime.command({ type: "createTask", name: "Discuss status", projectIds: ["ui"] }));
+  for (const text of [
+    "How would you fix the status message?",
+    "Fix the status message?",
+    "Fix the status message only after I confirm.",
+    "Fix this after approval.",
+    "Fix the footer but wait for my approval before editing.",
+    "Implement later, just outline the plan now.",
+    "Fix this — just show me the plan first.",
+    "Implement now: Fix the footer, but wait for my approval before editing.",
+    "Implement now: Just outline the plan.",
+    "Implement now: Make no edits. I only want a review.",
+    "Implement now: Fix the footer. Get my go-ahead before touching files.",
+    "Implement now:",
+    "Show what \"Fix the status message\" would do.",
+    "Don't fix the status message.",
+  ]) {
+    await runtime.command({ type: "send", agentId: discussionId, text });
+    const discussion = requests.findLast(({ method }) => method === "turn/start")?.params;
+    assert.equal(discussion.sandboxPolicy.type, "readOnly", text);
+    complete(internal.sessions.get(discussionId));
+  }
+  assert.equal(git(projects[1].path, "worktree", "list", "--porcelain").split("\n")
+    .filter((line) => line.startsWith("worktree ")).length, 1);
+});
+
+test("an imperative answer resolves a product question in a read-only turn before implementation", async (t) => {
+  const fixture = crossRepoFixture(t);
+  if (!fixture) return;
+  const { runtime, internal, projects, requests, call, complete } = fixture;
+  const agentId = String(await runtime.command({ type: "createTask", name: "Footer", projectIds: ["ui"] }));
+  const task = internal.sessions.get(agentId);
+  const getQuestion = () => runtime.snapshot().agents.find(({ id }) => id === agentId)?.messages
+    .find((message) => message.productQuestion);
+  const worktrees = git(projects[1].path, "worktree", "list", "--porcelain");
+
+  await runtime.command({ type: "send", agentId, text: "Review the footer." });
+  const asked = await call(task, "raise_product_decision", { question: "Should we fix or remove the footer?" });
+  assert.equal(asked.success, true, asked.text);
+  const { questionId } = JSON.parse(asked.text);
+  complete(task);
+
+  const answer = "Fix this.";
+  await runtime.command({ type: "send", agentId, text: answer });
+  const answerTurn = requests.findLast(({ method }) => method === "turn/start")?.params;
+  assert.equal(answerTurn.sandboxPolicy.type, "readOnly");
+  assert.equal(git(projects[1].path, "worktree", "list", "--porcelain"), worktrees);
+  assert.equal(JSON.parse(answerTurn.additionalContext.orchestra_pending_questions.value).questions[0].id, questionId);
+  const resolution = await call(task, "resolve_product_question", { questionId });
+  assert.equal(resolution.success, true, resolution.text);
+  const answerMessage = runtime.snapshot().agents.find(({ id }) => id === agentId)?.messages
+    .find(({ role, text }) => role === "user" && text === answer);
+  assert(answerMessage);
+  assert.deepEqual(getQuestion()?.productQuestion, { status: "answered", answerMessageId: answerMessage.id });
+  complete(task);
+
+  await runtime.command({ type: "send", agentId, text: "Go ahead and implement that." });
+  const implementation = requests.findLast(({ method }) => method === "turn/start")?.params;
+  assert.equal(implementation.threadId, answerTurn.threadId);
+  assert.equal(implementation.sandboxPolicy.type, "workspaceWrite");
 });
 
 test("direct tasks observe only their native children and recover their history without reopening them", async (t) => {

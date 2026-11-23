@@ -1,4 +1,6 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import type { ReactNode } from "react";
+import { LuListFilter, LuMinus, LuTrash2 } from "react-icons/lu";
 import "./workspace-inbox.css";
 
 export type InboxEvent = {
@@ -9,37 +11,82 @@ export type InboxEvent = {
   text: string;
   agentId: string;
   messageId?: string;
+  needsInput?: boolean;
 };
 
 type WorkspaceInboxProps = {
   events: InboxEvent[];
+  toggle?: ReactNode;
   onOpen: (agentId: string, messageId?: string) => void;
   onClose: () => void;
+  onClear: () => void;
+  canClear: boolean;
 };
 
-export function WorkspaceInbox({ events, onOpen, onClose }: WorkspaceInboxProps) {
-  const [statusFilter, setStatusFilter] = useState("");
-  const statuses = [...new Set([...events.map(({ status }) => status), ...(statusFilter ? [statusFilter] : [])])].sort();
+export function WorkspaceInbox({ events, toggle, onOpen, onClose, onClear, canClear }: WorkspaceInboxProps) {
+  const filters = useRef<HTMLDivElement>(null);
+  const filterButton = useRef<HTMLButtonElement>(null);
+  const [filtersOpen, setFiltersOpen] = useState(false);
+  const [filter, setFilter] = useState<Pick<InboxEvent, "status" | "tone">>();
+  const statusFilter = filter?.status ?? "";
+  const tones = new Map(events.map(({ status, tone }) => [status, tone]));
+  if (filter && !tones.has(filter.status)) tones.set(filter.status, filter.tone);
+  const statuses = [...tones.keys()].sort();
   const visibleEvents = statusFilter ? events.filter(({ status }) => status === statusFilter) : events;
+
+  useEffect(() => {
+    if (!filtersOpen) return;
+    function dismiss(event: PointerEvent) {
+      if (event.target instanceof Node && !filters.current?.contains(event.target)) setFiltersOpen(false);
+    }
+    document.addEventListener("pointerdown", dismiss);
+    return () => document.removeEventListener("pointerdown", dismiss);
+  }, [filtersOpen]);
 
   return (
     <section className="workspace-chat workspace-inbox" aria-label="Inbox">
       <header className="chat-header">
+        {toggle}
         <div className="chat-header-copy"><h2>Inbox</h2></div>
-        <button className="chat-icon-button" type="button" onClick={onClose} aria-label="Collapse inbox" title="Collapse inbox">
-          <span aria-hidden="true">«</span>
+        <div ref={filters} className="workspace-inbox-filter" onKeyDown={(event) => {
+          if (event.key === "Escape" && filtersOpen) {
+            event.stopPropagation();
+            setFiltersOpen(false);
+            filterButton.current?.focus();
+          }
+        }}>
+          <button ref={filterButton} className="interface-icon-button workspace-inbox-filter-toggle" type="button"
+            aria-label="Filter by status" title="Filter by status"
+            aria-expanded={filtersOpen} aria-controls="inbox-filter" data-active={Boolean(statusFilter)}
+            onClick={() => setFiltersOpen((open) => !open)}>
+            <LuListFilter aria-hidden="true" strokeWidth={1.5} />
+          </button>
+          <div className="workspace-inbox-filter-options" id="inbox-filter" role="group" aria-label="Status filters" hidden={!filtersOpen}>
+            {["", ...statuses].map((status) => <button type="button" key={status} aria-pressed={statusFilter === status}
+              onClick={() => {
+                const tone = tones.get(status);
+                setFilter(tone ? { status, tone } : undefined);
+                setFiltersOpen(false);
+                filterButton.current?.focus();
+              }}>
+              <span className={status ? `workspace-inbox-filter-color is-${tones.get(status)}` : "workspace-inbox-filter-all"}>
+                {status || "All statuses"}
+              </span>
+            </button>)}
+          </div>
+        </div>
+        <button className="chat-icon-button" type="button" disabled={!canClear} aria-label="Clear Inbox history"
+          title="Clear history and keep pending questions" onClick={onClear}>
+          <LuTrash2 aria-hidden="true" />
+        </button>
+        <button className="interface-icon-button" type="button" onClick={onClose}
+          aria-label="Minimize agent inbox" title="Minimize agent inbox">
+          <LuMinus aria-hidden="true" strokeWidth={1.5} />
         </button>
       </header>
-      <div className="workspace-inbox-filter">
-        <label htmlFor="inbox-status">Status</label>
-        <select id="inbox-status" value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)}>
-          <option value="">All statuses</option>
-          {statuses.map((status) => <option key={status} value={status}>{status}</option>)}
-        </select>
-      </div>
       <div className="workspace-inbox-feed">
         {visibleEvents.length === 0 ? <p className="workspace-inbox-empty" role="status">
-          {statusFilter ? "No tasks with this status." : "No task activity yet."}
+          {statusFilter ? "No tasks with this status." : "No activity in the Inbox."}
         </p> : (
           <ul className="workspace-inbox-events" aria-label="Task activity">
             {visibleEvents.map(({ id, agentName, status, tone, text, agentId, messageId }) => (

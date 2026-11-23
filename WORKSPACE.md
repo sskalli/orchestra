@@ -12,7 +12,7 @@ npm run workspace -- --project app=/path/to/app --project api=/path/to/api
 
 The first command is a simulated demo. Live sessions use a local Codex App Server. Sign in through ChatGPT before launching. Worktrees require a Git repository with a commit.
 
-All configured repos share one map and inbox. Define each repository ID once. The workspace identity is based on resolved paths and IDs. Argument order does not affect it. A single-repository workspace keeps its identity if you change only its repository ID.
+All configured repos share one map and Inbox. Define each repository ID once. The workspace identity is based on resolved paths and IDs. Argument order does not affect it. A single-repository workspace keeps its identity if you change only its repository ID.
 
 | Setting | Purpose |
 | --- | --- |
@@ -26,20 +26,20 @@ For a separately configured Codex provider, define it in Codex's configuration a
 ## Task flow
 
 - Use **+** to open a new-session composer. Write the first message, add an optional name, and select any repositories the task needs before starting the session. Leave repository scope empty for a general chat.
-- Open the floating **Inbox** from the map’s top-left corner. **Open conversation** jumps to the relevant message. Selecting a task opens a floating conversation at about 65% width and frames its group in the space beside it. Drag the conversation’s left edge to resize it on desktop. Closing the chat restores the previous map view.
+- Open the floating **Inbox** from the map’s top-left corner. **Open conversation** jumps to the relevant message. Selecting a task opens a floating conversation at the last width you used (65% by default) and frames its group in the space beside it. Drag the conversation’s left edge to resize it on desktop. Closing the chat restores the previous map view.
 - Native Codex children orbit their parent. Their transcripts are available for inspection, and you give further instructions in the parent chat.
-- Product questions keep their source message and pending status across restart. Answer in the task chat and the agent can link your reply to the question. Unrelated replies leave it pending. Use **Answer question** to target a question explicitly.
-- A repository-backed task starts read-only. **Start implementation** lets that same session write only in isolated worktrees of its selected repos. **Revise candidate** authorizes another implementation turn after discussion. Orchestra requires passing coder-reported verification for the submitted contents before it pins a delivery revision. Review and merge changes manually.
+- Product questions keep their source message and pending status across restart. Answer in the task chat and the agent can link your reply to the question. Unrelated replies leave it pending. The Inbox retains activity across reloads. **Clear** removes its history and keeps pending questions. Archiving or deleting a task removes its entries and its subagents’ entries from the Inbox.
+- A repository-backed task starts read-only. Describe the change in chat, then send **Go ahead and implement that** on its own to let the same session write in isolated worktrees for the selected repositories. When a question is pending, first answer it in chat, then authorize implementation in a follow-up. Use an explicit instruction again to revise a candidate. Orchestra requires passing verification before it pins a delivery revision. Review and merge changes manually.
 
 ## UI review scenario
 
 Run `npm run workspace` without arguments to open the simulated scenario. It starts without a Codex connection and uses sample messages and delivery details. The search investigation and its child stay marked as running for layout review. Use **Release notes** or **Weeknight dinner** to try archiving and restoring. Restart the server to reset the tasks, and use a fresh browser profile or port to start with default layout and drafts.
 
-- Open **Release notes** from the inbox to locate the pending question, then inspect the reviewer's read-only transcript on the map.
+- Open **Release notes** from the Inbox to locate the pending question, then inspect the reviewer's read-only transcript on the map.
 - Open **Dashboard empty state** and expand the delivery snapshots to inspect the candidate and checks.
 - Compare **Investigate slow search** and its running child with the completed **Weeknight dinner** task. Type an unsent draft, switch chats, and return to verify the draft is still there.
-- Open **Review CSV export** from its **Failed** inbox entry or map badge to inspect the error in the chat.
-- Collapse and expand the inbox, resize both docks, and reload to check that the layout and draft are retained.
+- Open **Review CSV export** from its **Failed** Inbox entry or map badge to inspect the error in the chat.
+- Collapse and expand the Inbox, resize both docks, and reload to check that the layout and draft are retained.
 
 ## Recovery and usage
 

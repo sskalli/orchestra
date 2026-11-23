@@ -42,5 +42,7 @@
   cursor: pointer;
 }
 
-.new-session footer button[type="submit"] { background: var(--sw-control-hover); border-color: #65605a; }
+.new-session footer button[type="submit"] { background: var(--sw-control-hover); border-color: var(--panel-border); }
 .new-session button:disabled { opacity: .55; cursor: default; }
+
+.new-session-field :is(textarea, input)::placeholder { color: var(--text-muted); }

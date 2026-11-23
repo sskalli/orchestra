@@ -1,3 +1,6 @@
+import { readFlightLog } from "./workspace-flight-log.ts";
+import type { FlightLog } from "./workspace-flight-log.ts";
+
 export type Camera = { x: number; y: number; scale: number };
 export type PanelSizes = { left?: number; right?: number; mobileLeft?: number };
 export type ComposerSizes = { agent?: number };
@@ -22,10 +25,15 @@ export function workspacePreferences(projectPath: string, mode: "demo" | "codex"
   function write(name: string, value: unknown) {
     try {
       localStorage.setItem(`${key}:${name}`, JSON.stringify(value));
+      return true;
     } catch {
       window.dispatchEvent(new Event("orchestra-storage-unavailable"));
+      return false;
     }
   }
+
+  let unsavedFlightLog: FlightLog | undefined;
+  const readLatestFlightLog = () => unsavedFlightLog ?? readFlightLog(read("flight-log"));
 
   return {
     readView(): View {
@@ -40,6 +48,28 @@ export function workspacePreferences(projectPath: string, mode: "demo" | "codex"
       };
     },
     writeView: (view: View) => write("view", view),
+    readInboxReadSequence(): number {
+      const value = read("inbox-read-sequence");
+      return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : 0;
+    },
+    writeInboxReadSequence: (sequence: number) => write("inbox-read-sequence", sequence),
+    readFlightLog: readLatestFlightLog,
+    async updateFlightLog(update: (log: FlightLog) => FlightLog) {
+      function commit() {
+        const current = readLatestFlightLog();
+        const next = update(current);
+        if (next !== current) unsavedFlightLog = write("flight-log", next) ? undefined : next;
+        return next;
+      }
+      return navigator.locks ? navigator.locks.request(`${key}:flight-log`, commit) : commit();
+    },
+    subscribeFlightLog(listener: (log: FlightLog) => void) {
+      const onStorage = (event: StorageEvent) => {
+        if (event.key === `${key}:flight-log` || event.key === null) listener(readLatestFlightLog());
+      };
+      window.addEventListener("storage", onStorage);
+      return () => window.removeEventListener("storage", onStorage);
+    },
     readPanels(): PanelSizes {
       const value = read("panels") as PanelSizes | null;
       const size = (entry: unknown) => typeof entry === "number" && Number.isFinite(entry) && entry > 0 ? entry : undefined;
