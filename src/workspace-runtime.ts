@@ -889,6 +889,7 @@ export class WorkspaceRuntime {
       (roots.length ? `The selected repositories for read-only investigation are ${JSON.stringify(roots)}. ` : "No repositories are selected. ") +
       "Plan and discuss by default. Use raise_product_decision if you need the user to choose, then end the turn. " +
       "When orchestra_pending_questions is supplied, use its question IDs and the resolution tool it indicates only if the current user reply answers that question. Leave unrelated questions open. " +
+      "Never ask the user to type a trigger phrase to continue implementation. " +
       "Perform code changes only in a turn explicitly approved for implementation, using its isolated worktree paths. " +
       (roots.length ? this.implementationRequestInstructions(session) : "") +
       "Follow the repository instructions. Verify the candidate, call submit_check_result with the actual result, and report blockers concisely.";
@@ -899,7 +900,9 @@ export class WorkspaceRuntime {
     const requestTool = toolVersion >= taskToolVersion
       ? "call request_implementation with a summary of the intended changes"
       : `call raise_product_decision with a question starting with "${legacyImplementationRequestPrefix}" followed by a summary of the intended changes`;
-    return `If the user's intent is to edit files during a read-only turn, resolve any answered product questions first, then ${requestTool}. End the turn and wait for their approval in the workspace. `;
+    return "If the user asks for code changes, confirms a plan, or asks you to proceed with implementation during a read-only turn, " +
+      `resolve any answered product questions first, then ${requestTool}. ` +
+      "Use this tool instead of asking the user to type a specific phrase. End the turn and wait for the workspace approval button. ";
   }
 
   private selectModelSettings(): ModelSettings {

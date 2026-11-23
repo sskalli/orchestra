@@ -387,7 +387,7 @@ function Conversation({
                   {productQuestion ? (
                     <span className="chat-message-state">{productQuestion.status === "pending" ? "Question awaiting answer" : "Question answered"}</span>
                   ) : implementationRequest ? <span className="chat-message-state">
-                    {implementationRequest.status === "pending" ? "Write access requested"
+                    {implementationRequest.status === "pending" ? "Awaiting your approval to edit files"
                       : implementationRequest.status === "approved" ? "Edits approved" : "Request superseded"}
                   </span> : systemKind ? <span className="chat-message-state">{systemMessageLabels[systemKind]}</span> : null}
                   {message.state === "queued" ? <span className="chat-message-state">Queued</span> : null}
@@ -404,7 +404,7 @@ function Conversation({
                   <button className="chat-steer" type="button"
                     disabled={blocked || approvingImplementation || Boolean(agent.canCancel) || agent.queueDepth > 0}
                     onClick={() => void approveImplementation(message.id)}>
-                    {approvingImplementation ? "Allowing edits…" : "Allow edits"}
+                    {approvingImplementation ? "Approving write access…" : "Approve write access"}
                   </button>
                 )}
               </div>
@@ -414,6 +414,7 @@ function Conversation({
 
   const headerStatus = archived ? "Archived" : agent.lifecycleBusy ? "Updating…" : statusLabels[agent.status];
   const headerTone = archived || agent.lifecycleBusy ? "idle" : agent.status;
+  const showWorkingIndicator = !archived && (headerTone === "working" || agent.canCancel);
   const agentTooltipId = useId();
   const nameTooltip = [
     projectLabel && `Project: ${projectLabel}`,
@@ -491,6 +492,10 @@ function Conversation({
       </div>}
       {taskDetail && <p className="chat-task-detail" role="status">{taskDetail}</p>}
       {archived && <p className="chat-archive-notice">Archived {new Date(agent.archivedAt!).toLocaleString()}. Restore to continue this conversation.</p>}
+      {showWorkingIndicator && <div className="chat-working-indicator" role="status" aria-live="polite">
+        <LuLoaderCircle className="chat-working-spinner" aria-hidden="true" />
+        <span>{displayName} is working…</span>
+      </div>}
       <div className="chat-transcript-wrap">
         <div className="chat-transcript" role="log" aria-label={`Conversation with ${recipient}`} aria-relevant="additions"
           ref={transcript} onScroll={(event) => {
@@ -517,7 +522,7 @@ function Conversation({
       <form id={composerId} ref={composer} className="chat-composer" style={{ height: composerHeight }} onSubmit={submit}>
         {agent.queueDepth > 0 || agent.status === "working" ? (
           <div className="chat-queue" aria-live="polite">
-            {agent.queueDepth > 0 ? `${agent.queueDepth} queued${agent.queuePaused ? " · paused" : ""}` : "New messages queue while this agent is working."}
+            {agent.queueDepth > 0 ? `${agent.queueDepth} queued${agent.queuePaused ? " · paused" : ""}` : "Agent is working — new messages will queue."}
             {agent.queuePaused && onResumeQueue && <button className="chat-steer" type="button"
               disabled={blocked || resumingQueue} onClick={() => void resumeQueue()}>Resume queue</button>}
           </div>

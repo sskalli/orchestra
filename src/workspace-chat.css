@@ -450,6 +450,24 @@
   flex: none; margin: 0; padding: 10px 16px; border-bottom: 1px solid var(--sw-line);
   color: var(--sw-muted); font-size: .648rem; line-height: 1.6;
 }
+
+.chat-working-indicator {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--sw-line);
+  color: var(--sw-muted);
+  font-size: .67rem;
+  line-height: 1.4;
+}
+
+.chat-working-indicator .chat-working-spinner {
+  width: 11px;
+  height: 11px;
+  color: currentColor;
+}
 .chat-native-child {
   display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px;
 }

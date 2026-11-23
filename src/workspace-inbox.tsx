@@ -34,8 +34,23 @@ export function WorkspaceInbox({ events, toggle, onOpen, onClose, onClear, canCl
   const tones = new Map(events.map(({ status, tone }) => [status, tone]));
   if (filter && !tones.has(filter.status)) tones.set(filter.status, filter.tone);
   const statuses = [...tones.keys()].sort();
-  // The log is stored newest-first, but the Inbox reads like a conversation.
-  const visibleEvents = (statusFilter ? events.filter(({ status }) => status === statusFilter) : events).toReversed();
+  const filteredEvents = statusFilter ? events.filter(({ status }) => status === statusFilter) : events;
+  // Keep the feed chronological (oldest → newest) so recent updates stay at the bottom like chat.
+  const orderedEvents = [...filteredEvents].sort((left, right) => {
+    const leftSequence = Number(left.id);
+    const rightSequence = Number(right.id);
+    if (Number.isFinite(leftSequence) && Number.isFinite(rightSequence)) return leftSequence - rightSequence;
+    return 0;
+  });
+  const visibleEvents = orderedEvents.reduce<InboxEvent[]>((list, event) => {
+    const previous = list.at(-1);
+    if (event.tone === "working" && previous?.tone === "working" && previous.agentId === event.agentId) {
+      list[list.length - 1] = event;
+      return list;
+    }
+    list.push(event);
+    return list;
+  }, []);
 
   useLayoutEffect(() => {
     const element = feed.current;
