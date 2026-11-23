@@ -1,11 +1,13 @@
+import { LuArchive, LuMessageSquare, LuMessageSquareDot } from "react-icons/lu";
 import { agentAppearance } from "./workspace-agent-appearance.ts";
 import { effectiveAgentStatus } from "./workspace-status.ts";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { WorkspaceCanvas } from "./workspace-canvas.tsx";
 import { WorkspaceChat } from "./workspace-chat.tsx";
 import { WorkspaceInbox } from "./workspace-inbox.tsx";
 import type { InboxEvent } from "./workspace-inbox.tsx";
+import { clearFlightLog, recordFlightLog } from "./workspace-flight-log.ts";
 import { workspacePreferences } from "./workspace-preferences.ts";
 import { useDockResizing } from "./use-dock-resizing.tsx";
 import { TaskLifecycleDialog } from "./workspace-task-dialogs.tsx";
@@ -93,6 +95,46 @@ function attention(agent: Agent): Activity[] {
   return [];
 }
 
+function activityFor(agents: Agent[], id: string) {
+  const ids = new Set([id]);
+  let size = 0;
+  while (size !== ids.size) {
+    size = ids.size;
+    for (const agent of agents) {
+      if (agent.parentId && ids.has(agent.parentId)) ids.add(agent.id);
+    }
+  }
+  return agents.filter((agent) => !agent.archivedAt && ids.has(agent.id)).flatMap(attention);
+}
+
+const inboxStatus = {
+  idle: ["Idle", "notice"], working: ["Working", "working"], attention: ["Needs attention", "attention"],
+  "awaiting-confirmation": ["Ready for review", "notice"], done: ["Complete", "done"],
+  error: ["Failed", "error"], notice: ["Update available", "notice"],
+} as const;
+
+function flightLogEvents(agents: Agent[]): InboxEvent[] {
+  const activeAgents = agents.filter((agent) => !agent.archivedAt);
+  const activeIds = new Set(activeAgents.map(({ id }) => id));
+  return activeAgents.filter((agent) => !agent.parentId || !activeIds.has(agent.parentId)).flatMap((root) => {
+    const agentName = root.name;
+    const actions = activityFor(agents, root.id);
+    if (actions.length) return actions.map(({ agent, messageId, text }) => {
+      const [status, tone] = inboxStatus[agent.status];
+      const source = agent.messages.find(({ id }) => id === messageId);
+      return { id: `${root.id}:${agent.id}:${messageId ?? "status"}`, agentName,
+        status: tone === "error" ? status : "Needs attention", tone: tone === "error" ? tone : "attention",
+        text: source?.text ?? text, agentId: agent.id, messageId,
+        needsInput: source?.productQuestion?.status === "pending" };
+    });
+    const [status, tone] = inboxStatus[root.status];
+    const message = root.messages.findLast((entry) => entry.role !== "user" && !entry.state);
+    return [{ id: root.id, agentName, status, tone,
+      text: message?.text ?? root.goal ?? "Open the conversation for details.",
+      agentId: root.id, messageId: message?.id }];
+  });
+}
+
 function Workspace() {
   const [snapshot, setSnapshot] = useState<Snapshot>();
   const [connected, setConnected] = useState(false);
@@ -137,14 +179,16 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
     window.addEventListener("orchestra-storage-unavailable", onFailure);
     return () => window.removeEventListener("orchestra-storage-unavailable", onFailure);
   }, []);
-  const agents = snapshot.agents.map((agent) => ({ ...agent, status: effectiveAgentStatus(agent) }));
+  const agents = useMemo(() => snapshot.agents.map((agent) => ({ ...agent, status: effectiveAgentStatus(agent) })), [snapshot.agents]);
   const [preferences] = useState(() => workspacePreferences(snapshot.workspaceKey, mode, snapshot.modelProvider));
   const [saved] = useState(preferences.readView);
   const [savedCamera] = useState(preferences.readCamera);
-  const { bodyRef, resizing, style: dockStyle, resizeHandle, chatExpanded, toggleChatWidth, openChatWidth } = useDockResizing(preferences);
+  const { bodyRef, resizing, style: dockStyle, resizeHandle, chatExpanded, toggleChatWidth } = useDockResizing(preferences);
   const [composerSizes, setComposerSizes] = useState(preferences.readComposers);
   const composerSizesRef = useRef(composerSizes);
   const [leftOpen, setLeftOpen] = useState(saved.leftOpen);
+  const [inboxReadSequence, setInboxReadSequence] = useState(preferences.readInboxReadSequence);
+  const [flightLog, setFlightLog] = useState(preferences.readFlightLog);
   const [selectedId, setSelectedId] = useState(saved.selectedId);
   const [dockId, setDockId] = useState(saved.selectedId);
   const [drafts, setDrafts] = useState(saved.drafts);
@@ -164,7 +208,7 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
     const dismissOutside = (event: Event) => {
       const target = event.target;
       if (!(target instanceof Element)) return;
-      document.querySelectorAll<HTMLDetailsElement>(".chat-lifecycle-menu[open], .sw-usage-menu[open]").forEach((menu) => {
+      document.querySelectorAll<HTMLDetailsElement>(".sw-usage-menu[open]").forEach((menu) => {
         if (!menu.contains(target)) menu.open = false;
       });
       if (!target.closest(".sw-project-menu")) setProjectDetails(false);
@@ -173,8 +217,8 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
     const dismissOnEscape = (event: globalThis.KeyboardEvent) => {
       if (event.key !== "Escape") return;
       const target = event.target instanceof Element ? event.target : undefined;
-      const menu = target?.closest<HTMLDetailsElement>(".chat-lifecycle-menu[open], .sw-usage-menu[open]") ??
-        document.querySelector<HTMLDetailsElement>(".chat-lifecycle-menu[open], .sw-usage-menu[open]");
+      const menu = target?.closest<HTMLDetailsElement>(".sw-usage-menu[open]") ??
+        document.querySelector<HTMLDetailsElement>(".sw-usage-menu[open]");
       const projectTrigger = document.querySelector<HTMLButtonElement>(".sw-project-button[aria-expanded='true']");
       if (menu) {
         menu.open = false;
@@ -240,45 +284,50 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
   const blockedReason = !connected ? "Reconnecting to the local workspace…" : provider.message ?? providerLabel(provider);
   const projectName = project.name;
 
-  function activityFor(id: string) {
-    const ids = new Set([id]);
-    let size = 0;
-    while (size !== ids.size) {
-      size = ids.size;
-      for (const agent of agents) {
-        if (agent.parentId && ids.has(agent.parentId)) ids.add(agent.id);
-      }
-    }
-    return agents.filter((agent) => !agent.archivedAt && ids.has(agent.id)).flatMap(attention);
+  const inboxEvents = useMemo(() => flightLogEvents(agents), [agents]);
+
+  const pendingInboxQuestions = inboxEvents.filter(({ needsInput }) => needsInput);
+  const pendingQuestionIds = new Set(pendingInboxQuestions.map(({ id }) => id));
+  const activeConversations = new Map(agents.filter((agent) => !agent.archivedAt).map((agent) => [agent.id, agent]));
+  const logEvents = flightLog.entries.flatMap(({ sequence, event }) => {
+    const conversation = activeConversations.get(event.agentId);
+    if (!conversation) return [];
+    const source = conversation.messages.find(({ id }) => id === event.messageId);
+    const text = source?.text ?? inboxEvents.find(({ id }) => id === event.id)?.text ?? event.status;
+    return [{ ...event, id: String(sequence), text: text.length > 500 ? text.slice(0, 499) + "…" : text }];
+  });
+  const canClearLog = flightLog.entries.some(({ event }) =>
+    activeConversations.has(event.agentId) && !pendingQuestionIds.has(event.id));
+
+  useEffect(() => preferences.subscribeFlightLog(setFlightLog), [preferences]);
+
+  useEffect(() => {
+    if (!connected || provider.state === "connecting" || (provider.state === "error" && !agents.length)) return;
+    let active = true;
+    void preferences.updateFlightLog((previous) => active ? recordFlightLog(previous, inboxEvents, agents) : previous)
+      .then((next) => { if (active) setFlightLog(next); });
+    return () => { active = false; };
+  }, [agents, connected, inboxEvents, preferences, provider.state]);
+
+  async function clearLog() {
+    const next = await preferences.updateFlightLog((previous) => clearFlightLog(previous, pendingQuestionIds));
+    setFlightLog(next);
   }
 
-  const inboxStatus = {
-    idle: ["Idle", "notice"], working: ["Working", "working"], attention: ["Needs attention", "attention"],
-    "awaiting-confirmation": ["Ready for review", "notice"], done: ["Complete", "done"],
-    error: ["Failed", "error"], notice: ["Update available", "notice"],
-  } as const;
-  const activeAgents = agents.filter((agent) => !agent.archivedAt);
-  const activeIds = new Set(activeAgents.map(({ id }) => id));
-  const inboxEvents: InboxEvent[] = activeAgents.filter((agent) => !agent.parentId || !activeIds.has(agent.parentId)).flatMap((root) => {
-    const agentName = root.name;
-    const actions = activityFor(root.id);
-    if (actions.length) return actions.map(({ agent, messageId, text }) => {
-      const [status, tone] = inboxStatus[agent.status];
-      const source = agent.messages.find(({ id }) => id === messageId);
-      return { id: `${root.id}:${agent.id}:${messageId ?? "status"}`, agentName,
-        status: tone === "error" ? status : "Needs attention", tone: tone === "error" ? tone : "attention",
-        text: source?.text ?? text, agentId: agent.id, messageId };
-    });
-    const [status, tone] = inboxStatus[root.status];
-    const message = root.messages.findLast((entry) => entry.role !== "user" && !entry.state);
-    return [{ id: root.id, agentName, status, tone,
-      text: message?.text ?? root.goal ?? "Open the conversation for details.",
-      agentId: root.id, messageId: message?.id }];
-  });
+  const hasUnreadNotifications = flightLog.entries.some(({ sequence, event }) =>
+    sequence > inboxReadSequence && activeConversations.has(event.agentId));
+  const hasUnresolvedRequest = agents.some((agent) => !agent.archivedAt &&
+    (agent.status === "attention" || agent.status === "awaiting-confirmation" || agent.directTask?.phase === "ready-for-review"));
+  const inboxHasActivity = hasUnreadNotifications || hasUnresolvedRequest;
+
+  useEffect(() => {
+    if (!leftOpen || flightLog.sequence === inboxReadSequence) return;
+    setInboxReadSequence(flightLog.sequence);
+    preferences.writeInboxReadSequence(flightLog.sequence);
+  }, [leftOpen, flightLog.sequence, inboxReadSequence, preferences]);
 
   function select(id: string | null, messageId?: string) {
     if (id) {
-      if (!selectedId && !newTaskOpen) openChatWidth();
       setLeftOpen(false);
     }
     setNewTaskOpen(false);
@@ -300,7 +349,7 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
   }
 
   function handleStatus(id: string) {
-    const events = activityFor(id);
+    const events = activityFor(agents, id);
     if (events.length > 1) {
       setChooser({ agentId: id });
       return;
@@ -316,7 +365,7 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
   function toggleInbox(open: boolean) {
     setLeftOpen(open);
     requestAnimationFrame(() => {
-      const label = open ? "Collapse inbox" : "Inbox";
+      const label = open ? "Minimize agent inbox" : "Open agent inbox";
       document.querySelector<HTMLButtonElement>(`[aria-label="${label}"]`)?.focus();
     });
   }
@@ -392,11 +441,6 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
       repositoryScope={repositories?.length ? repositories : undefined}
       taskPhase={agent.directTask?.phase}
       taskDetail={agent.directTask?.detail}
-      onStartImplementation={agent.directTask?.projectIds.length && agent.directTask.phase !== "implementing"
-        ? () => send({ type: "startImplementation", agentId: agent.id,
-          text: agent.directTask?.phase === "ready-for-review"
-            ? "Revise the candidate using the feedback we agreed in this chat." : undefined })
-        : undefined}
       delivery={agent.integration?.members?.length ? {
         members: agent.integration.members,
         taskChecks: agent.integration.validationEvidence?.summary,
@@ -420,9 +464,6 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
       onSteer={(value) => submit("steer", value)}
       onCancel={() => send({ type: "cancel", agentId: agent.id })}
       onResumeQueue={() => send({ type: "resumeQueue", agentId: agent.id })}
-      onAnswerProductQuestion={agent.directTask
-        ? (questionId, text) => send({ type: "answerProductQuestion", agentId: agent.id, questionId, text })
-        : undefined}
       expanded={chatExpanded}
       onToggleExpanded={toggleChatWidth}
       onClose={() => closeAgent(true)}
@@ -432,6 +473,17 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
       focusRequest={focus.count}
     />;
   }
+
+  const inboxToggleLabel = leftOpen ? "Hide agent inbox" : "Open agent inbox";
+  const InboxIcon = inboxHasActivity ? LuMessageSquareDot : LuMessageSquare;
+  const inboxToggle = (
+    <button type="button" className={leftOpen ? "interface-icon-button" : "interface-icon-button sw-inbox-toggle"}
+      aria-label={inboxToggleLabel} title={inboxToggleLabel} aria-expanded={leftOpen}
+      aria-controls="workspace-inbox-window" data-active={inboxHasActivity}
+      onClick={() => toggleInbox(!leftOpen)}>
+      <InboxIcon aria-hidden="true" strokeWidth={1.5} />
+    </button>
+  );
 
   return (
     <div className="sw-app">
@@ -454,19 +506,22 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
       </header>
       <main ref={bodyRef} className={`sw-body ${selected || newTaskOpen ? "is-agent-open" : ""} ${resizing ? "is-resizing" : ""}`}
         style={dockStyle}>
-        <button type="button" className="sw-inbox-toggle" aria-label="Inbox" aria-expanded={leftOpen}
-          aria-controls="workspace-inbox-window" onClick={() => toggleInbox(!leftOpen)}>Inbox</button>
+        {!leftOpen && inboxToggle}
         <aside id="workspace-inbox-window" className="sw-dock sw-left" aria-label="Inbox window" hidden={!leftOpen}>
           <div className="sw-dock-inner">
-            <WorkspaceInbox events={inboxEvents} onOpen={select} onClose={() => toggleInbox(false)} />
+            <WorkspaceInbox toggle={leftOpen ? inboxToggle : undefined} events={logEvents} onOpen={select} onClose={() => toggleInbox(false)}
+              onClear={clearLog}
+              canClear={canClearLog} />
           </div>
           {leftOpen && resizeHandle("left")}
         </aside>
         <section className="sw-canvas">
-          <button ref={archivedToggle} className="sw-archived-toggle" type="button" aria-expanded={archiveOpen} onClick={() => setArchiveOpen(!archiveOpen)}>Archived ({archivedAgents.length})</button>
+          <button ref={archivedToggle} className="sw-archived-toggle" type="button" aria-expanded={archiveOpen}
+            aria-label={`Archived (${archivedAgents.length})`} title={`Archived (${archivedAgents.length})`}
+            onClick={() => setArchiveOpen(!archiveOpen)}><LuArchive aria-hidden="true" /></button>
           {(blocked || storageUnavailable) && <div className="sw-banner" role="status">{blocked ? blockedReason : "Browser storage is unavailable. Drafts and layout changes may not survive reload."}</div>}
           <WorkspaceCanvas agents={canvasAgents} signals={signals} selectedId={selectedId} onSelect={select} onStatus={handleStatus}
-            onCreateTask={mode === "codex" && !blocked ? () => { if (!selectedId) openChatWidth(); setNewTaskOpen(true); } : undefined}
+            onCreateTask={mode === "codex" && !blocked ? () => setNewTaskOpen(true) : undefined}
             chatWindowRef={chatWindowRef} initialCamera={savedCamera} onCameraChange={preferences.writeCamera} />
           {archiveOpen && <section className="sw-archive-list" aria-label="Archived agents" onKeyDown={(event) => {
             if (event.key === "Escape") { event.stopPropagation(); setArchiveOpen(false); archivedToggle.current?.focus(); }
@@ -489,7 +544,7 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
             if (event.key === "Escape") { event.stopPropagation(); setChooser(undefined); }
           }}>
             <header><strong>Needs attention</strong><button type="button" aria-label="Close events" onClick={() => setChooser(undefined)}>×</button></header>
-            {activityFor(chooser.agentId).map((event, index) => <button key={`${event.agent.id}:${event.messageId}`} type="button" autoFocus={index === 0} onClick={() => select(event.agent.id, event.messageId)}><strong>{snapshot.projects.length > 1 && event.agent.projectId ? `${event.agent.projectId} / ` : ""}{agentAppearance(event.agent).displayName}</strong><span>{event.text}</span></button>)}
+            {activityFor(agents, chooser.agentId).map((event, index) => <button key={`${event.agent.id}:${event.messageId}`} type="button" autoFocus={index === 0} onClick={() => select(event.agent.id, event.messageId)}><strong>{snapshot.projects.length > 1 && event.agent.projectId ? `${event.agent.projectId} / ` : ""}{agentAppearance(event.agent).displayName}</strong><span>{event.text}</span></button>)}
           </div>}
         </section>
         <aside ref={chatWindowRef} className="sw-dock sw-right" aria-label={newTaskOpen ? "Session composer" : "Agent chat"}

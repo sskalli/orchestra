@@ -1,3 +1,4 @@
+import { requestsImplementation } from "./workspace-implementation-intent.ts";
 import { demoTasks } from "./workspace-demo.ts";
 import { WorkspaceUsage } from "./workspace-usage.ts";
 import { randomUUID } from "node:crypto";
@@ -360,6 +361,11 @@ export class WorkspaceRuntime {
       this.answerProductQuestion(session, command.questionId, text);
       return;
     }
+    const hasPendingQuestion = session.agent.messages.some((entry) => entry.productQuestion?.status === "pending");
+    if (session.agent.directTask?.projectIds.length && !hasPendingQuestion && requestsImplementation(text)) {
+      await this.startDirectTaskImplementation(session, text, { fromChat: true });
+      return;
+    }
     const next = message("user", text);
     session.agent.messages.push(next);
     await this.enqueue(session, next);
@@ -415,7 +421,7 @@ export class WorkspaceRuntime {
     }
   }
 
-  private async startDirectTaskImplementation(session: AgentSession, text?: string) {
+  private async startDirectTaskImplementation(session: AgentSession, text?: string, { fromChat = false } = {}) {
     const task = session.agent.directTask;
     if (!task?.projectIds.length) throw new Error("Choose at least one repository for an implementation task.");
     if (!this.available || this.storageFailed || !session.threadId || session.agent.unavailableReason) {
@@ -428,7 +434,7 @@ export class WorkspaceRuntime {
     if (this.hasRunningNativeChildren(session)) {
       throw new Error("Wait for this task's Codex subagents to finish before approving implementation.");
     }
-    if (!session.agent.messages.some((entry) => entry.role === "assistant" && !entry.state)) {
+    if (!fromChat && !session.agent.messages.some((entry) => entry.role === "assistant" && !entry.state)) {
       throw new Error("Discuss the task in this chat before approving implementation.");
     }
     if (text !== undefined && (typeof text !== "string" || text.length > 24_000)) {
@@ -456,11 +462,7 @@ export class WorkspaceRuntime {
       const project = this.projects.find(({ id }) => id === candidate.projectId)!;
       validateCandidateWorktree(project.path, candidate);
     }
-    const assignment = message("user",
-      (text?.trim() || "Implement the plan we agreed in this chat.") +
-      "\n\nImplementation is explicitly approved for this turn. Write only in these isolated worktrees: " +
-      JSON.stringify(roots.map(({ projectId, path }) => ({ projectId, path }))) +
-      ". Keep implementation edits in this session. Wait for any subagents to finish, then run the agreed verification and call submit_check_result before ending the turn.");
+    const assignment = message("user", text?.trim() || "Implement the plan we agreed in this chat.");
     task.phase = "implementing";
     delete task.detail;
     delete session.agent.integration;
@@ -872,6 +874,7 @@ export class WorkspaceRuntime {
       "Plan and discuss by default. Use raise_product_decision if you need the user to choose, then end the turn. " +
       "When orchestra_pending_questions is supplied, use its question IDs and the resolution tool it indicates only if the current user reply answers that question. Leave unrelated questions open. " +
       "Perform code changes only in a turn explicitly approved for implementation, using its isolated worktree paths. " +
+      "If editing is intended but the current turn is read-only, resolve any answered product question and ask the user to send the standalone reply Implement that plan. " +
       "Follow the repository instructions. Verify the candidate, call submit_check_result with the actual result, and report blockers concisely.";
   }
 
@@ -981,6 +984,13 @@ export class WorkspaceRuntime {
       : entry.text;
   }
 
+  private implementationInput(session: AgentSession, text: string) {
+    const roots = this.directTaskCandidates(session);
+    return text + "\n\nImplementation is explicitly approved for this turn. Write only in these isolated worktrees: " +
+      JSON.stringify(roots.map(({ projectId, path }) => ({ projectId, path }))) +
+      ". Keep implementation edits in this session. Wait for any subagents to finish, then run the agreed verification and call submit_check_result before ending the turn.";
+  }
+
   private async begin(session: AgentSession, next: WorkspaceMessage, taskImplementation = false) {
     if (!this.isActive(session)) return;
     const run: Run = { message: next, taskImplementation };
@@ -1000,7 +1010,7 @@ export class WorkspaceRuntime {
         threadId: session.threadId,
         approvalPolicy: "never",
         ...this.directTaskTurnScope(session, taskImplementation),
-        input: input(this.answerInput(session, next)),
+        input: input(taskImplementation ? this.implementationInput(session, next.text) : this.answerInput(session, next)),
         additionalContext: this.pendingQuestionContext(session, next, taskImplementation),
       });
       session.freshThread = false;

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { LuMaximize2, LuMinimize2 } from "react-icons/lu";
+import { LuPanelRightClose, LuPanelRightOpen } from "react-icons/lu";
 import { UnknownCommandOutcome } from "./workspace-commands.ts";
 import "./workspace-new-session.css";
 
@@ -24,6 +24,8 @@ export function NewSessionComposer({ open, blocked, expanded, onToggleExpanded, 
   const [pending, setPending] = useState(false);
   const [error, setError] = useState("");
   const [unknownOutcome, setUnknownOutcome] = useState(false);
+  const widthToggleLabel = expanded ? "Reduce chat to 25%" : "Expand chat to 75%";
+  const WidthToggleIcon = expanded ? LuPanelRightClose : LuPanelRightOpen;
 
   useEffect(() => {
     if (open) prompt.current?.focus();
@@ -79,10 +81,9 @@ export function NewSessionComposer({ open, blocked, expanded, onToggleExpanded, 
   }}>
     <header className="chat-header">
       <div className="chat-header-copy"><h2 id="new-session-heading">New session</h2></div>
-      <button className="chat-icon-button chat-width-toggle" type="button" onClick={onToggleExpanded}
-        aria-label={expanded ? "Restore conversation size" : "Expand conversation"}
-        title={expanded ? "Restore conversation size" : "Expand conversation"}>
-        {expanded ? <LuMinimize2 aria-hidden="true" /> : <LuMaximize2 aria-hidden="true" />}
+      <button className="chat-icon-button interface-icon-button chat-width-toggle" type="button" onClick={onToggleExpanded}
+        aria-label={widthToggleLabel} title={widthToggleLabel}>
+        <WidthToggleIcon aria-hidden="true" size={15} strokeWidth={1.5} fill="none" />
       </button>
       <button type="button" className="chat-icon-button" aria-label="Close new session" onClick={cancel} disabled={pending}>×</button>
     </header>

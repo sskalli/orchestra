@@ -3,7 +3,7 @@ import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "re
 import type { FormEvent, KeyboardEvent, PointerEvent } from "react";
 import Markdown from "react-markdown";
 import type { Components } from "react-markdown";
-import { LuMaximize2, LuMinimize2 } from "react-icons/lu";
+import { LuEllipsis, LuMessageSquareX, LuPanelRightClose, LuPanelRightOpen } from "react-icons/lu";
 import type { SystemMessageKind, WorkspaceAgent } from "./workspace-runtime.ts";
 
 import "./workspace-chat.css";
@@ -17,7 +17,6 @@ type ChatProps = {
   delivery?: { members: { projectId: string; path: string; revision?: string }[]; taskChecks?: string };
   taskPhase?: NonNullable<WorkspaceAgent["directTask"]>["phase"];
   taskDetail?: string;
-  onStartImplementation?: () => Promise<void>;
   modelLabel?: string;
   usageLabel?: string;
   draft: string;
@@ -28,7 +27,6 @@ type ChatProps = {
   onSend: (text: string) => Promise<void> | void;
   onSteer?: (text: string) => Promise<void> | void;
   onCancel?: () => Promise<void>;
-  onAnswerProductQuestion?: (questionId: string, text: string) => Promise<void> | void;
   onResumeQueue?: () => Promise<void>;
   onClose: () => void;
   expanded?: boolean;
@@ -69,10 +67,34 @@ const markdownComponents: Components = {
 };
 
 function Conversation({
-  agent, projectLabel, repositoryScope, delivery, taskPhase, taskDetail, onStartImplementation, modelLabel, usageLabel, draft: initialDraft, composerHeight, onComposerHeightChange, onDraftInput, onDraftChange, onSend, onSteer, onCancel, onResumeQueue, onAnswerProductQuestion, onClose,
+  agent, projectLabel, repositoryScope, delivery, taskPhase, taskDetail, modelLabel, usageLabel, draft: initialDraft, composerHeight, onComposerHeightChange, onDraftInput, onDraftChange, onSend, onSteer, onCancel, onResumeQueue, onClose,
   disabled, disabledReason, focusMessageId, focusRequest, onOpenAgent, onLifecycle, expanded, onToggleExpanded,
 }: ChatProps) {
   const transcript = useRef<HTMLDivElement>(null);
+  const actions = useRef<HTMLDivElement>(null);
+  const actionsButton = useRef<HTMLButtonElement>(null);
+  const actionsId = useId();
+  const [actionsOpen, setActionsOpen] = useState(false);
+  useEffect(() => {
+    if (!actionsOpen) return;
+    const dismissOutside = (event: Event) => {
+      if (event.target instanceof Node && !actions.current?.contains(event.target)) setActionsOpen(false);
+    };
+    const dismissWithEscape = (event: globalThis.KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.stopPropagation();
+      setActionsOpen(false);
+      actionsButton.current?.focus();
+    };
+    document.addEventListener("pointerdown", dismissOutside, true);
+    document.addEventListener("click", dismissOutside, true);
+    window.addEventListener("keydown", dismissWithEscape, true);
+    return () => {
+      document.removeEventListener("pointerdown", dismissOutside, true);
+      document.removeEventListener("click", dismissOutside, true);
+      window.removeEventListener("keydown", dismissWithEscape, true);
+    };
+  }, [actionsOpen]);
   const [hiddenMessages, setHiddenMessages] = useState<Set<string>>(() => new Set());
   useLayoutEffect(() => {
     if (!focusMessageId) return;
@@ -102,8 +124,6 @@ function Conversation({
   const mounted = useRef(true);
   draftChangeRef.current = onDraftChange;
   const [sending, setSending] = useState(false);
-  const [questionId, setQuestionId] = useState<string>();
-  const [startingImplementation, setStartingImplementation] = useState(false);
   const [cancelling, setCancelling] = useState(false);
   const [resumingQueue, setResumingQueue] = useState(false);
   const [error, setError] = useState("");
@@ -112,7 +132,6 @@ function Conversation({
   const archived = agent.archivedAt !== undefined;
   const blocked = Boolean(disabled || archived || agent.lifecycleBusy || agent.nativeChild);
   const readyToSend = !blocked && !sending && Boolean(draft.trim());
-  const question = agent.messages.find((entry) => entry.id === questionId && entry.productQuestion?.status === "pending");
   const hasFocusMessage = agent.messages.some((message) => message.id === focusMessageId);
   const shownInConversation = (detail: string) => agent.messages.some((message) =>
     message.role === "system" && Boolean(message.text) && (message.text.includes(detail) || detail.includes(message.text)));
@@ -298,33 +317,9 @@ function Conversation({
     }
   }
 
-  async function startImplementation() {
-    if (!onStartImplementation || blocked || sending || startingImplementation) return;
-    setStartingImplementation(true);
-    setError("");
-    try {
-      await onStartImplementation();
-    } catch (failure) {
-      setError(failure instanceof Error ? failure.message : "Implementation could not start.");
-    } finally {
-      setStartingImplementation(false);
-    }
-  }
-
-  function sendFromComposer() {
-    if (!questionId) {
-      void send(onSend);
-    } else if (question && onAnswerProductQuestion) {
-      void send(async (text) => {
-        await onAnswerProductQuestion(question.id, text);
-        setQuestionId((current) => current === question.id ? undefined : current);
-      });
-    }
-  }
-
   function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    sendFromComposer();
+    void send(onSend);
   }
 
   async function resumeQueue() {
@@ -356,13 +351,12 @@ function Conversation({
   function handleComposerKey(event: KeyboardEvent<HTMLTextAreaElement>) {
     if (event.key !== "Enter" || event.shiftKey || event.nativeEvent.isComposing) return;
     event.preventDefault();
-    sendFromComposer();
+    void send(onSend);
   }
 
-  const canAnswer = Boolean(onAnswerProductQuestion) && !blocked;
   const messageElements = useMemo(() => agent.messages.filter((message) =>
     message.productQuestion?.status === "pending" || !hiddenMessages.has(message.id)).map((message) => {
-          const sender = message.role === "user" ? "USER" : message.role === "system" ? "SYSTEM" : displayName;
+          const sender = message.role === "user" ? "USER" : message.role === "system" ? "SYSTEM" : "COMPUTER";
           const { productQuestion } = message;
           const systemKind = message.role === "system"
             ? productQuestion?.status === "answered" ? "notice" : message.kind
@@ -387,57 +381,68 @@ function Conversation({
                   <Markdown skipHtml disallowedElements={["img"]} components={markdownComponents}>{message.text}</Markdown>
                   {message.state === "streaming" ? <span className="chat-stream-cursor" aria-label="Responding" /> : null}
                 </div>
-                {productQuestion?.status === "pending" && canAnswer && (
-                  <button className="chat-steer" type="button" onClick={() => {
-                    setQuestionId(message.id);
-                    composer.current?.querySelector("textarea")?.focus();
-                  }}>Answer question</button>
-                )}
               </div>
             </article>
           );
-        }), [agent.messages, canAnswer, displayName, hiddenMessages]);
+        }), [agent.messages, hiddenMessages]);
+
+  const headerStatus = archived ? "Archived" : agent.lifecycleBusy ? "Updating…" : statusLabels[agent.status];
+  const headerTone = archived || agent.lifecycleBusy ? "idle" : agent.status;
+  const agentTooltipId = useId();
+  const nameTooltip = [
+    projectLabel && `Project: ${projectLabel}`,
+    repositoryScope && `Repositories: ${repositoryScope.join(", ")}`,
+    taskPhase === "planning" && (repositoryScope ? "Planning · read-only" : "General chat"),
+    modelLabel,
+    usageLabel,
+  ].filter(Boolean).join("\n");
 
   return (
     <section ref={chat} className="workspace-chat" aria-label={`${recipient} chat`}>
       <header className="chat-header">
         <div className="chat-header-copy">
-          <h2 title={displayName}>{displayName}</h2>
-          <span className="chat-agent-status">{projectLabel ? `Project: ${projectLabel} · ` : ""}{archived ? "Archived" : agent.lifecycleBusy ? "Updating…" : statusLabels[agent.status]}</span>
-          {repositoryScope && <span className="chat-agent-status">Repositories: {repositoryScope.join(", ")}</span>}
-          {taskPhase === "planning" && <span className="chat-agent-status">{repositoryScope ? "Planning · read-only" : "General chat"}</span>}
-          {modelLabel && <span className="chat-agent-status">{modelLabel}</span>}
-          {usageLabel && <span className="chat-agent-status" title={usageLabel}>{usageLabel}</span>}
+          <h2 className="chat-agent-title" tabIndex={0} aria-describedby={agentTooltipId}>
+            <span className="chat-agent-name">{displayName}</span>
+            <span className="chat-agent-divider" aria-hidden="true">|</span>
+            <span className="chat-agent-status" data-status={headerTone}>{headerStatus.toLowerCase()}</span>
+          </h2>
+          <div className="chat-agent-tooltip" id={agentTooltipId} role="tooltip">
+            <strong>{displayName}</strong>
+            {nameTooltip && <span>{nameTooltip}</span>}
+          </div>
         </div>
-        <details className="chat-lifecycle-menu">
-          <summary aria-label="Agent actions" title="Chat actions">⋯</summary>
-          <div>
-            <button type="button" title="Clear the visible log; conversation history is retained" onClick={(event) => {
-              const menu = event.currentTarget.closest("details");
-              menu?.removeAttribute("open");
-              menu?.querySelector("summary")?.focus();
+        <div ref={actions} className="chat-lifecycle-menu">
+          <button ref={actionsButton} className="interface-icon-button" type="button" aria-label="More actions"
+            title="More actions" aria-expanded={actionsOpen} aria-controls={actionsId}
+            onClick={() => setActionsOpen((open) => !open)}>
+            <LuEllipsis aria-hidden="true" strokeWidth={1.5} />
+          </button>
+          <div id={actionsId} hidden={!actionsOpen}>
+            <button type="button" className="interface-icon-button" aria-label="Clear chat" title="Clear chat" onClick={() => {
+              setActionsOpen(false);
+              actionsButton.current?.focus();
               setHiddenMessages(new Set(agent.messages
                 .filter((message) => message.productQuestion?.status !== "pending")
                 .map((message) => message.id)));
               pinToBottom.current = true;
-            }}>Clear chat</button>
+            }}><LuMessageSquareX aria-hidden="true" strokeWidth={1.5} /></button>
             {onLifecycle && <>
-            <button type="button" disabled={agent.lifecycleBusy} onClick={(event) => {
-              event.currentTarget.closest("details")?.removeAttribute("open");
-              onLifecycle(archived ? "restore" : "archive");
-            }}>{archived ? "Restore" : "Archive task"}</button>
-            <button type="button" disabled={agent.lifecycleBusy} onClick={(event) => {
-              event.currentTarget.closest("details")?.removeAttribute("open");
-              onLifecycle("delete");
-            }}>Delete permanently…</button>
+              <button type="button" disabled={agent.lifecycleBusy} onClick={() => {
+                setActionsOpen(false);
+                onLifecycle(archived ? "restore" : "archive");
+              }}>{archived ? "Restore" : "Archive task"}</button>
+              <button type="button" disabled={agent.lifecycleBusy} onClick={() => {
+                setActionsOpen(false);
+                onLifecycle("delete");
+              }}>Delete permanently…</button>
             </>}
           </div>
-        </details>
+        </div>
         {onToggleExpanded && (
-          <button className="chat-icon-button chat-width-toggle" type="button" onClick={onToggleExpanded}
-            aria-label={expanded ? "Restore conversation size" : "Expand conversation"}
-            title={expanded ? "Restore conversation size" : "Expand conversation"}>
-            {expanded ? <LuMinimize2 aria-hidden="true" /> : <LuMaximize2 aria-hidden="true" />}
+          <button className="interface-icon-button chat-width-toggle" type="button" onClick={onToggleExpanded}
+            aria-label={expanded ? "Reduce chat to 25%" : "Expand chat to 75%"}
+            title={expanded ? "Reduce chat to 25%" : "Expand chat to 75%"}>
+            {expanded ? <LuPanelRightClose aria-hidden="true" strokeWidth={1.5} /> : <LuPanelRightOpen aria-hidden="true" strokeWidth={1.5} />}
           </button>
         )}
         <button className="chat-icon-button" type="button" onClick={onClose}
@@ -466,20 +471,22 @@ function Conversation({
       </div>}
       {taskDetail && <p className="chat-task-detail" role="status">{taskDetail}</p>}
       {archived && <p className="chat-archive-notice">Archived {new Date(agent.archivedAt!).toLocaleString()}. Restore to continue this conversation.</p>}
-      <div className="chat-transcript" role="log" aria-label={`Conversation with ${recipient}`} aria-relevant="additions"
-        ref={transcript} onScroll={(event) => {
-          syncPinState(event.currentTarget);
-        }}>
+      <div className="chat-transcript-wrap">
+        <div className="chat-transcript" role="log" aria-label={`Conversation with ${recipient}`} aria-relevant="additions"
+          ref={transcript} onScroll={(event) => {
+            syncPinState(event.currentTarget);
+          }}>
+          {agent.messages.length === 0 ? (
+            <p className="chat-empty">
+              {agent.nativeChild ? "No messages yet." : `Send ${displayName} a message.`}
+            </p>
+          ) : null}
+          {messageElements}
+        </div>
         {showJumpToLatest && <button className="chat-jump-latest" type="button" onClick={scrollToLatest}
           aria-label="Jump to latest message" title="Jump to latest message">
           <span aria-hidden="true">↓</span>
         </button>}
-        {agent.messages.length === 0 ? (
-          <p className="chat-empty">
-            {agent.nativeChild ? "No messages yet." : `Send ${displayName} a message.`}
-          </p>
-        ) : null}
-        {messageElements}
       </div>
 
       {!archived && !agent.nativeChild && <>
@@ -497,24 +504,13 @@ function Conversation({
         ) : null}
         {blocked && disabledReason && !shownInConversation(disabledReason) ? <p className="chat-disabled">{disabledReason}</p> : null}
         {error && !shownInConversation(error) ? <p className="chat-error" role="alert">{error}</p> : null}
-        {questionId && <div className="chat-queue">
-          <span>{question ? `Answering: ${question.text.split("\n", 1)[0].slice(0, 120)}` : "This question no longer needs an answer."}</span>
-          <button className="chat-steer" type="button" onClick={() => setQuestionId(undefined)}>Cancel reply</button>
-        </div>}
         <div className="chat-composer-box">
           <span className="chat-input-prompt" aria-hidden="true">&gt;</span>
-          <textarea aria-label={`Message ${recipient}`} rows={3} disabled={Boolean(agent.lifecycleBusy)}
+          <textarea aria-label={`Message ${recipient}`}
+            placeholder={repositoryScope?.length ? "Ask a question or say “Go ahead and implement that”" : undefined} rows={3} disabled={Boolean(agent.lifecycleBusy)}
             value={draft} onChange={(event) => updateDraft(event.target.value)} onBlur={flushDraft} onKeyDown={handleComposerKey} />
         </div>
-        {onStartImplementation && agent.messages.some((entry) => entry.role === "assistant" && !entry.state) && (
-          <button className="chat-steer" type="button"
-            disabled={blocked || sending || startingImplementation || agent.canCancel || agent.queueDepth > 0}
-            onClick={() => void startImplementation()}>
-            {startingImplementation ? "Starting…" : taskPhase === "blocked" ? "Retry implementation"
-              : taskPhase === "ready-for-review" ? "Revise candidate" : "Start implementation"}
-          </button>
-        )}
-        {!questionId && agent.canSteer && onSteer ? (
+        {agent.canSteer && onSteer ? (
           <button className="chat-steer" type="button" disabled={!readyToSend}
             onClick={() => void send(onSteer)}>Steer current turn</button>
         ) : null}

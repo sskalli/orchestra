@@ -233,7 +233,6 @@ export function WorkspaceCanvas({
   }, []);
   const [origin, setOrigin] = useState<Point>({ x: 0, y: 0 });
   const [hovered, setHovered] = useState<string | null>(null);
-  const [statusHovered, setStatusHovered] = useState<string | null>(null);
   const [focused, setFocused] = useState<string | null>(null);
   const [dragging, setDragging] = useState(false);
   const firstFit = useRef(Boolean(initialCamera));
@@ -604,24 +603,21 @@ export function WorkspaceCanvas({
           const selected = agent.id === selectedId;
           const showChildStatusIcon = Boolean(status) && selectedRevealed.has(agent.id) && !highlighted.has(agent.id);
           const describedRole = agent.goal ?? agent.duty ?? agent.activity ?? statuses[statusAgent.status]?.label ?? "Idle";
-          const tooltipId = `swarm-node-tooltip-${agent.id}`;
           const accessibleName = `${displayName}${agent.projectLabel ? `, project ${agent.projectLabel}` : ""}`;
           const label = `${accessibleName}, ${agent.activity ?? statuses[statusAgent.status]?.label ?? "Idle"}`;
           return (
             <div
               key={agent.id}
               data-agent-color={color}
-              className={`swarm-node ${taskRoot ? "is-task-root" : "is-child"}${selected ? " is-selected" : ""}${statusHovered === agent.id ? " is-status-hovered" : ""}${showChildStatusIcon ? " is-subtree-only" : ""}`}
+              className={`swarm-node ${taskRoot ? "is-task-root" : "is-child"}${selected ? " is-selected" : ""}${showChildStatusIcon ? " is-subtree-only" : ""}`}
               style={{ left: x, top: y }}
               onPointerEnter={() => setHovered(agent.id)}
               onPointerLeave={() => {
                 setHovered((id) => id === agent.id ? null : id);
-                setStatusHovered((id) => id === agent.id ? null : id);
               }}
               onBlur={(event) => {
                 if (!event.currentTarget.contains(event.relatedTarget)) {
                   setFocused((id) => id === agent.id ? null : id);
-                  setStatusHovered((id) => id === agent.id ? null : id);
                 }
               }}
             >
@@ -655,19 +651,12 @@ export function WorkspaceCanvas({
                       type="button"
                       className={`swarm-team-status-icon status-${statusAgent.status}`}
                       aria-label={`${accessibleName}: ${statusLabel}`}
-                      aria-describedby={tooltipId}
                       onClick={() => onStatus(taskRoot &&
                         (statusAgent.status === "error" || statusAgent.status === "attention") ? agent.id : statusAgent.id)}
-                      onPointerEnter={() => setStatusHovered(agent.id)}
-                      onPointerLeave={() => setStatusHovered((id) => id === agent.id ? null : id)}
                       onFocus={(event) => {
                         if (event.currentTarget.matches(":focus-visible")) {
                           setFocused(agent.id);
-                          setStatusHovered(agent.id);
                         }
-                      }}
-                      onBlur={() => {
-                        setStatusHovered((id) => id === agent.id ? null : id);
                       }}
                     ><status.Icon aria-hidden="true" focusable="false" /></button>}
                     <span>{displayName}{roleLabel && <> | <span className="swarm-label-topic">{roleLabel}</span></>}</span>
@@ -678,12 +667,6 @@ export function WorkspaceCanvas({
                   </div>
                 </div>
               </div>
-              {status && <div className="swarm-node-tooltip" id={tooltipId}>
-                <div className="swarm-node-tooltip-content">
-                  <strong>{displayName}</strong>
-                  <span>{agent.activity ?? statuses[statusAgent.status]?.label ?? "Idle"}</span>
-                </div>
-              </div>}
             </div>
           );
         })}

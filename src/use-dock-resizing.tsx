@@ -62,7 +62,11 @@ export function useDockResizing(preferences: DockPreferences) {
       const rightBounds = right.getBoundingClientRect();
       const next = { width: bounds.width, height: bounds.height, left: leftBounds.width, right: rightBounds.width, leftHeight: leftBounds.height };
       panelMetricsRef.current = next;
-      if (resizeRef.current) return;
+      if (resizeRef.current) {
+        setPanelMetrics((current) =>
+          (current.right >= current.width / 2) === (next.right >= next.width / 2) ? current : next);
+        return;
+      }
       setPanelMetrics((current) => Object.keys(next).every((key) =>
         current[key as keyof typeof current] === next[key as keyof typeof next]) ? current : next);
     };
@@ -82,7 +86,7 @@ export function useDockResizing(preferences: DockPreferences) {
       return { min, max: width * 0.75, current: metrics.right };
     }
 
-    const maximum = mobile ? metrics.height - 130 : metrics.width * 0.44;
+    const maximum = mobile ? metrics.height - 64 : metrics.width * 0.44;
     const max = Math.max(0, maximum);
     return {
       min: Math.min(mobile ? 160 : 200, max),
@@ -101,7 +105,7 @@ export function useDockResizing(preferences: DockPreferences) {
 
   const rightBounds = panelBounds("right");
   const compactWidth = Math.max(rightBounds.min, panelMetricsRef.current.width * 0.25);
-  const chatExpanded = (panelSizes.right ?? rightBounds.current) > (compactWidth + rightBounds.max) / 2;
+  const chatExpanded = panelMetrics.width > 0 && panelMetrics.right >= panelMetrics.width / 2;
 
   function toggleChatWidth() {
     if (!panelMetricsRef.current.width) return;
@@ -138,7 +142,7 @@ export function useDockResizing(preferences: DockPreferences) {
       const distance = (drag.vertical ? event.clientY : event.clientX) - drag.start;
       const { min, max } = panelBounds(drag.side);
       const value = Math.max(min, Math.min(max,
-        drag.size + (drag.side === "right" || drag.vertical ? -distance : distance)));
+        drag.size + (drag.side === "right" ? -distance : distance)));
       const key: keyof PanelSizes = drag.vertical ? "mobileLeft" : drag.side;
       panelSizesRef.current = { ...panelSizesRef.current, [key]: value };
       pendingResize.current = { key, value, handle: event.currentTarget };
@@ -154,7 +158,7 @@ export function useDockResizing(preferences: DockPreferences) {
     };
     const keyboard = (event: KeyboardEvent<HTMLDivElement>) => {
       const increment = event.shiftKey ? 50 : 10;
-      const direction = vertical ? (event.key === "ArrowUp" ? 1 : event.key === "ArrowDown" ? -1 : 0)
+      const direction = vertical ? (event.key === "ArrowDown" ? 1 : event.key === "ArrowUp" ? -1 : 0)
         : (event.key === "ArrowRight" ? 1 : event.key === "ArrowLeft" ? -1 : 0) * (side === "right" ? -1 : 1);
       if (event.key === "Home" || event.key === "End" || direction) {
         event.preventDefault();
@@ -166,7 +170,7 @@ export function useDockResizing(preferences: DockPreferences) {
       }
     };
     return <div className={`sw-resize sw-resize--${side}`} role="separator" tabIndex={0}
-      aria-label={`Resize ${side === "left" ? "project" : "agent"} chat`} aria-orientation={vertical ? "horizontal" : "vertical"}
+      aria-label={side === "left" ? "Resize Inbox" : "Resize agent chat"} aria-orientation={vertical ? "horizontal" : "vertical"}
       aria-valuemin={max ? Math.round(min) : undefined} aria-valuemax={max ? Math.round(max) : undefined}
       aria-valuenow={max ? Math.round(Math.max(min, Math.min(max, current))) : undefined}
       onPointerDown={start} onPointerMove={move} onPointerUp={end} onPointerCancel={end} onLostPointerCapture={end} onKeyDown={keyboard} />;
@@ -178,9 +182,5 @@ export function useDockResizing(preferences: DockPreferences) {
     "--mobile-left-size": panelSizes.mobileLeft ? `${panelSizes.mobileLeft}px` : undefined,
   };
 
-  function openChatWidth() {
-    if (panelMetricsRef.current.width) resizePanel("right", panelMetricsRef.current.width * 0.65);
-  }
-
-  return { bodyRef, resizing, style, resizeHandle, chatExpanded, toggleChatWidth, openChatWidth };
+  return { bodyRef, resizing, style, resizeHandle, chatExpanded, toggleChatWidth };
 }
