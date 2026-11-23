@@ -453,7 +453,14 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
             {snapshot.projects.map((entry) => <div key={entry.id}><strong>{entry.id}</strong><span>{entry.path}</span></div>)}
           </div>}
         </div>
-        <div className={`sw-provider sw-provider--${connected ? provider.state : "connecting"}`} role="status"><span aria-hidden="true" />{connected ? providerLabel(provider) : "Reconnecting"}</div>
+        <div className={`sw-provider sw-provider--${connected ? provider.state : "connecting"}`} role="status"
+          title={mode === "codex" && snapshot.modelProvider !== "openai" ? `Codex provider: ${snapshot.modelProvider}` : undefined}>
+          <span className="sw-provider-dot" aria-hidden="true" />
+          <span className="sw-provider-label">
+            {connected ? providerLabel(provider) : "Reconnecting"}
+            {mode === "codex" && snapshot.modelProvider !== "openai" && ` · ${snapshot.modelProvider}`}
+          </span>
+        </div>
         {snapshot.usage && <WorkspaceUsage usage={snapshot.usage} />}
       </header>
       <main ref={bodyRef} className={`sw-body ${leftOpen ? "is-project-open" : ""} ${selected ? "is-agent-open" : ""} ${resizing ? "is-resizing" : ""}`}

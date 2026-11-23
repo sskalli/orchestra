@@ -10,7 +10,7 @@ npm run workspace -- --live /path/to/git/project
 npm run workspace -- --project app=/path/to/app --project api=/path/to/api
 ```
 
-The first command is a simulated demo. Live sessions use a local Codex App Server. Sign in through ChatGPT before launching. Worktrees require a Git repository with a commit.
+The first command is a simulated demo. Live sessions use a local Codex App Server. The default provider requires ChatGPT sign-in; custom providers use their own configured credentials. Worktrees require a Git repository with a commit.
 
 All configured repos share one map and inbox. Define each repository ID once. The workspace identity is based on resolved paths and IDs. Argument order does not affect it. A single-repository workspace keeps its identity if you change only its repository ID.
 
@@ -21,7 +21,29 @@ All configured repos share one map and inbox. Define each repository ID once. Th
 | `CODEX_BIN` | Set the Codex executable path. |
 | `CODEX_MODEL` | Override Codex model selection for new tasks. |
 
-For a separately configured Codex provider, define it in Codex's configuration and pass `--provider ID` alongside `--live` or `--project`. Use a dedicated environment variable for that provider's credentials. Orchestra strips `OPENAI_API_KEY` and `CODEX_API_KEY` from the App Server process. Each provider has separate saved sessions.
+### Custom Codex providers
+
+Define a provider in Codex's `~/.codex/config.toml` (or the configuration under `CODEX_HOME`):
+
+```toml
+[model_providers.company]
+name = "Company gateway"
+base_url = "https://gateway.example.com/v1"
+wire_api = "responses"
+env_key = "COMPANY_API_KEY"
+```
+
+Export the configured key and select the provider ID at launch:
+
+```bash
+export COMPANY_API_KEY='your-api-key'
+npm run workspace -- --live /path/to/git/project --provider company
+# Or: npm run workspace -- --project app=/path/to/app --project api=/path/to/api --provider company
+```
+
+The endpoint must support the Responses API expected by Codex. Use a custom provider ID rather than `openai`, which retains the ChatGPT sign-in requirement. Configure the provider's model in Codex or set `CODEX_MODEL` for new tasks. Use a dedicated credential environment variable: Orchestra strips `OPENAI_API_KEY` and `CODEX_API_KEY` from the App Server process.
+
+The provider is fixed for the running workspace and shown in its status. Restart with another ID to switch. Saved sessions, usage and browser drafts are isolated by provider; threads do not carry over between providers. Run only one server per workspace, provider and state directory.
 
 ## Task flow
 

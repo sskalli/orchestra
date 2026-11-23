@@ -8,6 +8,11 @@ const pending = new Map();
 const write = (value) => process.stdout.write(JSON.stringify(value) + "\n");
 const emit = (method, params) => write({ method, params });
 const trace = (method, params) => appendFileSync(process.env.ORCHESTRA_TEST_TRACE, JSON.stringify({ method, params }) + "\n");
+trace("environment", {
+  openaiKey: "OPENAI_API_KEY" in process.env,
+  codexKey: "CODEX_API_KEY" in process.env,
+  customKey: process.env.COMPANY_API_KEY === "fixture-company-key",
+});
 const finish = (threadId, turn) => emit("turn/completed", { threadId, turn: { ...turn, status: "completed" } });
 const assistant = (threadId, turnId, id, text) => emit("item/completed", {
   threadId, turnId, item: { type: "agentMessage", id, text },

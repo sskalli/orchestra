@@ -61,7 +61,7 @@ button:focus-visible { outline: 2px solid #b8bcb8; outline-offset: 3px; }
 .sw-project-menu { position: relative; padding-left: 20px; border-left: 1px solid var(--sw-line); min-width: 0; }
 .sw-project-button {
   display: flex; align-items: center; gap: 10px; background: none; border: 0;
-  border-radius: 4px; padding: 5px; cursor: pointer; max-width: 42vw; font-size: 11px;
+  border-radius: 4px; padding: 5px; cursor: pointer; max-width: min(42vw, 100%); font-size: 11px;
 }
 .sw-project-button:hover { background: var(--sw-control-hover); color: #fff; }
 .sw-project-button > span:first-of-type { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -75,11 +75,12 @@ button:focus-visible { outline: 2px solid #b8bcb8; outline-offset: 3px; }
 .sw-project-details span { color: var(--sw-muted); font-size: inherit; overflow-wrap: anywhere; }
 .sw-project-details > div { display: flex; flex-direction: column; gap: 2px; }
 .sw-project-details > div + div { margin-top: 8px; }
-.sw-provider { margin-left: auto; display: flex; align-items: center; gap: 8px; color: var(--sw-muted); font-size: 12px; white-space: nowrap; }
-.sw-provider > span { width: 7px; height: 7px; border-radius: 50%; background: #8b9490; }
-.sw-provider--ready > span { background: #68ca84; }
-.sw-provider--error > span { background: #ec7474; }
-.sw-provider--usage-limit > span, .sw-provider--signed-out > span { background: #e5bb68; }
+.sw-provider { margin-left: auto; min-width: 0; display: flex; align-items: center; gap: 8px; color: var(--sw-muted); font-size: 12px; white-space: nowrap; }
+.sw-provider-dot { flex: none; width: 7px; height: 7px; border-radius: 50%; background: #8b9490; }
+.sw-provider-label { overflow: hidden; text-overflow: ellipsis; }
+.sw-provider--ready .sw-provider-dot { background: #68ca84; }
+.sw-provider--error .sw-provider-dot { background: #ec7474; }
+.sw-provider--usage-limit .sw-provider-dot, .sw-provider--signed-out .sw-provider-dot { background: #e5bb68; }
 .sw-usage-menu { position: relative; flex: none; }
 .sw-usage-menu summary { cursor: pointer; font-size: 11px; padding: 4px; border-radius: 4px; }
 .sw-usage-menu summary:hover { background: var(--sw-control-hover); }
@@ -149,8 +150,7 @@ button:focus-visible { outline: 2px solid #b8bcb8; outline-offset: 3px; }
   .sw-resize--left { top: 0; right: 0; bottom: auto; left: 0; width: auto; height: 14px; cursor: row-resize; }
   .sw-resize--left::after { top: 0; right: 0; bottom: auto; left: 0; width: auto; height: 2px; }
   .sw-right { position: absolute; right: 0; top: 0; bottom: 0; }
-  .sw-provider { font-size: 10px; gap: 5px; overflow: hidden; text-overflow: ellipsis; }
-  .sw-provider > span { flex: none; }
+  .sw-provider { font-size: 10px; gap: 5px; }
   .sw-usage-menu summary { font-size: 10px; }
 }
 @media (prefers-reduced-motion: reduce) {

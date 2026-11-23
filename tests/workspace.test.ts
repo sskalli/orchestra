@@ -22,6 +22,7 @@ test("workspace launch options select a Codex provider only in live mode", () =>
     { id: "app", path: "/app" }, { id: "api", path: "/api" },
   ]);
   assert.equal(parseWorkspaceArgs(["--project", "app=/app"]).live, true);
+  assert.deepEqual(parseWorkspaceArgs(["--project", "app=/app", "--project", "api=/api", "--provider", "company"]).provider, "company");
   assert.throws(() => parseWorkspaceArgs(["--provider", "company-gateway"]), /Usage:/);
   assert.throws(() => parseWorkspaceArgs(["--live", "--provider"]), /provider ID/);
   assert.throws(() => parseWorkspaceArgs(["--project", "app=/app", "--project", "app=/other"]), /Duplicate project/);

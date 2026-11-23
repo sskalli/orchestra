@@ -15,7 +15,7 @@ Open [Orchestra](http://127.0.0.1:4317). The demo uses sample tasks and no Codex
 
 ## Work on your repositories
 
-Install Codex and sign in through ChatGPT. Launch with a Git repository or a set of named repositories.
+Install Codex and, for the default provider, sign in through ChatGPT. Launch with a Git repository or a set of named repositories.
 
 ```bash
 npm run workspace -- --live /absolute/path/to/project
@@ -23,6 +23,15 @@ npm run workspace -- --project app=/absolute/path/to/app --project api=/absolute
 ```
 
 Set `CODEX_BIN` if Codex is outside your `PATH`. For example, use `CODEX_BIN=/usr/lib/chatgpt/resources/codex` with the bundled Linux executable.
+
+To use a custom Codex provider instead of ChatGPT sign-in, configure it in Codex and select its ID when launching:
+
+```bash
+export COMPANY_API_KEY='your-api-key'
+npm run workspace -- --live /absolute/path/to/project --provider company
+```
+
+The same `--provider company` option works with `--project`. See [custom provider configuration](WORKSPACE.md#custom-codex-providers) for an example and credential requirements.
 
 Use **+** on the map to open a task. Choose repositories for code work or leave the selection empty for a general chat. A repo-backed task can read and plan before you click **Start implementation**. The same Codex session then edits isolated worktrees, runs the agreed checks, and shows pinned revisions for review. You merge changes yourself.
 
