@@ -12,6 +12,8 @@ import "./workspace-chat.css";
 
 type ChatAgent = WorkspaceAgent;
 type RepositoryScope = { id: string; path?: string };
+type CommandApprovalDecision = "approve" | "decline";
+type ResolveCommandApproval = (requestId: string, decision: CommandApprovalDecision) => Promise<void>;
 
 type ChatProps = {
   agent: ChatAgent;
@@ -31,6 +33,7 @@ type ChatProps = {
   onSteer?: (text: string) => Promise<void> | void;
   onCancel?: () => Promise<void>;
   onApproveImplementation?: (requestId: string) => Promise<void>;
+  onResolveCommandApproval?: ResolveCommandApproval;
   onResumeQueue?: () => Promise<void>;
   onClose: () => void;
   onOpenAgent?: (id: string) => void;
@@ -101,6 +104,57 @@ function ImplementationTargets({ request, repositories }: {
   );
 }
 
+const commandApprovalLabels = {
+  pending: "Command approval required",
+  approved: "Command approved",
+  declined: "Command declined",
+  expired: "Command approval expired",
+};
+
+function CommandApprovalCard({ approval, requestId, blocked, onResolve }: {
+  approval: NonNullable<WorkspaceMessage["commandApproval"]>;
+  requestId: string;
+  blocked: boolean;
+  onResolve?: ResolveCommandApproval;
+}) {
+  const [submitting, setSubmitting] = useState<CommandApprovalDecision>();
+  const [error, setError] = useState("");
+
+  async function resolve(decision: CommandApprovalDecision) {
+    if (approval.status !== "pending" || blocked || !onResolve || submitting) return;
+    setSubmitting(decision);
+    setError("");
+    try {
+      await onResolve(requestId, decision);
+    } catch (failure) {
+      setError(failure instanceof Error ? failure.message : "Could not resolve command approval.");
+      setSubmitting(undefined);
+    }
+  }
+
+  return (
+    <div className="chat-command-approval">
+      <p className="chat-command-approval-warning">An approval runs this command once outside the sandbox with your local account’s access.</p>
+      <dl>
+        <div><dt>Command</dt><dd><code>{approval.command}</code></dd></div>
+        <div><dt>Working directory</dt><dd><code>{approval.cwd}</code></dd></div>
+        {approval.reason && <div><dt>Reason</dt><dd>{approval.reason}</dd></div>}
+      </dl>
+      {approval.status === "pending" && onResolve && (
+        <>
+          <div className="chat-command-approval-actions">
+            <button type="button" className="chat-steer" disabled={blocked || !!submitting}
+              onClick={() => void resolve("decline")}>{submitting === "decline" ? "Declining…" : "Decline"}</button>
+            <button type="button" className="chat-steer" disabled={blocked || !!submitting}
+              onClick={() => void resolve("approve")}>{submitting === "approve" ? "Approving…" : "Approve once"}</button>
+          </div>
+          {error && <p className="chat-error" role="alert">{error}</p>}
+        </>
+      )}
+    </div>
+  );
+}
+
 function MessageActions({ message }: { message: WorkspaceMessage }) {
   const [copyStatus, setCopyStatus] = useState<"copied" | "failed">();
   const reset = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
@@ -136,7 +190,7 @@ function MessageActions({ message }: { message: WorkspaceMessage }) {
 
 function Conversation({
   agent, projectLabel, repositoryScope, delivery, taskPhase, taskDetail, modelLabel, usageLabel, draft: initialDraft, composerHeight, onComposerHeightChange, onDraftInput, onDraftChange, onSend, onSteer, onCancel, onResumeQueue, onApproveImplementation, onClose,
-  disabled, disabledReason, focusMessageId, focusRequest, onOpenAgent, onLifecycle, onRename,
+  disabled, disabledReason, focusMessageId, focusRequest, onOpenAgent, onLifecycle, onRename, onResolveCommandApproval,
 }: ChatProps) {
   const transcript = useRef<HTMLDivElement>(null);
   const actions = useRef<HTMLDivElement>(null);
@@ -483,9 +537,12 @@ function Conversation({
   const messageElements = useMemo(() => agent.messages.filter((message) =>
     needsUserInput(message) || !hiddenMessages.has(message.id)).map((message) => {
           const sender = message.role === "user" ? "USER" : message.role === "system" ? "SYSTEM" : "COMPUTER";
-          const { productQuestion, implementationRequest } = message;
+          const { productQuestion, implementationRequest, commandApproval } = message;
+          const resolved = productQuestion?.status === "answered" ||
+            (implementationRequest && implementationRequest.status !== "pending") ||
+            (commandApproval && commandApproval.status !== "pending");
           const systemKind = message.role === "system"
-            ? productQuestion?.status === "answered" || implementationRequest && implementationRequest.status !== "pending" ? "notice" : message.kind
+            ? resolved ? "notice" : commandApproval ? "action" : message.kind
             : undefined;
           return (
             <article key={message.id} tabIndex={-1} className={`chat-message chat-message--${message.role}${systemKind ? ` chat-message--${systemKind}` : ""}`}
@@ -501,17 +558,21 @@ function Conversation({
                   ) : implementationRequest ? <span className="chat-message-state">
                     {implementationRequest.status === "pending" ? "Awaiting your permission to edit files"
                       : implementationRequest.status === "approved" ? "Edits allowed" : "Request superseded"}
-                  </span> : systemKind ? <span className="chat-message-state">{systemMessageLabels[systemKind]}</span> : null}
+                  </span> : commandApproval ? <span className="chat-message-state">{commandApprovalLabels[commandApproval.status]}</span>
+                    : systemKind ? <span className="chat-message-state">{systemMessageLabels[systemKind]}</span> : null}
                   {message.state === "queued" ? <span className="chat-message-state">Queued</span> : null}
                   {message.state === "failed" ? <span className="chat-message-state chat-message-state--failed">Failed</span> : null}
                   {message.state === "cancelled" ? <span className="chat-message-state">Stopped</span> : null}
                 </div>
-                <div className="chat-markdown">
+                {commandApproval ? (
+                  <CommandApprovalCard approval={commandApproval} requestId={message.id} blocked={blocked}
+                    onResolve={onResolveCommandApproval} />
+                ) : <div className="chat-markdown">
                   {implementationRequest
                     ? <p className="chat-implementation-summary">{message.text}</p>
                     : <Markdown skipHtml disallowedElements={["img"]} components={markdownComponents}>{message.text}</Markdown>}
                   {message.state === "streaming" ? <span className="chat-stream-cursor" aria-label="Responding" /> : null}
-                </div>
+                </div>}
                 {implementationRequest && !!repositoryScope?.length &&
                   <ImplementationTargets request={implementationRequest} repositories={repositoryScope} />}
                 {implementationRequest?.status === "pending" && onApproveImplementation && !archived && (
@@ -525,7 +586,7 @@ function Conversation({
               <MessageActions message={message} />
             </article>
           );
-        }), [agent.messages, agent.canCancel, agent.queueDepth, approveImplementation, approvingImplementation, archived, blocked, hiddenMessages, onApproveImplementation, repositoryScope]);
+        }), [agent.messages, agent.canCancel, agent.queueDepth, approveImplementation, approvingImplementation, archived, blocked, hiddenMessages, onApproveImplementation, onResolveCommandApproval, repositoryScope]);
 
   const headerStatus = archived ? "Archived" : agent.lifecycleBusy ? "Updating…" : statusLabels[agent.status];
   const headerTone = archived || agent.lifecycleBusy ? "idle" : agent.status;

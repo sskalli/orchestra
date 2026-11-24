@@ -6,6 +6,8 @@ Orchestra runs a local TypeScript server and a React browser UI. The server owns
 
 A direct task maps to one addressable Codex thread. Use read-only access for planning and ordinary follow-ups. An explicit implementation turn supplies per-repository writable roots. Isolated linked worktrees are the default. The immutable request can instead name a configured checkout or an exact path and optional new branch for a linked worktree. Orchestra creates linked worktrees and scopes the Codex turn to the approved roots. Native child records track provider thread IDs, parent relationships, activity, replies, and observed usage. Child chats are inspected by ID and the parent coordinates their work.
 
+Codex command approvals during implementation are bound to the live provider request and the task's approved working directory. Orchestra relays a single accept or decline. A pending approval expires when the provider resolves the request, the turn ends, or Orchestra restarts. A new approved command invalidates any earlier check result for that turn.
+
 Product questions bind a pending decision to its task and message. An accepted answer is persisted with the continuation. Interrupted and uncertain provider turns are reconciled without blindly resending input.
 
 ## Delivery

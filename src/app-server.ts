@@ -14,6 +14,13 @@ type Params = {
     agentThreadId?: string; agentPath?: string; agentNickname?: string | null; agentRole?: string | null;
     kind?: string; model?: string | null };
   itemId?: string;
+  requestId?: Id;
+  command?: string | null;
+  cwd?: string | null;
+  reason?: string | null;
+  availableDecisions?: unknown;
+  additionalPermissions?: unknown;
+  networkApprovalContext?: unknown;
   kind?: string;
   namespace?: string | null;
   tool?: string;
