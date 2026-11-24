@@ -1,0 +1,16 @@
+.workspace-orbit-spinner {
+  flex: none;
+  align-self: center;
+}
+
+.workspace-orbit-dot {
+  transform-origin: 7px 7px;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .workspace-orbit-dot { animation: workspace-orbit-spin 1.2s linear infinite; }
+}
+
+@keyframes workspace-orbit-spin {
+  to { transform: rotate(1turn); }
+}

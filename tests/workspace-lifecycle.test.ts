@@ -42,6 +42,54 @@ test("archive and restore affect the whole task and its native children only", a
   } finally { await runtime.close(); }
 });
 
+test("task names can be changed and reloaded independently of the provider", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "orchestra-rename-state-"));
+  const store = workspaceStore("/fixture/project", directory);
+  const { runtime, internal } = fixture({ cwd: "/fixture/project", store });
+  internal.storageReady = true;
+  internal.state.provider.state = "signed-out";
+  const reopened = new WorkspaceRuntime({ cwd: "/fixture/project", store });
+  try {
+    await assert.rejects(runtime.command({ type: "rename", agentId: "pm", name: " " }), /task name/i);
+    await assert.rejects(runtime.command({ type: "rename", agentId: "pm", name: "x".repeat(61) }), /task name/i);
+    await assert.rejects(runtime.command({ type: "rename", agentId: "researcher", name: "New child name" }), /owning task/i);
+    await runtime.command({ type: "rename", agentId: "pm", name: "  New Study  " });
+    assert.equal(runtime.snapshot().agents.find(({ id }) => id === "pm")?.name, "New Study");
+    await runtime.command({ type: "archive", agentId: "pm" });
+    await runtime.command({ type: "rename", agentId: "pm", name: "Study archive" });
+
+    const saved = store.load()!;
+    assert.equal(saved.find(({ agent }) => agent.id === "pm")?.threadId, "pm-thread");
+    (reopened as any).restore(saved);
+    const agents = reopened.snapshot().agents;
+    const task = agents.find(({ id }) => id === "pm");
+    assert.equal(task?.name, "Study archive");
+    assert(task?.archivedAt);
+    const child = agents.find(({ id }) => id === "researcher");
+    assert.equal(child?.parentId, task.id);
+    assert.equal(child?.name, "Research");
+    assert.equal(child?.messages[0].text, "Research report");
+  } finally {
+    await runtime.close(); await reopened.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("renaming preserves the previous name if the workspace cannot save", async () => {
+  const store = {
+    load: () => undefined,
+    usagePath: "",
+    save: () => { throw new Error("Fixture disk full"); },
+  };
+  const { runtime, internal } = fixture({ cwd: process.cwd(), store });
+  internal.storageReady = true;
+  try {
+    await assert.rejects(runtime.command({ type: "rename", agentId: "pm", name: "Unsaved name" }), /could not save the task name/i);
+    assert.equal(runtime.snapshot().agents.find(({ id }) => id === "pm")?.name, "Study");
+    assert.equal(runtime.snapshot().provider.state, "error");
+  } finally { await runtime.close(); }
+});
+
 test("archived conversations reject sends, steering, queue resume, and late provider events", async () => {
   const { runtime, internal, pm } = fixture();
   try {

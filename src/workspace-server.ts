@@ -35,6 +35,9 @@ async function readCommand(request: IncomingMessage) {
     return { type: "createTask" as const, name: command.name, projectIds: command.projectIds as string[] };
   }
   if (typeof command?.agentId !== "string") throw new Error("Invalid agent");
+  if (command.type === "rename" && typeof command.name === "string") {
+    return { type: "rename" as const, agentId: command.agentId, name: command.name };
+  }
   if (command.type === "archive") {
     if (command.stopRunning !== undefined && typeof command.stopRunning !== "boolean") throw new Error("Invalid stop option");
     return { type: "archive" as const, agentId: command.agentId, stopRunning: command.stopRunning };

@@ -108,8 +108,6 @@
   box-shadow: 0 0 24px 8px color-mix(in srgb, var(--agent-color) 48%, transparent);
 }
 
-@keyframes swarm-canvas-spin { to { transform: rotate(360deg); } }
-
 .swarm-team-label {
   display: none;
   position: absolute;
@@ -182,7 +180,7 @@
   cursor: pointer;
 }
 
-.swarm-team-status-icon svg {
+.swarm-team-status-icon svg:not(.workspace-orbit-spinner) {
   display: block;
   width: calc(var(--swarm-label-icon-box) - 2px);
   height: calc(var(--swarm-label-icon-box) - 2px);
@@ -192,7 +190,6 @@
 .swarm-team-status-icon.status-error { color: #ff6e66; }
 .swarm-team-status-icon.status-done { color: #8be384; }
 .swarm-team-status-icon:is(.status-notice, .status-awaiting-confirmation) { color: #85b6ff; }
-.swarm-team-status-icon.status-working svg { animation: swarm-canvas-spin 1.8s linear infinite; }
 .swarm-team-status-icon:focus-visible { outline: 1px solid #dedede; outline-offset: 1px; }
 
 .swarm-team-label-content {

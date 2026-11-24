@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { LuListFilter, LuMinus, LuTrash2 } from "react-icons/lu";
 import "./workspace-inbox.css";
@@ -25,7 +25,9 @@ type WorkspaceInboxProps = {
 
 export function WorkspaceInbox({ events, toggle, onOpen, onClose, onClear, canClear }: WorkspaceInboxProps) {
   const feed = useRef<HTMLDivElement>(null);
+  const content = useRef<HTMLDivElement>(null);
   const followLatest = useRef(true);
+  const [showJumpToLatest, setShowJumpToLatest] = useState(false);
   const filters = useRef<HTMLDivElement>(null);
   const filterButton = useRef<HTMLButtonElement>(null);
   const [filtersOpen, setFiltersOpen] = useState(false);
@@ -52,20 +54,34 @@ export function WorkspaceInbox({ events, toggle, onOpen, onClose, onClear, canCl
     return list;
   }, []);
 
-  useLayoutEffect(() => {
+  function scrollToLatest() {
+    if (!feed.current) return;
+    followLatest.current = true;
+    feed.current.scrollTop = feed.current.scrollHeight;
+    setShowJumpToLatest(false);
+  }
+
+  const syncScroll = useCallback(() => {
     const element = feed.current;
-    if (element && followLatest.current) element.scrollTop = element.scrollHeight;
-  }, [events, statusFilter]);
+    if (!element?.clientHeight) return;
+    const atBottom = element.scrollHeight - element.scrollTop - element.clientHeight < 36;
+    followLatest.current = atBottom;
+    setShowJumpToLatest(!atBottom);
+  }, []);
 
   useLayoutEffect(() => {
     const element = feed.current;
-    if (!element) return;
-    const observer = new ResizeObserver(() => {
-      if (followLatest.current) element.scrollTop = element.scrollHeight;
-    });
+    const rows = content.current;
+    if (!element || !rows) return;
+    const observer = new ResizeObserver(syncScroll);
     observer.observe(element);
+    observer.observe(rows);
     return () => observer.disconnect();
-  }, []);
+  }, [syncScroll]);
+
+  useLayoutEffect(() => {
+    if (followLatest.current) scrollToLatest();
+  }, [events, statusFilter]);
 
   useEffect(() => {
     if (!filtersOpen) return;
@@ -97,7 +113,7 @@ export function WorkspaceInbox({ events, toggle, onOpen, onClose, onClear, canCl
           <div className="workspace-inbox-filter-options" id="inbox-filter" role="group" aria-label="Status filters" hidden={!filtersOpen}>
             {["", ...statuses].map((status) => <button type="button" key={status} aria-pressed={statusFilter === status}
               onClick={() => {
-                followLatest.current = true;
+                scrollToLatest();
                 const tone = tones.get(status);
                 setFilter(tone ? { status, tone } : undefined);
                 setFiltersOpen(false);
@@ -118,32 +134,38 @@ export function WorkspaceInbox({ events, toggle, onOpen, onClose, onClear, canCl
           <LuMinus aria-hidden="true" strokeWidth={1.5} />
         </button>
       </header>
-      <div className="workspace-inbox-feed" ref={feed} onScroll={(event) => {
-        const element = event.currentTarget;
-        if (element.clientHeight) {
-          followLatest.current = element.scrollHeight - element.scrollTop - element.clientHeight < 24;
-        }
-      }}>
-        {visibleEvents.length === 0 ? <p className="workspace-inbox-empty" role="status">
-          {statusFilter ? "No tasks with this status." : "No activity in the Inbox."}
-        </p> : (
-          <ul className="workspace-inbox-events" aria-label="Task activity">
-            {visibleEvents.map(({ id, agentName, status, tone, text, agentId, messageId }) => (
-              <li key={id} className="workspace-inbox-event">
-                <details className="workspace-inbox-details">
-                  <summary>
-                    <span className="workspace-inbox-name" title={agentName}>{agentName}</span>
-                    <strong className={`workspace-inbox-status is-${tone}`}>{status}</strong>
-                  </summary>
-                  <div className="workspace-inbox-preview">
-                    {text && <p>{text}</p>}
-                    <button type="button" onClick={() => onOpen(agentId, messageId)}>Open conversation</button>
-                  </div>
-                </details>
-              </li>
-            ))}
-          </ul>
-        )}
+      <div className="chat-transcript-wrap">
+        <div className="workspace-inbox-feed" ref={feed} tabIndex={-1} onScroll={syncScroll}>
+          <div ref={content}>
+            {visibleEvents.length === 0 ? <p className="workspace-inbox-empty" role="status">
+              {statusFilter ? "No tasks with this status." : "No activity in the Inbox."}
+            </p> : (
+              <ul className="workspace-inbox-events" aria-label="Task activity">
+                {visibleEvents.map(({ id, agentName, status, tone, text, agentId, messageId }) => (
+                  <li key={id} className="workspace-inbox-event">
+                    <details className="workspace-inbox-details">
+                      <summary>
+                        <span className="workspace-inbox-name" title={agentName}>{agentName}</span>
+                        <strong className={`workspace-inbox-status is-${tone}`}>{status}</strong>
+                      </summary>
+                      <div className="workspace-inbox-preview">
+                        {text && <p>{text}</p>}
+                        <button type="button" onClick={() => onOpen(agentId, messageId)}>Open conversation</button>
+                      </div>
+                    </details>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        </div>
+        {showJumpToLatest && <button className="chat-jump-latest" type="button"
+          aria-label="Jump to latest notification" title="Jump to latest notification" onClick={() => {
+            feed.current?.focus({ preventScroll: true });
+            scrollToLatest();
+          }}>
+          <span aria-hidden="true">↓</span>
+        </button>}
       </div>
     </section>
   );

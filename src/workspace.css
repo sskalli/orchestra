@@ -30,7 +30,7 @@
   --panel-bg: #17191B;
   --panel-header-bg: #1D2023;
   --panel-border: #343A40;
-  --floating-frame: #87929E;
+  --floating-frame: var(--text-muted);
   --control-highlight: #E9ECEF;
   --panel-divider: #2A3035;
   --panel-input-bg: #121517;

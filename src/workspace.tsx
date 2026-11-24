@@ -294,9 +294,17 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
   const logEvents = flightLog.entries.flatMap(({ sequence, event }) => {
     const conversation = activeConversations.get(event.agentId);
     if (!conversation) return [];
+    let owner = conversation;
+    const visited = new Set([owner.id]);
+    while (owner.parentId && !visited.has(owner.parentId)) {
+      const parent = activeConversations.get(owner.parentId);
+      if (!parent) break;
+      owner = parent;
+      visited.add(owner.id);
+    }
     const source = conversation.messages.find(({ id }) => id === event.messageId);
     const text = source?.text ?? inboxEvents.find(({ id }) => id === event.id)?.text ?? event.status;
-    return [{ ...event, id: String(sequence), text: text.length > 500 ? text.slice(0, 499) + "…" : text }];
+    return [{ ...event, id: String(sequence), agentName: agentAppearance(owner).displayName, text: text.length > 500 ? text.slice(0, 499) + "…" : text }];
   });
   const canClearLog = flightLog.entries.some(({ event }) =>
     activeConversations.has(event.agentId) && !pendingQuestionIds.has(event.id));
@@ -435,6 +443,7 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
       key={agent.id}
       agent={agent}
       onOpenAgent={(id) => select(id)}
+      onRename={agent.nativeChild ? undefined : (name) => send({ type: "rename", agentId: agent.id, name })}
       onLifecycle={agent.nativeChild ? undefined : (action) => requestLifecycle(action, agent.id)}
       onApproveImplementation={agent.directTask?.projectIds.length
         ? (requestId) => send({ type: "approveImplementation", agentId: agent.id, requestId })
