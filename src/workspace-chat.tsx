@@ -109,6 +109,7 @@ const commandApprovalLabels = {
   approved: "Command approved",
   declined: "Command declined",
   expired: "Command approval expired",
+  unconfirmed: "Decision delivery unconfirmed",
 };
 
 function CommandApprovalCard({ approval, requestId, blocked, onResolve }: {
@@ -162,7 +163,7 @@ function MessageActions({ message }: { message: WorkspaceMessage }) {
 
   async function copy() {
     try {
-      await navigator.clipboard.writeText(message.text);
+      await navigator.clipboard.writeText(message.commandApproval?.command ?? message.text);
       setCopyStatus("copied");
     } catch {
       setCopyStatus("failed");

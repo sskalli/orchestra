@@ -338,6 +338,21 @@ test("command approvals are one-time decisions bound to the active implementatio
   await resolve(getApprovals().at(-1)!.id, "decline");
   assert.deepEqual(replies.get("decline-this-command"), declined);
 
+  await requestCommand("failed-decision-handoff", api.path);
+  const unconfirmed = getApprovals().at(-1)!;
+  const replying = internal.server.reply;
+  let handoffAttempts = 0;
+  internal.server.reply = (id: string, result: unknown) => {
+    if (id !== "failed-decision-handoff") return replying(id, result);
+    handoffAttempts++;
+    throw new Error("App Server connection closed");
+  };
+  await assert.rejects(resolve(unconfirmed.id, "approve"), /could not confirm/);
+  assert.equal(getApprovals().at(-1)?.commandApproval?.status, "unconfirmed");
+  await assert.rejects(resolve(unconfirmed.id, "approve"), /no longer pending/);
+  assert.equal(handoffAttempts, 1);
+  internal.server.reply = replying;
+
   await requestCommand("withdrawn-by-provider", api.path);
   const withdrawn = getApprovals().at(-1)!;
   internal.onEvent({ method: "serverRequest/resolved", params: { threadId: task.threadId, requestId: "withdrawn-by-provider" } });

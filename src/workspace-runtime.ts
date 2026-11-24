@@ -31,7 +31,7 @@ export type WorkspaceMessage = {
   state?: "queued" | "streaming" | "failed" | "cancelled";
   productQuestion?: { status: "pending" } | { status: "answered"; answerMessageId: string };
   answersProductQuestionId?: string;
-  commandApproval?: { status: "pending" | "approved" | "declined" | "expired"; command: string; cwd: string; reason?: string };
+  commandApproval?: { status: "pending" | "approved" | "declined" | "expired" | "unconfirmed"; command: string; cwd: string; reason?: string };
   implementationRequest?: { status: "pending" | "approved" | "superseded"; targets?: WriteTarget[] };
 };
 export type WorkspaceAgent = {
@@ -1777,12 +1777,18 @@ export class WorkspaceRuntime {
     const approval = request.commandApproval!;
     const allowed = decision === "approve" && this.available && !this.storageFailed &&
       this.commandCwdAllowed(run, approval.cwd);
-    approval.status = allowed ? "approved" : decision === "decline" ? "declined" : "expired";
+    // Save a consumed request before handing it off, without claiming delivery.
+    approval.status = "unconfirmed";
     const saved = this.persist();
-    if (!saved) approval.status = "expired";
     if (allowed && saved) delete run.check;
-    this.server!.reply(id, { decision: allowed && saved ? "accept" : "decline" });
-    this.publish(false);
+    try {
+      this.server!.reply(id, { decision: allowed && saved ? "accept" : "decline" });
+    } catch {
+      this.publish(false);
+      throw new Error("Orchestra could not confirm that Codex received this decision.");
+    }
+    approval.status = !saved ? "expired" : allowed ? "approved" : decision === "decline" ? "declined" : "expired";
+    this.publish();
     if (decision === "approve" && (!allowed || !saved)) {
       throw new Error("Orchestra could not approve this command. Ask the agent to request it again.");
     }
