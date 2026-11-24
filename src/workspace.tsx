@@ -451,6 +451,9 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
       onApproveImplementation={agent.directTask?.projectIds.length
         ? (requestId) => send({ type: "approveImplementation", agentId: agent.id, requestId })
         : undefined}
+      onResolveCommandApproval={agent.directTask && !agent.nativeChild
+        ? (requestId, decision) => send({ type: "resolveCommandApproval", agentId: agent.id, requestId, decision })
+        : undefined}
       projectLabel={agent.nativeChild && snapshot.projects.length > 1 ? agent.projectId : undefined}
       repositoryScope={repositories?.length ? repositories : undefined}
       taskPhase={agent.directTask?.phase}

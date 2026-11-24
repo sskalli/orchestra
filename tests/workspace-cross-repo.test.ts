@@ -256,6 +256,131 @@ test("implementation approval is tied to a pending request in its own conversati
   assert.equal(lastTurn(), implementation);
 });
 
+test("command approvals are one-time decisions bound to the active implementation turn and checkout", async (t) => {
+  const fixture = crossRepoFixture(t);
+  if (!fixture) return;
+  const { runtime, internal, projects, requests, call, complete } = fixture;
+  const [api, other] = projects;
+  const agentId = String(await runtime.command({ type: "createTask", name: "Verify API", projectIds: ["api"] }));
+  const unrelatedId = String(await runtime.command({ type: "createTask", name: "Read the API", projectIds: ["api"] }));
+  const task = internal.sessions.get(agentId);
+  const replies = new Map<string, unknown[]>();
+  const originalReply = internal.server.reply;
+  internal.server.reply = (id: string, result: unknown) => {
+    replies.set(id, [...(replies.get(id) ?? []), result]);
+    originalReply(id, result);
+  };
+  const requestCommand = (id: string, cwd: string, details: Record<string, unknown> = {}) =>
+    internal.onRequest({ id, method: "item/commandExecution/requestApproval", params: {
+      threadId: task.threadId, turnId: task.run.turn.id, itemId: id,
+      command: "npm test", cwd, reason: "Run the API verification.", ...details,
+    } });
+  const getApprovals = () => runtime.snapshot().agents.find(({ id }) => id === agentId)!.messages.filter(({ commandApproval }) => commandApproval);
+  const resolve = (requestId: string, decision: "approve" | "decline", requester = agentId) =>
+    runtime.command({ type: "resolveCommandApproval", agentId: requester, requestId, decision });
+  const declined = [{ decision: "decline" }];
+
+  await runtime.command({ type: "send", agentId, text: "Plan the API update." });
+  assert.equal(requests.findLast(({ method }) => method === "turn/start")?.params.approvalPolicy, "never");
+  await requestCommand("read-only-command", api.path);
+  assert.deepEqual(replies.get("read-only-command"), declined);
+  assert.equal(getApprovals().length, 0);
+  const implementation = await call(task, "request_implementation", {
+    summary: "Update and verify the API.",
+    targets: [{ projectId: "api", mode: "checkout" }],
+  });
+  assert.equal(implementation.success, true, implementation.text);
+  const planningTurn = task.run.turn.id;
+  complete(task);
+  await runtime.command({ type: "approveImplementation", agentId, requestId: JSON.parse(implementation.text).requestId });
+  assert.equal(requests.findLast(({ method }) => method === "turn/start")?.params.approvalPolicy, "on-request");
+
+  await requestCommand("wrong-turn", api.path, { turnId: planningTurn });
+  await requestCommand("wrong-project", other.path);
+  const alias = join(api.path, "outside");
+  symlinkSync(other.path, alias, "dir");
+  await requestCommand("outside-through-symlink", alias);
+  await requestCommand("stdin-approval", api.path, { kind: "writeStdin" });
+  await requestCommand("additional-permissions", api.path, { additionalPermissions: { fileSystem: {}, network: null } });
+  await requestCommand("network-approval", api.path, { networkApprovalContext: {} });
+  await requestCommand("session-only", api.path, { availableDecisions: ["acceptForSession", "decline"] });
+  await requestCommand("cancel-only-denial", api.path, { availableDecisions: ["accept", "cancel"] });
+  assert.deepEqual(replies.get("cancel-only-denial"), [{ decision: "cancel" }]);
+  await internal.onRequest({ id: "file-approval", method: "item/fileChange/requestApproval", params: {
+    threadId: task.threadId, turnId: task.run.turn.id, itemId: "file-edit",
+  } });
+  for (const id of ["wrong-turn", "wrong-project", "outside-through-symlink", "stdin-approval",
+    "additional-permissions", "network-approval", "session-only", "file-approval"]) {
+    assert.deepEqual(replies.get(id), declined);
+  }
+  assert.equal(getApprovals().length, 0);
+
+  await requestCommand("approve-this-command", api.path);
+  await requestCommand("approve-this-command", api.path);
+  assert.equal(getApprovals().length, 1);
+  const approved = getApprovals().at(-1)!;
+  assert(approved);
+  assert.equal(approved.commandApproval?.status, "pending");
+  assert.equal(approved.commandApproval?.command, "npm test");
+  assert.equal(approved.commandApproval?.cwd, api.path);
+  assert.equal(replies.has("approve-this-command"), false);
+  await assert.rejects(resolve("not-a-request", "approve"));
+  await assert.rejects(resolve(approved.id, "approve", unrelatedId));
+  assert.equal(replies.has("approve-this-command"), false);
+  task.run.check = { outcome: "passed" };
+  await resolve(approved.id, "approve");
+  assert.equal(task.run.check, undefined);
+  assert.deepEqual(replies.get("approve-this-command"), [{ decision: "accept" }]);
+  await assert.rejects(resolve(approved.id, "approve"));
+  assert.deepEqual(replies.get("approve-this-command"), [{ decision: "accept" }]);
+
+  await requestCommand("decline-this-command", api.path);
+  await resolve(getApprovals().at(-1)!.id, "decline");
+  assert.deepEqual(replies.get("decline-this-command"), declined);
+
+  await requestCommand("failed-decision-handoff", api.path);
+  const unconfirmed = getApprovals().at(-1)!;
+  const replying = internal.server.reply;
+  let handoffAttempts = 0;
+  internal.server.reply = (id: string, result: unknown) => {
+    if (id !== "failed-decision-handoff") return replying(id, result);
+    handoffAttempts++;
+    throw new Error("App Server connection closed");
+  };
+  await assert.rejects(resolve(unconfirmed.id, "approve"), /could not confirm/);
+  assert.equal(getApprovals().at(-1)?.commandApproval?.status, "unconfirmed");
+  await assert.rejects(resolve(unconfirmed.id, "approve"), /no longer pending/);
+  assert.equal(handoffAttempts, 1);
+  internal.server.reply = replying;
+
+  await requestCommand("withdrawn-by-provider", api.path);
+  const withdrawn = getApprovals().at(-1)!;
+  internal.onEvent({ method: "serverRequest/resolved", params: { threadId: task.threadId, requestId: "withdrawn-by-provider" } });
+  assert.equal(getApprovals().at(-1)?.commandApproval?.status, "expired");
+  await assert.rejects(resolve(withdrawn.id, "approve"));
+  assert.equal(replies.has("withdrawn-by-provider"), false);
+
+  await requestCommand("awaiting-at-turn-end", api.path);
+  const pending = getApprovals().at(-1)!;
+  assert.equal(pending.commandApproval?.status, "pending");
+  const originalCall = internal.server.call;
+  let acknowledgeStop!: () => void;
+  internal.server.call = (method: string, params: unknown) => method === "turn/interrupt"
+    ? new Promise<void>((resolve) => { acknowledgeStop = resolve; })
+    : originalCall(method, params);
+  const stopping = runtime.command({ type: "cancel", agentId });
+  await assert.rejects(resolve(pending.id, "approve"), /stopping/);
+  assert.equal(replies.has("awaiting-at-turn-end"), false);
+  await requestCommand("arrived-during-stop", api.path);
+  assert.deepEqual(replies.get("arrived-during-stop"), declined);
+  acknowledgeStop();
+  await stopping;
+  complete(task);
+  assert.equal(getApprovals().at(-1)?.commandApproval?.status, "expired");
+  await assert.rejects(resolve(pending.id, "approve"));
+  assert.equal(replies.has("awaiting-at-turn-end"), false);
+});
+
 test("mixed write approval uses the exact configured checkout and named linked worktree", async (t) => {
   const fixture = crossRepoFixture(t);
   if (!fixture) return;

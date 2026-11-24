@@ -53,6 +53,10 @@ async function readCommand(request: IncomingMessage) {
       typeof command.text === "string" && command.text.trim()) {
     return { type: "answerProductQuestion" as const, agentId: command.agentId, questionId: command.questionId, text: command.text };
   }
+  if (command.type === "resolveCommandApproval" && typeof command.requestId === "string" && command.requestId &&
+      (command.decision === "approve" || command.decision === "decline")) {
+    return { type: "resolveCommandApproval" as const, agentId: command.agentId, requestId: command.requestId, decision: command.decision as "approve" | "decline" };
+  }
   if (command.type === "approveImplementation" && typeof command.requestId === "string" && command.requestId) {
     return { type: "approveImplementation" as const, agentId: command.agentId, requestId: command.requestId };
   }

@@ -31,6 +31,7 @@ export type WorkspaceMessage = {
   state?: "queued" | "streaming" | "failed" | "cancelled";
   productQuestion?: { status: "pending" } | { status: "answered"; answerMessageId: string };
   answersProductQuestionId?: string;
+  commandApproval?: { status: "pending" | "approved" | "declined" | "expired" | "unconfirmed"; command: string; cwd: string; reason?: string };
   implementationRequest?: { status: "pending" | "approved" | "superseded"; targets?: WriteTarget[] };
 };
 export type WorkspaceAgent = {
@@ -73,6 +74,7 @@ export type AgentSignal = { id: string; senderId: string; recipientId: string };
 export type WorkspaceCommand =
   | { type: "createTask"; name: string; projectIds: string[] }
   | { type: "answerProductQuestion"; agentId: string; questionId: string; text: string }
+  | { type: "resolveCommandApproval"; agentId: string; requestId: string; decision: "approve" | "decline" }
   | { type: "approveImplementation"; agentId: string; requestId: string }
   | { type: "send" | "steer"; agentId: string; text: string }
   | { type: "resumeQueue" | "cancel" | "restore" | "delete"; agentId: string }
@@ -94,6 +96,8 @@ type Run = {
   turn?: Turn;
   message: WorkspaceMessage;
   check?: CheckResult;
+  commandApprovals?: Map<Id, WorkspaceMessage>;
+  interrupting?: boolean;
   demoTimer?: ReturnType<typeof setTimeout>;
 };
 type AgentSession = {
@@ -363,6 +367,7 @@ export class WorkspaceRuntime {
   }
 
   async close() {
+    for (const session of this.sessions.values()) this.expireCommandApprovals(session.run);
     this.persist();
     this.closed = true;
     for (const session of this.sessions.values()) clearTimeout(session.run?.demoTimer);
@@ -391,6 +396,10 @@ export class WorkspaceRuntime {
       return;
     }
     if (!this.isActive(session)) throw new Error("Restore this archived conversation before messaging it.");
+    if (command.type === "resolveCommandApproval") {
+      this.resolveCommandApproval(session, command.requestId, command.decision);
+      return;
+    }
     if (command.type === "approveImplementation") {
       const request = session.agent.messages.find(({ id }) => id === command.requestId);
       if (request?.implementationRequest?.status !== "pending") {
@@ -1025,6 +1034,7 @@ export class WorkspaceRuntime {
       }
       session.queue = agent.messages.filter((entry) => entry.state === "queued");
       for (const entry of agent.messages) {
+        if (entry.commandApproval?.status === "pending") entry.commandApproval.status = "expired";
         if (entry.state === "streaming" || entry.id === run?.messageId) entry.state = "failed";
       }
       session.agent.queueDepth = session.queue.length;
@@ -1295,7 +1305,7 @@ export class WorkspaceRuntime {
       (roots.some(({ mode }) => mode === "checkout")
         ? " Configured checkouts may contain existing user changes. Preserve them and stay on the checked-out branch."
         : "") +
-      " Keep implementation edits in this session. Wait for any subagents to finish, then run the agreed verification and call submit_check_result before ending the turn.";
+      " Keep implementation edits in this session. If a verification command is blocked by the sandbox, request one-time command escalation through the shell tool, using the approved checkout as its working directory and explaining why it is needed. Run it from this task rather than a subagent. Wait for any subagents to finish, then run the agreed verification and call submit_check_result with the actual results before ending the turn.";
   }
 
   private async begin(session: AgentSession, next: WorkspaceMessage,
@@ -1338,7 +1348,7 @@ export class WorkspaceRuntime {
     try {
       const { turn } = await this.server!.call<{ turn: Turn }>("turn/start", {
         threadId: session.threadId,
-        approvalPolicy: "never",
+        approvalPolicy: implementation ? "on-request" : "never",
         ...this.directTaskTurnScope(session, run.implementationRoots),
         input: input(implementation ? this.implementationInput(next.text, implementation.summary, implementation.roots) : this.answerInput(session, next)),
         additionalContext: this.pendingQuestionContext(session, next, implementation !== undefined),
@@ -1371,7 +1381,14 @@ export class WorkspaceRuntime {
       return;
     }
     if (!run.turn || !session.threadId) throw new Error("Wait for Codex to acknowledge the turn before stopping it.");
-    await this.server!.call("turn/interrupt", { threadId: session.threadId, turnId: run.turn.id });
+    if (run.interrupting) return;
+    run.interrupting = true;
+    try {
+      await this.server!.call("turn/interrupt", { threadId: session.threadId, turnId: run.turn.id });
+    } catch (error) {
+      run.interrupting = false;
+      throw error;
+    }
   }
 
   private async steer(session: AgentSession, text: string) {
@@ -1405,6 +1422,7 @@ export class WorkspaceRuntime {
 
   private finish(session: AgentSession, completed: boolean, detail?: string, cancelled = false) {
     const directTaskRun = session.run;
+    this.expireCommandApprovals(directTaskRun);
     const implementationRoots = directTaskRun?.implementationRoots;
     if (session.run && !completed) {
       this.supersedeImplementationRequest(session);
@@ -1578,6 +1596,14 @@ export class WorkspaceRuntime {
 
   private onEvent({ method, params }: Event) {
     const session = params.threadId ? this.threadSessions.get(params.threadId) : undefined;
+    if (method === "serverRequest/resolved" && session?.run && params.requestId !== undefined) {
+      const approval = session.run.commandApprovals?.get(params.requestId)?.commandApproval;
+      if (approval?.status === "pending") {
+        approval.status = "expired";
+        this.publish();
+      }
+      return;
+    }
     const startedThread = method === "thread/started" ? params.thread : undefined;
     if (startedThread?.parentThreadId) {
       const parent = this.threadSessions.get(startedThread.parentThreadId);
@@ -1695,10 +1721,93 @@ export class WorkspaceRuntime {
     return request.id;
   }
 
+  private commandCwdAllowed(run: Run, cwd: string) {
+    if (!isAbsolute(cwd)) return false;
+    try {
+      if (realpathSync(cwd) !== cwd) return false;
+      return run.implementationRoots?.some(({ path }) => {
+        if (realpathSync(path) !== path) return false;
+        const offset = relative(path, cwd);
+        return offset !== ".." && !offset.startsWith(".." + sep) && !isAbsolute(offset);
+      }) ?? false;
+    } catch {
+      return false;
+    }
+  }
+
+  private receiveCommandApproval(id: Id, session: AgentSession | undefined, params: Event["params"]) {
+    const run = session?.run;
+    if (run?.commandApprovals?.has(id)) return;
+    const { cwd, command, reason } = params;
+    const decisions = Array.isArray(params.availableDecisions) ? params.availableDecisions : undefined;
+    if (!session?.agent.directTask || !this.isActive(session) || !run?.turn ||
+        run.turn.id !== params.turnId || run.interrupting || !params.itemId || this.storageFailed || !this.available ||
+        typeof command !== "string" || !command.trim() || command.length > 24000 ||
+        /[\u0000-\u0008\u000b-\u001f\u007f\u202a-\u202e\u2066-\u2069]/.test(command) ||
+        (params.kind != null && params.kind !== "command") ||
+        params.additionalPermissions != null || params.networkApprovalContext != null ||
+        (params.availableDecisions != null &&
+          (!decisions?.includes("accept") || !decisions.includes("decline"))) ||
+        typeof cwd !== "string" || !this.commandCwdAllowed(run, cwd)) {
+      this.server!.reply(id, { decision: decisions?.includes("cancel") && !decisions.includes("decline") ? "cancel" : "decline" });
+      return;
+    }
+    const request: WorkspaceMessage = {
+      ...message("system", "Permission requested to run a command outside the sandbox.", "action"),
+      commandApproval: { status: "pending", command, cwd,
+        ...(typeof reason === "string" && reason.trim() ? { reason: reason.slice(0, 2400) } : {}) },
+    };
+    (run.commandApprovals ??= new Map()).set(id, request);
+    session.agent.messages.push(request);
+    if (!this.persist()) {
+      request.commandApproval!.status = "expired";
+      this.server!.reply(id, { decision: "decline" });
+    }
+    this.publish(false);
+  }
+
+  private resolveCommandApproval(session: AgentSession, requestId: string, decision: "approve" | "decline") {
+    const run = session.run;
+    const pending = [...(run?.commandApprovals ?? [])].find(([, request]) => request.id === requestId);
+    if (run?.interrupting) throw new Error("This turn is stopping.");
+    if (!run || !pending || pending[1].commandApproval?.status !== "pending") {
+      throw new Error("This command approval is no longer pending.");
+    }
+    const [id, request] = pending;
+    const approval = request.commandApproval!;
+    const allowed = decision === "approve" && this.available && !this.storageFailed &&
+      this.commandCwdAllowed(run, approval.cwd);
+    // Save a consumed request before handing it off, without claiming delivery.
+    approval.status = "unconfirmed";
+    const saved = this.persist();
+    if (allowed && saved) delete run.check;
+    try {
+      this.server!.reply(id, { decision: allowed && saved ? "accept" : "decline" });
+    } catch {
+      this.publish(false);
+      throw new Error("Orchestra could not confirm that Codex received this decision.");
+    }
+    approval.status = !saved ? "expired" : allowed ? "approved" : decision === "decline" ? "declined" : "expired";
+    this.publish();
+    if (decision === "approve" && (!allowed || !saved)) {
+      throw new Error("Orchestra could not approve this command. Ask the agent to request it again.");
+    }
+  }
+
+  private expireCommandApprovals(run?: Run) {
+    for (const request of run?.commandApprovals?.values() ?? []) {
+      if (request.commandApproval?.status === "pending") request.commandApproval.status = "expired";
+    }
+  }
+
   private async onRequest({ id, method, params }: Event & { id: Id }) {
     const session = params.threadId ? this.threadSessions.get(params.threadId) : undefined;
     const run = session?.run;
-    if (method === "item/commandExecution/requestApproval" || method === "item/fileChange/requestApproval") {
+    if (method === "item/commandExecution/requestApproval") {
+      this.receiveCommandApproval(id, session, params);
+      return;
+    }
+    if (method === "item/fileChange/requestApproval") {
       this.server!.reply(id, { decision: "decline" });
       if (session && this.isActive(session)) {
         session.agent.messages.push(message("system", "Orchestra declined a permission request outside the task's write scope.", "warning"));
