@@ -44,16 +44,6 @@ export function WorkspaceInbox({ events, toggle, onOpen, onClose, onClear, canCl
     if (Number.isFinite(leftSequence) && Number.isFinite(rightSequence)) return leftSequence - rightSequence;
     return 0;
   });
-  const visibleEvents = orderedEvents.reduce<InboxEvent[]>((list, event) => {
-    const previous = list.at(-1);
-    if (event.tone === "working" && previous?.tone === "working" && previous.agentId === event.agentId) {
-      list[list.length - 1] = event;
-      return list;
-    }
-    list.push(event);
-    return list;
-  }, []);
-
   function scrollToLatest() {
     if (!feed.current) return;
     followLatest.current = true;
@@ -137,11 +127,11 @@ export function WorkspaceInbox({ events, toggle, onOpen, onClose, onClear, canCl
       <div className="chat-transcript-wrap">
         <div className="workspace-inbox-feed" ref={feed} tabIndex={-1} onScroll={syncScroll}>
           <div ref={content}>
-            {visibleEvents.length === 0 ? <p className="workspace-inbox-empty" role="status">
+            {orderedEvents.length === 0 ? <p className="workspace-inbox-empty" role="status">
               {statusFilter ? "No tasks with this status." : "No activity in the Inbox."}
             </p> : (
               <ul className="workspace-inbox-events" aria-label="Task activity">
-                {visibleEvents.map(({ id, agentName, status, tone, text, agentId, messageId }) => (
+                {orderedEvents.map(({ id, agentName, status, tone, text, agentId, messageId }) => (
                   <li key={id} className="workspace-inbox-event">
                     <details className="workspace-inbox-details">
                       <summary>
