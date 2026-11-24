@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { test, type TestContext } from "node:test";
@@ -250,6 +250,251 @@ test("implementation approval is tied to a pending request in its own conversati
 
   await assert.rejects(runtime.command({ type: "approveImplementation", agentId, requestId }));
   assert.equal(lastTurn(), implementation);
+});
+
+test("mixed write approval uses the exact configured checkout and named linked worktree", async (t) => {
+  const fixture = crossRepoFixture(t);
+  if (!fixture) return;
+  const { root, runtime, internal, projects, baseline, requests, call, complete } = fixture;
+  const [api, ui, other] = projects;
+  const agentId = String(await runtime.command({ type: "createTask", name: "Mixed delivery", projectIds: ["api", "ui"] }));
+  const task = internal.sessions.get(agentId);
+  const lastTurn = () => requests.findLast(({ method }) => method === "turn/start")?.params;
+  const getTask = () => runtime.snapshot().agents.find(({ id }) => id === agentId)!;
+  const worktree = join(root, "named-ui");
+  const branch = "feature/approved-ui";
+  const targets = [
+    { projectId: "api", mode: "checkout" },
+    { projectId: "ui", mode: "worktree", path: worktree, branch },
+  ];
+  const initial = projects.map(({ path }) => git(path, "worktree", "list", "--porcelain"));
+
+  await runtime.command({ type: "send", agentId, text: "Use the existing API checkout and a named linked worktree for UI." });
+  assert.equal(lastTurn().sandboxPolicy.type, "readOnly");
+  const request = await call(task, "request_implementation", { summary: "Update both exports.", targets });
+  assert.equal(request.success, true, request.text);
+  const { requestId } = JSON.parse(request.text);
+  const getRequest = () => getTask().messages.find(({ id }) => id === requestId)?.implementationRequest;
+  assert.deepEqual(getRequest()?.targets, targets);
+  assert.deepEqual(projects.map(({ path }) => git(path, "worktree", "list", "--porcelain")), initial);
+  assert(!existsSync(worktree));
+  complete(task);
+
+  await runtime.command({ type: "approveImplementation", agentId, requestId });
+  const implementation = lastTurn();
+  assert.equal(implementation.threadId, task.threadId);
+  assert.equal(implementation.sandboxPolicy.type, "workspaceWrite");
+  assert.deepEqual(implementation.sandboxPolicy.writableRoots, [api.path, worktree]);
+  assert.equal(implementation.sandboxPolicy.excludeTmpdirEnvVar, true);
+  assert.equal(implementation.sandboxPolicy.excludeSlashTmp, true);
+  assert([api.path, worktree].includes(implementation.cwd));
+  assert(implementation.input[0].text.includes(worktree));
+  assert.equal(git(worktree, "branch", "--show-current"), branch);
+  assert.equal(git(worktree, "rev-parse", "HEAD"), baseline[1]);
+  assert.match(readFileSync(join(worktree, ".git"), "utf8"), /^gitdir: /);
+  assert.equal(git(api.path, "worktree", "list", "--porcelain"), initial[0]);
+  assert.equal(git(other.path, "worktree", "list", "--porcelain"), initial[2]);
+  assert.equal(getRequest()?.status, "approved");
+
+  writeFileSync(join(api.path, "index.mjs"), "export default 'updated API';\n");
+  writeFileSync(join(worktree, "index.mjs"), "export default 'updated UI';\n");
+  const verification = await call(task, "submit_check_result", { outcome: "passed", summary: "Both exports verified." });
+  assert.equal(verification.success, true, verification.text);
+  complete(task);
+
+  const pinned = getTask().integration?.members ?? [];
+  assert.deepEqual(pinned.map(({ projectId }) => projectId), ["ui"]);
+  assert.equal(git(api.path, "worktree", "list", "--porcelain"), initial[0]);
+  assert.equal(git(api.path, "rev-parse", "HEAD"), baseline[0]);
+  assert.equal(git(api.path, "status", "--short"), "M index.mjs");
+  assert.equal(git(ui.path, "status", "--short"), "");
+  assert.equal(git(other.path, "status", "--short"), "");
+  assert.equal(git(worktree, "branch", "--show-current"), branch);
+
+  await runtime.command({ type: "send", agentId, text: "Explain the result without editing." });
+  assert.equal(lastTurn().sandboxPolicy.type, "readOnly");
+  complete(task);
+});
+
+test("write requests reject unsafe paths and repositories outside the selected scope", async (t) => {
+  const fixture = crossRepoFixture(t);
+  if (!fixture) return;
+  const { root, runtime, internal, projects, requests, call, complete } = fixture;
+  const [api, ui] = projects;
+  const agentId = String(await runtime.command({ type: "createTask", name: "Invalid destinations", projectIds: ["api", "ui"] }));
+  const task = internal.sessions.get(agentId);
+  const initial = projects.map(({ path }) => git(path, "worktree", "list", "--porcelain"));
+  const alias = join(root, "ui-alias");
+  symlinkSync(ui.path, alias, "dir");
+  await runtime.command({ type: "send", agentId, text: "Investigate the exports." });
+
+  const cases = [
+    [{ projectId: "other", mode: "checkout" }],
+    [{ projectId: "api", mode: "checkout", path: ui.path }],
+    [{ projectId: "api", mode: "worktree", path: "./relative" }],
+    [{ projectId: "api", mode: "worktree", path: join(ui.path, "nested") }],
+    [{ projectId: "api", mode: "worktree", path: join(alias, "nested") }],
+    [{ projectId: "api", mode: "worktree", path: join(api.path, ".git", "nested") }],
+    [{ projectId: "api", mode: "worktree", path: join(root, "valid-path"), branch: "-unsafe" }],
+  ];
+  for (const targets of cases) {
+    const reply = await call(task, "request_implementation", { summary: "Edit the export.", targets });
+    assert.equal(reply.success, false, JSON.stringify(targets));
+  }
+  complete(task);
+  assert(!runtime.snapshot().agents.find(({ id }) => id === agentId)?.messages.some(({ implementationRequest }) => implementationRequest));
+  assert.deepEqual(projects.map(({ path }) => git(path, "worktree", "list", "--porcelain")), initial);
+  assert.equal(requests.filter(({ method }) => method === "turn/start").length, 1);
+});
+
+test("older provider threads can request a checkout-only turn without creating a delivery snapshot", async (t) => {
+  const fixture = crossRepoFixture(t);
+  if (!fixture) return;
+  const { runtime, internal, projects, requests, call, complete } = fixture;
+  const [api] = projects;
+  const agentId = String(await runtime.command({ type: "createTask", name: "Use current checkout", projectIds: ["api"] }));
+  const task = internal.sessions.get(agentId);
+  const initial = git(api.path, "worktree", "list", "--porcelain");
+  const getTask = () => runtime.snapshot().agents.find(({ id }) => id === agentId)!;
+  await runtime.command({ type: "send", agentId, text: "Use the current checkout to update the export." });
+  task.toolVersion = 15;
+  const targets = [{ projectId: "api", mode: "checkout" }];
+  const request = await call(task, "raise_product_decision", {
+    question: "Request implementation targets: " + JSON.stringify({ summary: "Update the export.", targets }),
+  });
+  assert.equal(request.success, true, request.text);
+  const { requestId } = JSON.parse(request.text);
+  assert.deepEqual(getTask().messages.find(({ id }) => id === requestId)?.implementationRequest?.targets, targets);
+  complete(task);
+
+  await runtime.command({ type: "approveImplementation", agentId, requestId });
+  const implementation = requests.findLast(({ method }) => method === "turn/start")?.params;
+  assert.deepEqual(implementation.sandboxPolicy.writableRoots, [api.path]);
+  assert.equal(implementation.cwd, api.path);
+  writeFileSync(join(api.path, "index.mjs"), "export default 'updated';\n");
+  const verification = await call(task, "submit_check_result", { outcome: "passed", summary: "Export verified." });
+  assert.equal(verification.success, true, verification.text);
+  complete(task);
+
+  assert.equal(getTask().status, "done");
+  assert.equal(getTask().directTask?.phase, "planning");
+  assert.equal(getTask().integration, undefined);
+  assert.equal(git(api.path, "worktree", "list", "--porcelain"), initial);
+  assert.equal(git(api.path, "status", "--short"), "M index.mjs");
+});
+
+test("a recovered active writer reserves its checkout until Codex confirms completion", async (t) => {
+  const fixture = crossRepoFixture(t);
+  if (!fixture) return;
+  const { root, runtime, internal, projects, call, complete } = fixture;
+  const [api] = projects;
+  const store = workspaceStore(root, join(root, "state"));
+  internal.store = store;
+  internal.storageReady = true;
+  const [writerId, waitingId] = await Promise.all(["First edit", "Second edit"].map(async (name) =>
+    String(await runtime.command({ type: "createTask", name, projectIds: ["api"] }))));
+  const prepare = async (agentId: string) => {
+    const session = internal.sessions.get(agentId);
+    await runtime.command({ type: "send", agentId, text: "Update the API in its configured checkout." });
+    const result = await call(session, "request_implementation", {
+      summary: "Update API export.",
+      targets: [{ projectId: "api", mode: "checkout" }],
+    });
+    assert.equal(result.success, true, result.text);
+    complete(session);
+    return String(JSON.parse(result.text).requestId);
+  };
+  const firstRequest = await prepare(writerId);
+  const secondRequest = await prepare(waitingId);
+  await runtime.command({ type: "approveImplementation", agentId: writerId, requestId: firstRequest });
+
+  const saved = store.load()!;
+  const writer = saved.find(({ agent }) => agent.id === writerId)!;
+  const waiting = saved.find(({ agent }) => agent.id === waitingId)!;
+  assert(writer.run?.turnId);
+  assert.equal(waiting.run, undefined);
+
+  const reopened = new WorkspaceRuntime({ cwd: api.path, projects, store });
+  t.after(() => reopened.close());
+  const recovered = reopened as any;
+  recovered.restore(saved);
+  let writerStillActive = true;
+  const newTurns: any[] = [];
+  recovered.server = {
+    call: async (method: string, params: any) => {
+      if (method === "thread/resume") {
+        const isWriter = params.threadId === writer.threadId;
+        const active = isWriter && writerStillActive;
+        return {
+          modelProvider: "openai",
+          thread: { id: params.threadId, status: { type: active ? "active" : "idle" } },
+          initialTurnsPage: { data: isWriter ? [{ id: writer.run!.turnId, status: active ? "inProgress" : "completed" }] : [] },
+        };
+      }
+      assert.equal(method, "turn/start");
+      newTurns.push(params);
+      return { turn: { id: "new-implementation-turn", status: "inProgress" } };
+    },
+    close: async () => {},
+  };
+  await recovered.resumeThread(writer);
+  await recovered.resumeThread(waiting);
+  recovered.setProvider("ready");
+  assert.match(reopened.snapshot().agents.find(({ id }) => id === writerId)!.unavailableReason!, /active turn/i);
+
+  const approval = { type: "approveImplementation", agentId: waitingId, requestId: secondRequest } as const;
+  await assert.rejects(reopened.command(approval), /another task.*writing/i);
+  assert.equal(newTurns.length, 0);
+  assert.equal(reopened.snapshot().agents.find(({ id }) => id === waitingId)?.messages
+    .find(({ id }) => id === secondRequest)?.implementationRequest?.status, "pending");
+
+  writerStillActive = false;
+  await recovered.resumeThread(writer);
+  await reopened.command(approval);
+  assert.equal(newTurns.length, 1);
+  assert.equal(newTurns[0].threadId, waiting.threadId);
+  assert.deepEqual(newTurns[0].sandboxPolicy.writableRoots, [api.path]);
+});
+
+test("restart supersedes a checkout request from a planning turn Codex interrupted", async (t) => {
+  const fixture = crossRepoFixture(t);
+  if (!fixture) return;
+  const { root, runtime, internal, projects, call } = fixture;
+  const [api] = projects;
+  const store = workspaceStore(root, join(root, "state"));
+  internal.store = store;
+  internal.storageReady = true;
+  const agentId = String(await runtime.command({ type: "createTask", name: "Plan checkout edit", projectIds: ["api"] }));
+  await runtime.command({ type: "send", agentId, text: "Investigate a change to the API checkout." });
+  const result = await call(internal.sessions.get(agentId), "request_implementation", {
+    summary: "Edit the API export.",
+    targets: [{ projectId: "api", mode: "checkout" }],
+  });
+  assert.equal(result.success, true, result.text);
+  const { requestId } = JSON.parse(result.text);
+  const saved = store.load()!;
+  assert(saved[0].run?.turnId);
+
+  const reopened = new WorkspaceRuntime({ cwd: api.path, projects, store });
+  t.after(() => reopened.close());
+  const recovered = reopened as any;
+  recovered.restore(saved);
+  recovered.server = {
+    call: async (method: string) => {
+      assert.equal(method, "thread/resume");
+      return {
+        modelProvider: "openai",
+        thread: { id: saved[0].threadId, status: { type: "idle" } },
+        initialTurnsPage: { data: [{ id: saved[0].run!.turnId, status: "interrupted" }] },
+      };
+    },
+    close: async () => {},
+  };
+  await recovered.resumeThread(saved[0]);
+  recovered.setProvider("ready");
+  const request = reopened.snapshot().agents.find(({ id }) => id === agentId)?.messages.find(({ id }) => id === requestId);
+  assert.equal(request?.implementationRequest?.status, "superseded");
+  await assert.rejects(reopened.command({ type: "approveImplementation", agentId, requestId }), /no longer pending/i);
 });
 
 test("an imperative answer resolves a product question in a read-only turn before implementation", async (t) => {

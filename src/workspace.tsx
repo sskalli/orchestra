@@ -420,7 +420,10 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
   }
 
   function renderChat(agent: Agent) {
-    const repositories = agent.directTask?.projectIds;
+    const repositories = agent.directTask?.projectIds.map((id) => ({
+      id,
+      path: snapshot.projects.find((project) => project.id === id)?.path,
+    }));
 
     async function submit(type: "send" | "steer", value: string) {
       const revision = draftRevisions.current[agent.id] ?? 0;

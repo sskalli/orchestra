@@ -12,6 +12,6 @@ Top-level tasks have large nodes. Native children appear on successive rings as 
 
 A session can handle a general conversation, a read-only investigation, or work across one or more repositories. Keep planning, user decisions, delivery, and follow-up in the same task chat. The session can delegate through Codex and report results from its children. Child chats are available for inspection.
 
-Explicit implementation approval lets a task edit isolated copies of the selected repositories. Record verification against the exact candidate and show pinned revisions for review. Require the user to merge into project branches separately.
+Explicit implementation approval lets a task edit the selected repositories in isolated worktrees by default. The user can approve a configured checkout or a requested linked worktree for a specific repository. Show which scope the approval grants. Record verification against the exact edited contents and show pinned revisions for isolated changes that still need integration.
 
 Persist open questions and task history. Make provider failures and interrupted work visible and allow the user to recover without losing the plan or transcript.
