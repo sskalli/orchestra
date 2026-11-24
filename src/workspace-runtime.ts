@@ -1,3 +1,5 @@
+import { acquirePathReservations, checkoutReservationDirectory, reservationOwnerAlive,
+  releasePathReservations, type CheckoutReservation } from "./workspace-reservations.ts";
 import { demoTasks } from "./workspace-demo.ts";
 import { WorkspaceUsage } from "./workspace-usage.ts";
 import { randomUUID } from "node:crypto";
@@ -101,6 +103,7 @@ type AgentSession = {
   toolVersion?: number;
   run?: Run;
   recovery?: SavedSession["run"];
+  checkoutReservation?: CheckoutReservation;
   opening?: boolean;
   queue: WorkspaceMessage[];
   stream: Map<string, WorkspaceMessage>;
@@ -191,6 +194,7 @@ export class WorkspaceRuntime {
   private readonly projects: WorkspaceProject[];
   private readonly store?: ReturnType<typeof workspaceStore>;
   private storageFailed = false;
+  private releaseWorkspaceState?: () => void;
   private storageReady = false;
   private readonly sessions = new Map<string, AgentSession>();
   private readonly threadSessions = new Map<string, AgentSession>();
@@ -283,10 +287,13 @@ export class WorkspaceRuntime {
     if (this.demo) return;
     let saved: SavedSession[] | undefined;
     try {
+      this.releaseWorkspaceState = this.store?.reserveProcess?.();
       saved = this.store?.load();
       if (saved) this.restore(saved);
       this.storageReady = true;
     } catch (error) {
+      this.releaseWorkspaceState?.();
+      delete this.releaseWorkspaceState;
       this.storageFailed = true;
       this.setProvider("error", errorText(error));
       this.publish();
@@ -345,7 +352,10 @@ export class WorkspaceRuntime {
           }
         }
       }
-      if (!this.storageFailed && !this.closed) this.setProvider("ready");
+      if (!this.storageFailed && !this.closed) {
+        this.setProvider("ready");
+        this.releaseSettledCheckouts();
+      }
     } catch (error) {
       this.setProvider("error", errorText(error));
     }
@@ -358,7 +368,12 @@ export class WorkspaceRuntime {
     for (const session of this.sessions.values()) clearTimeout(session.run?.demoTimer);
     this.listeners.clear();
     this.signalListeners.clear();
-    await this.server?.close();
+    try {
+      await this.server?.close();
+    } finally {
+      this.releaseWorkspaceState?.();
+      delete this.releaseWorkspaceState;
+    }
   }
 
   async command(command: WorkspaceCommand) {
@@ -510,6 +525,10 @@ export class WorkspaceRuntime {
     if (session.agent.messages.some((entry) => entry.productQuestion?.status === "pending")) {
       throw new Error("Answer the pending product questions before approving implementation.");
     }
+    this.releaseSettledCheckouts(session);
+    if (session.checkoutReservation) {
+      throw new Error("The previous checkout reservation could not be released. Recover its workspace before approving another edit.");
+    }
     const agent = session.agent;
     const approval = request.implementationRequest;
     if (approval?.status !== "pending") throw new Error("This implementation request is no longer pending.");
@@ -517,6 +536,8 @@ export class WorkspaceRuntime {
     if (JSON.stringify(targets) !== JSON.stringify(approval.targets ?? [])) {
       throw new Error("An approved destination changed. Request approval for the new location.");
     }
+    const checkoutDirectories = [...new Set(targets.filter(({ mode }) => mode === "checkout")
+      .map(({ projectId }) => checkoutReservationDirectory(this.projectById(projectId).path)))].sort();
     const { roots, created } = this.prepareImplementationRoots(session, targets);
     if (this.hasOverlappingImplementation(session, roots)) {
       this.removePreparedWorktrees(created);
@@ -530,6 +551,8 @@ export class WorkspaceRuntime {
     const previousStatus = agent.status;
     const previousIntegration = agent.integration;
     const assignment = message("user", "I approve the requested implementation.");
+    const reservation = checkoutDirectories.length
+      ? { id: assignment.id, pid: process.pid, directories: checkoutDirectories } : undefined;
     const automatic = roots.every(({ mode }) => mode === "automatic");
     if (automatic && !agent.candidate) {
       const [candidate] = roots;
@@ -543,7 +566,7 @@ export class WorkspaceRuntime {
     delete task.detail;
     delete agent.integration;
     agent.messages.push(assignment);
-    await this.begin(session, assignment, { roots, summary: request.text }, () => {
+    await this.begin(session, assignment, { roots, summary: request.text, reservation }, () => {
       agent.scopedWorktrees = previousWorktrees;
       agent.candidate = previousCandidate;
       agent.directCandidates = previousDirectCandidates;
@@ -618,6 +641,16 @@ export class WorkspaceRuntime {
     return [...this.sessions.values()].some((other) => other !== session && this.activeWritePaths(other).some(
       (path) => roots.some((root) => contains(root.path, path) || contains(path, root.path)),
     ));
+  }
+
+  private releaseSettledCheckouts(session?: AgentSession) {
+    for (const owner of session ? [session] : this.sessions.values()) {
+      const reservation = owner.checkoutReservation;
+      if (!reservation || owner.run || owner.recovery || owner.agent.unavailableReason ||
+          this.hasRunningNativeChildren(owner)) continue;
+      if (reservation.pid !== process.pid && reservationOwnerAlive(reservation)) continue;
+      if (releasePathReservations(reservation)) delete owner.checkoutReservation;
+    }
   }
 
   private activeWritePaths(session: AgentSession) {
@@ -870,9 +903,10 @@ export class WorkspaceRuntime {
   private persist() {
     if (!this.store || !this.storageReady || this.storageFailed) return !this.storageFailed;
     try {
-      this.store.save([...this.sessions.values()].map(({ agent, threadId, freshThread, run, recovery, toolVersion }) => ({
+      this.store.save([...this.sessions.values()].map(({ agent, threadId, freshThread, run, recovery, toolVersion, checkoutReservation }) => ({
         toolVersion,
         agent,
+        checkoutReservation,
         threadId: agent.nativeChild || agent.archivedAt || run || recovery || (!freshThread && hasSubmittedMessage(agent)) ? threadId : undefined,
         run: run ? { messageId: run.message.id, turnId: run.turn?.id } : recovery,
       })));
@@ -972,7 +1006,7 @@ export class WorkspaceRuntime {
         agent.projectId = parent.projectId;
       }
     }
-    for (const { agent, threadId, run, toolVersion } of saved) {
+    for (const { agent, threadId, run, toolVersion, checkoutReservation } of saved) {
       const session = this.createAgent(agent.id, agent.name, "worker", agent.parentId, agent.goal);
       Object.assign(session.agent, agent, {
         projectId: agent.projectId, canSteer: false, canCancel: false, lifecycleBusy: undefined,
@@ -980,6 +1014,15 @@ export class WorkspaceRuntime {
       session.threadId = agent.nativeChild || agent.archivedAt || run || hasSubmittedMessage(agent) ? threadId : undefined;
       session.toolVersion = toolVersion;
       session.recovery = run;
+      if (checkoutReservation) {
+        const { id, pid, directories } = checkoutReservation;
+        if (!agent.directTask || !/^[a-f0-9-]{36}$/i.test(id) || !Number.isSafeInteger(pid) || pid < 1 ||
+            !Array.isArray(directories) || directories.some((path) =>
+              typeof path !== "string" || !isAbsolute(path) || basename(path) !== "orchestra-checkout-write")) {
+          throw new Error("The saved checkout reservation is invalid.");
+        }
+        session.checkoutReservation = checkoutReservation;
+      }
       session.queue = agent.messages.filter((entry) => entry.state === "queued");
       for (const entry of agent.messages) {
         if (entry.state === "streaming" || entry.id === run?.messageId) entry.state = "failed";
@@ -1026,11 +1069,15 @@ export class WorkspaceRuntime {
       if (thread.id !== threadId || modelProvider !== this.providerId || this.threadSessions.has(thread.id)) {
         throw new Error("Codex returned an unexpected saved thread.");
       }
-      const turn = run?.turnId && (initialTurnsPage?.data ?? thread.turns)?.find((entry) => entry.id === run.turnId);
-      if (thread.status?.type === "active" || turn && turn.status === "inProgress") {
+      const turns = initialTurnsPage?.data ?? thread.turns;
+      const turn = run?.turnId && turns?.find((entry) => entry.id === run.turnId);
+      const unacknowledged = run && !run.turnId;
+      if (thread.status?.type === "active" || turn && turn.status === "inProgress" ||
+          unacknowledged && turns?.some(({ status }) => status === "inProgress")) {
         throw new Error("Codex still reports an active turn. Check again after restarting the workspace.");
       }
-      if (run && (!turn || !["completed", "failed", "interrupted"].includes(turn.status))) {
+      const idleWithoutTurnId = unacknowledged && thread.status?.type === "idle";
+      if (run && !idleWithoutTurnId && (!turn || !["completed", "failed", "interrupted"].includes(turn.status))) {
         throw new Error("Codex has not confirmed the outcome of the saved turn. Restart Orchestra to check again.");
       }
       this.recordModelSettings(session, settings, response);
@@ -1038,6 +1085,13 @@ export class WorkspaceRuntime {
       delete session.recovery;
       this.threadSessions.set(thread.id, session);
       session.toolVersion = toolVersion;
+      if (run && idleWithoutTurnId) {
+        this.supersedeImplementationRequest(session);
+        const submitted = session.agent.messages.find(({ id }) => id === run.messageId);
+        if (submitted?.answersProductQuestionId) this.reopenProductQuestion(session, submitted);
+        session.agent.messages.push(message("system",
+          "Codex reports the conversation is idle but did not confirm whether the previous message ran. Check the conversation and approved destinations before retrying.", "notice"));
+      }
       if (turn && turn.status === "completed") {
         session.agent.status = session.agent.directTask?.phase === "blocked" ? "error"
           : session.agent.directTask?.phase === "ready-for-review" ? "awaiting-confirmation" : "done";
@@ -1063,6 +1117,7 @@ export class WorkspaceRuntime {
           this.reopenProductQuestion(session, answer);
         }
       }
+      if (this.available) this.releaseSettledCheckouts(session);
     } catch (error) {
       session.agent.unavailableReason = errorText(error);
       session.agent.status = "error";
@@ -1244,18 +1299,31 @@ export class WorkspaceRuntime {
   }
 
   private async begin(session: AgentSession, next: WorkspaceMessage,
-    implementation?: { roots: ImplementationRoot[]; summary: string }, rollback?: () => void) {
+    implementation?: { roots: ImplementationRoot[]; summary: string; reservation?: CheckoutReservation }, rollback?: () => void) {
     if (!this.isActive(session)) return;
     const run: Run = { message: next, implementationRoots: implementation?.roots };
     session.run = run;
     delete next.state;
     if (rollback) {
       session.agent.status = "working";
+      session.checkoutReservation = implementation?.reservation;
       if (!this.persist()) {
         delete session.run;
+        delete session.checkoutReservation;
         rollback();
         this.publish(false);
         throw new Error("Orchestra could not save the approval. No implementation turn was started.");
+      }
+      if (session.checkoutReservation) {
+        try {
+          acquirePathReservations(session.checkoutReservation);
+        } catch (error) {
+          delete session.run;
+          delete session.checkoutReservation;
+          rollback();
+          this.publish();
+          throw error;
+        }
       }
     }
     this.update(session, !rollback);
@@ -1362,6 +1430,7 @@ export class WorkspaceRuntime {
       session.agent.status = "error";
     }
     if (detail) session.agent.messages.push(message("system", detail, completed || cancelled ? "notice" : "error"));
+    this.releaseSettledCheckouts(session);
     if (!completed || !this.drain(session)) this.update(session);
     return completed;
   }
@@ -1450,7 +1519,10 @@ export class WorkspaceRuntime {
     if (item.agentPath && child.agent.name === "Codex subagent") child.agent.name = item.agentPath;
     if (item.kind === "interrupted") child.agent.status = "idle";
     else if (item.kind === "completed" && child.agent.status !== "error") child.agent.status = "done";
-    if (completed && (item.kind === "completed" || item.kind === "interrupted")) this.signal(child.agent.id, parent.agent.id);
+    if (completed && (item.kind === "completed" || item.kind === "interrupted")) {
+      this.signal(child.agent.id, parent.agent.id);
+      this.releaseSettledCheckouts();
+    }
     this.publish();
   }
 
@@ -1476,6 +1548,7 @@ export class WorkspaceRuntime {
           else entry.state = "failed";
         }
         session.stream.clear();
+        this.releaseSettledCheckouts();
       }
       this.publish();
     }

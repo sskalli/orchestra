@@ -51,6 +51,10 @@ function crossRepoFixture(t: TestContext, sources: Record<string, string> = {
   const baseline = projects.map(({ path }) => git(path, "rev-parse", "HEAD"));
   const runtime = new WorkspaceRuntime({ cwd: projects[0].path, projects });
   t.after(() => runtime.close());
+  return { root, projects, baseline, runtime, ...providerFixture(runtime) };
+}
+
+function providerFixture(runtime: WorkspaceRuntime) {
   const internal = runtime as any;
   internal.setProvider("ready");
   let sequence = 0;
@@ -78,7 +82,7 @@ function crossRepoFixture(t: TestContext, sources: Record<string, string> = {
   const complete = (session: any) => internal.onEvent({ method: "turn/completed", params: {
     threadId: session.threadId, turn: { id: session.run.turn.id, status: "completed" },
   } });
-  return { root, projects, baseline, runtime, internal, requests, call, complete };
+  return { internal, requests, call, complete };
 }
 
 test("a direct task without repositories starts in a single read-only thread", async (t) => {
@@ -454,6 +458,55 @@ test("a recovered active writer reserves its checkout until Codex confirms compl
   assert.equal(newTurns.length, 1);
   assert.equal(newTurns[0].threadId, waiting.threadId);
   assert.deepEqual(newTurns[0].sandboxPolicy.writableRoots, [api.path]);
+});
+
+test("separate runtimes cannot write the same Git checkout concurrently", async (t) => {
+  const fixture = crossRepoFixture(t);
+  if (!fixture) return;
+  const { root, runtime, internal, projects, call, complete } = fixture;
+  const [api] = projects;
+  internal.store = workspaceStore(root, join(root, "first-state"));
+  internal.storageReady = true;
+  const alias = { ...api, id: "api-alias" };
+  const competing = new WorkspaceRuntime({
+    cwd: api.path,
+    projects: [alias],
+    store: workspaceStore(root, join(root, "second-state")),
+  });
+  t.after(() => competing.close());
+  const second = providerFixture(competing);
+  second.internal.storageReady = true;
+
+  const requestEdit = async (workspace: WorkspaceRuntime, provider: ReturnType<typeof providerFixture>, projectId: string) => {
+    const agentId = String(await workspace.command({ type: "createTask", name: "Update API", projectIds: [projectId] }));
+    const session = provider.internal.sessions.get(agentId);
+    await workspace.command({ type: "send", agentId, text: "Edit this configured checkout." });
+    const request = await provider.call(session, "request_implementation", {
+      summary: "Update the API export.",
+      targets: [{ projectId, mode: "checkout" }],
+    });
+    assert.equal(request.success, true, request.text);
+    provider.complete(session);
+    return { agentId, session, requestId: String(JSON.parse(request.text).requestId) };
+  };
+
+  const owner = await requestEdit(runtime, fixture, api.id);
+  const waiter = await requestEdit(competing, second, alias.id);
+  await runtime.command({ type: "approveImplementation", agentId: owner.agentId, requestId: owner.requestId });
+
+  const approveSecond = () => competing.command({ type: "approveImplementation", agentId: waiter.agentId, requestId: waiter.requestId });
+  await assert.rejects(approveSecond, /another task|already|reserved/i);
+  assert.equal(second.requests.filter(({ method }) => method === "turn/start").length, 1);
+  assert.equal(competing.snapshot().agents.find(({ id }) => id === waiter.agentId)?.messages
+    .find(({ id }) => id === waiter.requestId)?.implementationRequest?.status, "pending");
+
+  const verified = await call(owner.session, "submit_check_result", { outcome: "passed", summary: "Export verified." });
+  assert.equal(verified.success, true, verified.text);
+  complete(owner.session);
+  await approveSecond();
+  const secondTurn = second.requests.findLast(({ method }) => method === "turn/start")?.params;
+  assert.deepEqual(secondTurn.sandboxPolicy.writableRoots, [api.path]);
+  second.complete(waiter.session);
 });
 
 test("restart supersedes a checkout request from a planning turn Codex interrupted", async (t) => {

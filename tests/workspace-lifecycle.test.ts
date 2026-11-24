@@ -244,6 +244,41 @@ test("a resumed provider thread with an active turn remains protected even witho
   } finally { await runtime.close(); }
 });
 
+test("a saved turn without an ID can be retried after Codex explicitly reports idle", async () => {
+  const { runtime, internal, pm } = fixture();
+  const sent = { id: "sent", role: "user", text: "Consider a change.", state: "failed" };
+  const request = { id: "request", role: "system", text: "Edit the checkout.", implementationRequest: { status: "pending" } };
+  pm.agent.messages.push(sent, request);
+  pm.recovery = { messageId: sent.id };
+  internal.threadSessions.delete(pm.threadId);
+  const saved = { agent: pm.agent, threadId: pm.threadId, toolVersion: 16, run: pm.recovery };
+  let status: string | undefined;
+  internal.server = {
+    call: async (method: string) => {
+      assert.equal(method, "thread/resume");
+      return {
+        thread: { id: pm.threadId, status: status && { type: status } }, modelProvider: "openai",
+        initialTurnsPage: { data: [{ id: "unrelated", status: "completed" }] },
+      };
+    },
+    close: async () => {},
+  };
+  try {
+    await internal.resumeThread(saved);
+    assert(pm.recovery);
+    assert.match(pm.agent.unavailableReason, /not confirmed/i);
+    assert.equal(request.implementationRequest.status, "pending");
+
+    status = "idle";
+    await internal.resumeThread(saved);
+    assert.equal(pm.recovery, undefined);
+    assert.equal(pm.agent.unavailableReason, undefined);
+    assert.equal(sent.state, "failed");
+    assert.equal(request.implementationRequest.status, "superseded");
+    assert.match(pm.agent.messages.at(-1).text, /did not confirm whether the previous message ran/i);
+  } finally { await runtime.close(); }
+});
+
 for (const action of ["archive", "restore", "delete"] as const) {
   test(`${action} rolls back its visible lifecycle change if saving fails`, async () => {
     let failSave = false;
