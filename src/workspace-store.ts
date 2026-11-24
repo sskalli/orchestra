@@ -1,13 +1,16 @@
 import { createHash, randomUUID } from "node:crypto";
-import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { acquirePathReservations, reservationOwnerAlive, releasePathReservations,
+  type CheckoutReservation } from "./workspace-reservations.ts";
 import type { WorkspaceAgent } from "./workspace-runtime.ts";
 
 export type SavedSession = {
   agent: WorkspaceAgent;
   threadId?: string;
   toolVersion?: number;
+  checkoutReservation?: CheckoutReservation;
   run?: { messageId: string; turnId?: string };
 };
 
@@ -53,6 +56,31 @@ export function workspaceStore(project: string, directory?: string, modelProvide
   return {
     usagePath: path.replace(/\.json$/, ".usage.json"),
     previousUsagePath: previousPath.replace(/\.json$/, ".usage.json"),
+    reserveProcess() {
+      mkdirSync(directory, { recursive: true, mode: 0o700 });
+      const lock = path + ".lock";
+      let markers: string[];
+      try {
+        markers = readdirSync(lock);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+        markers = [];
+      }
+      if (markers.length === 1) {
+        const id = markers[0];
+        const pid = Number(/^(\d+)-[a-f0-9-]{36}$/.exec(id)?.[1]);
+        if (Number.isSafeInteger(pid) && pid > 0 && !reservationOwnerAlive({ pid })) {
+          releasePathReservations({ id, directories: [lock] });
+        }
+      }
+      const reservation = { id: process.pid + "-" + randomUUID(), directories: [lock] };
+      try {
+        acquirePathReservations(reservation);
+      } catch (error) {
+        throw new Error("Could not reserve workspace state. Check whether another server is running for this workspace.", { cause: error });
+      }
+      return () => releasePathReservations(reservation);
+    },
     load() {
       const sessions = readSessions(path, project);
       if (sessions) return sessions;

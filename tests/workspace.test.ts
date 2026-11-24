@@ -134,3 +134,23 @@ test("custom providers use separate saved workspaces from the default provider",
     rmSync(directory, { recursive: true, force: true });
   }
 });
+
+test("only one server can reserve the same saved workspace", () => {
+  const directory = mkdtempSync(join(tmpdir(), "orchestra-state-reservation-"));
+  try {
+    const first = workspaceStore("/project", directory);
+    const second = workspaceStore("/project", directory);
+    const other = workspaceStore("/another-project", directory);
+    const releaseFirst = first.reserveProcess();
+    assert.throws(() => second.reserveProcess(), /another server is running/);
+    const releaseOther = other.reserveProcess();
+    releaseOther();
+    releaseFirst();
+    const releaseSecond = second.reserveProcess();
+    releaseFirst();
+    assert.throws(() => first.reserveProcess(), /another server is running/);
+    releaseSecond();
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});

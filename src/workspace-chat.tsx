@@ -11,11 +11,12 @@ import type { SystemMessageKind, WorkspaceAgent, WorkspaceMessage } from "./work
 import "./workspace-chat.css";
 
 type ChatAgent = WorkspaceAgent;
+type RepositoryScope = { id: string; path?: string };
 
 type ChatProps = {
   agent: ChatAgent;
   projectLabel?: string;
-  repositoryScope?: string[];
+  repositoryScope?: RepositoryScope[];
   delivery?: { members: { projectId: string; path: string; revision?: string }[]; taskChecks?: string };
   taskPhase?: NonNullable<WorkspaceAgent["directTask"]>["phase"];
   taskDetail?: string;
@@ -69,6 +70,36 @@ const markdownComponents: Components = {
 };
 
 const messageTime = new Intl.DateTimeFormat(undefined, { hour: "numeric", minute: "2-digit" });
+
+function ImplementationTargets({ request, repositories }: {
+  request: NonNullable<WorkspaceMessage["implementationRequest"]>;
+  repositories: RepositoryScope[];
+}) {
+  return (
+    <dl className="chat-implementation-targets" aria-label="Write scope">
+      {repositories.map(({ id, path }) => {
+        const target = request.targets?.find(({ projectId }) => projectId === id);
+        const worktree = target?.mode === "worktree" ? target : undefined;
+        const checkout = target?.mode === "checkout";
+        const location = checkout ? path : worktree?.path;
+        return (
+          <div key={id}>
+            <dt>{id}</dt>
+            <dd>
+              <span>{checkout ? "Configured checkout" : worktree ? "New linked worktree" : "Isolated worktree"}</span>
+              {location && <code>{location}</code>}
+              {worktree && (worktree.branch ? <span>Branch <code>{worktree.branch}</code></span> : <span>Detached HEAD</span>)}
+              {checkout && <span className="chat-implementation-checkout-warning">
+                Edits apply directly to this checkout.
+              </span>}
+              {!target && <span>Path assigned by Orchestra.</span>}
+            </dd>
+          </div>
+        );
+      })}
+    </dl>
+  );
+}
 
 function MessageActions({ message }: { message: WorkspaceMessage }) {
   const [copyStatus, setCopyStatus] = useState<"copied" | "failed">();
@@ -481,6 +512,8 @@ function Conversation({
                     : <Markdown skipHtml disallowedElements={["img"]} components={markdownComponents}>{message.text}</Markdown>}
                   {message.state === "streaming" ? <span className="chat-stream-cursor" aria-label="Responding" /> : null}
                 </div>
+                {implementationRequest && !!repositoryScope?.length &&
+                  <ImplementationTargets request={implementationRequest} repositories={repositoryScope} />}
                 {implementationRequest?.status === "pending" && onApproveImplementation && !archived && (
                   <button className="chat-steer" type="button"
                     disabled={blocked || approvingImplementation || Boolean(agent.canCancel) || agent.queueDepth > 0}
@@ -492,7 +525,7 @@ function Conversation({
               <MessageActions message={message} />
             </article>
           );
-        }), [agent.messages, agent.canCancel, agent.queueDepth, approveImplementation, approvingImplementation, archived, blocked, hiddenMessages, onApproveImplementation]);
+        }), [agent.messages, agent.canCancel, agent.queueDepth, approveImplementation, approvingImplementation, archived, blocked, hiddenMessages, onApproveImplementation, repositoryScope]);
 
   const headerStatus = archived ? "Archived" : agent.lifecycleBusy ? "Updating…" : statusLabels[agent.status];
   const headerTone = archived || agent.lifecycleBusy ? "idle" : agent.status;
@@ -500,7 +533,7 @@ function Conversation({
   const agentTooltipId = useId();
   const nameTooltip = [
     projectLabel && `Project: ${projectLabel}`,
-    repositoryScope && `Repositories: ${repositoryScope.join(", ")}`,
+    repositoryScope && `Repositories: ${repositoryScope.map(({ id }) => id).join(", ")}`,
     taskPhase === "planning" && (repositoryScope ? "Planning · read-only" : "General chat"),
     modelLabel,
     usageLabel,

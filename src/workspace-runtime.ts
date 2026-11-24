@@ -1,15 +1,20 @@
+import { acquirePathReservations, checkoutReservationDirectory, reservationOwnerAlive,
+  releasePathReservations, type CheckoutReservation } from "./workspace-reservations.ts";
 import { demoTasks } from "./workspace-demo.ts";
 import { WorkspaceUsage } from "./workspace-usage.ts";
 import { randomUUID } from "node:crypto";
-import { basename, resolve } from "node:path";
+import { realpathSync } from "node:fs";
+import { basename, isAbsolute, relative, resolve, sep } from "node:path";
 import { tmpdir } from "node:os";
 import { AppServer, safeError } from "./app-server.ts";
 import type { Event, Id, Thread, Turn } from "./app-server.ts";
 import { createFeatureWorktree, removeFeatureWorktree } from "./workspace-worktree.ts";
-import { fingerprintCandidate, fingerprintIntegrationMembers, fingerprintMemberSnapshots, pinApprovedCandidate, pinDirectCandidates, validateCandidateWorktree, type IntegrationMember } from "./workspace-integration.ts";
+import { fingerprintCandidate, fingerprintCheckout, fingerprintMemberSnapshots, hasWorktreeChanges, pinApprovedCandidate, pinDirectCandidates, validateCandidateWorktree, type IntegrationMember } from "./workspace-integration.ts";
 import { recordReportedModel, selectModelSettings } from "./workspace-models.ts";
 import type { ModelSettings, ReportedModel } from "./workspace-models.ts";
 import type { SavedSession, workspaceStore } from "./workspace-store.ts";
+import { checkoutBaseline, createRequestedWorktree, removeRequestedWorktree, resolveWriteTargets, validateRequestedWorktree } from "./workspace-write-scope.ts";
+import type { WriteTarget } from "./workspace-write-scope.ts";
 import { defaultProject, workspaceIdentity } from "./workspace-projects.ts";
 import type { WorkspaceProject } from "./workspace-projects.ts";
 
@@ -26,7 +31,7 @@ export type WorkspaceMessage = {
   state?: "queued" | "streaming" | "failed" | "cancelled";
   productQuestion?: { status: "pending" } | { status: "answered"; answerMessageId: string };
   answersProductQuestionId?: string;
-  implementationRequest?: { status: "pending" | "approved" | "superseded" };
+  implementationRequest?: { status: "pending" | "approved" | "superseded"; targets?: WriteTarget[] };
 };
 export type WorkspaceAgent = {
   id: string;
@@ -41,6 +46,7 @@ export type WorkspaceAgent = {
   nativeChild?: true;
   directTask?: { projectIds: string[]; phase: "planning" | "implementing" | "blocked" | "ready-for-review"; detail?: string };
   directCandidates?: (Candidate & { projectId: string })[];
+  scopedWorktrees?: WorktreeRoot[];
   integration?: { id: string; path: string; base: string; fingerprint: string; sources: { agentId: string; submissionId: string; head: string; fingerprint?: string; projectId?: string }[]; members?: IntegrationMember[]; validationEvidence?: CheckResult };
   status: AgentStatus;
   messages: WorkspaceMessage[];
@@ -74,12 +80,16 @@ export type WorkspaceCommand =
   | { type: "archive"; agentId: string; stopRunning?: boolean };
 
 type Candidate = { path: string; base: string };
+type WorktreeRoot = Candidate & (
+  { projectId: string; mode: "automatic"; branch?: never } | Extract<WriteTarget, { mode: "worktree" }>
+);
+type ImplementationRoot = WorktreeRoot | (Candidate & { projectId: string; mode: "checkout" });
 type CheckResult = { submissionId: string; candidateFingerprint: string;
   outcome: "passed" | "changes-requested" | "blocked"; summary: string; recordedAt: number };
 type Duty = "lead" | "coder" | "reviewer" | "tester" | "analyser" | "designer" | "pm";
 
 type Run = {
-  taskImplementation?: boolean;
+  implementationRoots?: ImplementationRoot[];
   steered?: boolean;
   turn?: Turn;
   message: WorkspaceMessage;
@@ -93,15 +103,19 @@ type AgentSession = {
   toolVersion?: number;
   run?: Run;
   recovery?: SavedSession["run"];
+  checkoutReservation?: CheckoutReservation;
   opening?: boolean;
   queue: WorkspaceMessage[];
   stream: Map<string, WorkspaceMessage>;
 };
 
 const questionResolutionToolVersion = 14;
-const taskToolVersion = 15;
+const implementationRequestToolVersion = 15;
+const taskToolVersion = 16;
+const legacyScopedImplementationPrefix = "Request implementation targets: ";
 const legacyImplementationRequestPrefix = "Request implementation: ";
 const legacyQuestionResolutionPrefix = "Resolve product question: ";
+const unresolvedSubagentPrefix = "Codex subagent activity is unresolved. ";
 const workspaceThreadConfig = { "features.multi_agent": true, "features.multi_agent_v2": true };
 const input = (text: string) => [{ type: "text", text, text_elements: [] }];
 const hasSubmittedMessage = (agent: WorkspaceAgent) =>
@@ -133,9 +147,28 @@ const implementationRequestTool = {
   type: "function",
   deferLoading: false,
   name: "request_implementation",
-  description: "Ask the user to allow edits in isolated worktrees. Summarize the intended changes, then end the turn and wait for approval in the workspace.",
-  inputSchema: { type: "object", properties: { summary: { type: "string" } },
-    required: ["summary"], additionalProperties: false },
+  description: "Summarize the intended changes and ask for write approval. Use automatic isolated worktrees unless the user explicitly asks for a configured checkout or a new worktree at a specific absolute path. End the turn to wait for approval.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      summary: { type: "string" },
+      targets: {
+        type: "array",
+        items: {
+          type: "object",
+          properties: {
+            projectId: { type: "string" },
+            mode: { type: "string", enum: ["checkout", "worktree"] },
+            path: { type: "string" },
+            branch: { type: "string" },
+          },
+          required: ["projectId", "mode"],
+          additionalProperties: false,
+        },
+      },
+    },
+    required: ["summary"], additionalProperties: false,
+  },
 };
 const decisionTool = {
   type: "function",
@@ -161,6 +194,7 @@ export class WorkspaceRuntime {
   private readonly projects: WorkspaceProject[];
   private readonly store?: ReturnType<typeof workspaceStore>;
   private storageFailed = false;
+  private releaseWorkspaceState?: () => void;
   private storageReady = false;
   private readonly sessions = new Map<string, AgentSession>();
   private readonly threadSessions = new Map<string, AgentSession>();
@@ -253,10 +287,13 @@ export class WorkspaceRuntime {
     if (this.demo) return;
     let saved: SavedSession[] | undefined;
     try {
+      this.releaseWorkspaceState = this.store?.reserveProcess?.();
       saved = this.store?.load();
       if (saved) this.restore(saved);
       this.storageReady = true;
     } catch (error) {
+      this.releaseWorkspaceState?.();
+      delete this.releaseWorkspaceState;
       this.storageFailed = true;
       this.setProvider("error", errorText(error));
       this.publish();
@@ -315,7 +352,10 @@ export class WorkspaceRuntime {
           }
         }
       }
-      if (!this.storageFailed && !this.closed) this.setProvider("ready");
+      if (!this.storageFailed && !this.closed) {
+        this.setProvider("ready");
+        this.releaseSettledCheckouts();
+      }
     } catch (error) {
       this.setProvider("error", errorText(error));
     }
@@ -328,7 +368,12 @@ export class WorkspaceRuntime {
     for (const session of this.sessions.values()) clearTimeout(session.run?.demoTimer);
     this.listeners.clear();
     this.signalListeners.clear();
-    await this.server?.close();
+    try {
+      await this.server?.close();
+    } finally {
+      this.releaseWorkspaceState?.();
+      delete this.releaseWorkspaceState;
+    }
   }
 
   async command(command: WorkspaceCommand) {
@@ -389,7 +434,7 @@ export class WorkspaceRuntime {
 
   private supersedeImplementationRequest(session: AgentSession) {
     const request = session.agent.messages.find((entry) => entry.implementationRequest?.status === "pending");
-    if (request) request.implementationRequest = { status: "superseded" };
+    if (request?.implementationRequest) request.implementationRequest.status = "superseded";
     return request;
   }
 
@@ -408,7 +453,7 @@ export class WorkspaceRuntime {
     if (!this.persist()) {
       session.queue.pop();
       session.agent.messages.pop();
-      if (superseded) superseded.implementationRequest = { status: "pending" };
+      if (superseded?.implementationRequest) superseded.implementationRequest.status = "pending";
       question.productQuestion = { status: "pending" };
       this.publish(false);
       throw new Error("Orchestra could not save the answer. The question remains pending.");
@@ -480,35 +525,107 @@ export class WorkspaceRuntime {
     if (session.agent.messages.some((entry) => entry.productQuestion?.status === "pending")) {
       throw new Error("Answer the pending product questions before approving implementation.");
     }
-    if (!session.agent.candidate) {
-      const candidates: NonNullable<WorkspaceAgent["directCandidates"]> = [];
-      try {
-        for (const projectId of task.projectIds) {
-          const project = this.projects.find(({ id }) => id === projectId)!;
-          candidates.push({ ...createFeatureWorktree(project.path), projectId });
-        }
-      } catch (error) {
-        for (const { path, projectId } of candidates) {
-          removeFeatureWorktree(this.projects.find(({ id }) => id === projectId)!.path, path);
-        }
-        throw error;
-      }
-      const [candidate] = candidates;
-      session.agent.candidate = { path: candidate.path, base: candidate.base };
-      if (candidates.length > 1) session.agent.directCandidates = candidates;
+    this.releaseSettledCheckouts(session);
+    if (session.checkoutReservation) {
+      throw new Error("The previous checkout reservation could not be released. Recover its workspace before approving another edit.");
     }
-    const roots = this.directTaskCandidates(session);
-    for (const candidate of roots) {
-      const project = this.projects.find(({ id }) => id === candidate.projectId)!;
-      validateCandidateWorktree(project.path, candidate);
+    const agent = session.agent;
+    const approval = request.implementationRequest;
+    if (approval?.status !== "pending") throw new Error("This implementation request is no longer pending.");
+    const targets = resolveWriteTargets(approval.targets, this.projects, task.projectIds);
+    if (JSON.stringify(targets) !== JSON.stringify(approval.targets ?? [])) {
+      throw new Error("An approved destination changed. Request approval for the new location.");
     }
+    const checkoutDirectories = [...new Set(targets.filter(({ mode }) => mode === "checkout")
+      .map(({ projectId }) => checkoutReservationDirectory(this.projectById(projectId).path)))].sort();
+    const { roots, created } = this.prepareImplementationRoots(session, targets);
+    if (this.hasOverlappingImplementation(session, roots)) {
+      this.removePreparedWorktrees(created);
+      throw new Error("Another task is already writing in an approved destination. Wait for it to finish.");
+    }
+
+    const previousWorktrees = agent.scopedWorktrees;
+    const previousCandidate = agent.candidate;
+    const previousDirectCandidates = agent.directCandidates;
+    const previousTask = { ...task };
+    const previousStatus = agent.status;
+    const previousIntegration = agent.integration;
     const assignment = message("user", "I approve the requested implementation.");
-    request.implementationRequest = { status: "approved" };
+    const reservation = checkoutDirectories.length
+      ? { id: assignment.id, pid: process.pid, directories: checkoutDirectories } : undefined;
+    const automatic = roots.every(({ mode }) => mode === "automatic");
+    if (automatic && !agent.candidate) {
+      const [candidate] = roots;
+      agent.candidate = { path: candidate.path, base: candidate.base };
+      if (roots.length > 1) agent.directCandidates = roots.map(({ projectId, path, base }) => ({ projectId, path, base }));
+    } else if (created.length) {
+      agent.scopedWorktrees = [...(agent.scopedWorktrees ?? []), ...created];
+    }
+    approval.status = "approved";
     task.phase = "implementing";
     delete task.detail;
-    delete session.agent.integration;
-    session.agent.messages.push(assignment);
-    await this.begin(session, assignment, request.text);
+    delete agent.integration;
+    agent.messages.push(assignment);
+    await this.begin(session, assignment, { roots, summary: request.text, reservation }, () => {
+      agent.scopedWorktrees = previousWorktrees;
+      agent.candidate = previousCandidate;
+      agent.directCandidates = previousDirectCandidates;
+      agent.directTask = previousTask;
+      agent.status = previousStatus;
+      agent.integration = previousIntegration;
+      agent.messages.pop();
+      approval.status = "pending";
+      this.removePreparedWorktrees(created);
+    });
+  }
+
+  private prepareImplementationRoots(session: AgentSession, targets: WriteTarget[]) {
+    const scoped = session.agent.scopedWorktrees ?? [];
+    const automatic = this.directTaskCandidates(session);
+    const created: WorktreeRoot[] = [];
+    try {
+      const roots: ImplementationRoot[] = session.agent.directTask!.projectIds.map((projectId) => {
+        const project = this.projectById(projectId);
+        const target = targets.find((entry) => entry.projectId === projectId);
+        if (target?.mode === "checkout") {
+          return { projectId, mode: "checkout", path: project.path, base: checkoutBaseline(project.path) };
+        }
+        if (target?.mode === "worktree") {
+          const previous = scoped.find((entry) => entry.projectId === projectId && entry.mode === "worktree" &&
+            entry.path === target.path && entry.branch === target.branch);
+          if (previous) {
+            validateRequestedWorktree(project.path, target, previous);
+            return previous;
+          }
+          const next: WorktreeRoot = { ...createRequestedWorktree(project.path, target), ...target };
+          created.push(next);
+          return next;
+        }
+
+        const previous = automatic.find((entry) => entry.projectId === projectId) ??
+          scoped.find((entry) => entry.projectId === projectId && entry.mode === "automatic");
+        if (previous) {
+          if (realpathSync(previous.path) !== previous.path) throw new Error("An isolated worktree location changed.");
+          validateCandidateWorktree(project.path, previous);
+          return { ...previous, mode: "automatic" };
+        }
+        const next: WorktreeRoot = { ...createFeatureWorktree(project.path), projectId, mode: "automatic" };
+        created.push(next);
+        return next;
+      });
+      return { roots, created };
+    } catch (error) {
+      this.removePreparedWorktrees(created);
+      throw error;
+    }
+  }
+
+  private removePreparedWorktrees(created: WorktreeRoot[]) {
+    for (const { path, projectId, branch, base, mode } of [...created].reverse()) {
+      const project = this.projectById(projectId).path;
+      if (mode === "worktree") removeRequestedWorktree(project, path, branch, base);
+      else removeFeatureWorktree(project, path);
+    }
   }
 
   private directTaskCandidates(session: AgentSession) {
@@ -516,43 +633,125 @@ export class WorkspaceRuntime {
     return directCandidates ?? (candidate && projectId ? [{ ...candidate, projectId }] : []);
   }
 
-  private finishDirectTask(session: AgentSession, check: CheckResult | undefined, detail?: string) {
+  private hasOverlappingImplementation(session: AgentSession, roots: ImplementationRoot[]) {
+    const contains = (parent: string, path: string) => {
+      const offset = relative(parent, path);
+      return offset !== ".." && !offset.startsWith(".." + sep) && !isAbsolute(offset);
+    };
+    return [...this.sessions.values()].some((other) => other !== session && this.activeWritePaths(other).some(
+      (path) => roots.some((root) => contains(root.path, path) || contains(path, root.path)),
+    ));
+  }
+
+  private releaseSettledCheckouts(session?: AgentSession) {
+    for (const owner of session ? [session] : this.sessions.values()) {
+      const reservation = owner.checkoutReservation;
+      if (!reservation || owner.run || owner.recovery || owner.agent.unavailableReason ||
+          this.hasRunningNativeChildren(owner)) continue;
+      if (reservation.pid !== process.pid && reservationOwnerAlive(reservation)) continue;
+      if (releasePathReservations(reservation)) delete owner.checkoutReservation;
+    }
+  }
+
+  private activeWritePaths(session: AgentSession) {
+    if (session.run?.implementationRoots) return session.run.implementationRoots.map(({ path }) => path);
+    const { agent } = session;
+    if (!agent.directTask || agent.directTask.phase !== "blocked") return [];
+    const unresolved = session.recovery || /active (?:writer|turn)|still be running|unresolved|not acknowledged/i.test(agent.unavailableReason ?? "");
+    if (!unresolved && !this.hasRunningNativeChildren(session)) return [];
+    const approval = agent.messages.findLast((entry) => entry.implementationRequest?.status === "approved");
+    const targets = approval?.implementationRequest?.targets ?? [];
+    const candidates = this.directTaskCandidates(session);
+    return agent.directTask.projectIds.flatMap((id) => {
+      const target = targets.find(({ projectId }) => projectId === id);
+      if (target?.mode === "checkout") return [this.projectById(id).path];
+      if (target?.mode === "worktree") return [target.path];
+      const candidate = candidates.find(({ projectId }) => projectId === id) ??
+        agent.scopedWorktrees?.find(({ projectId, mode }) => projectId === id && mode === "automatic");
+      return candidate ? [candidate.path] : [];
+    });
+  }
+
+  private implementationMembers(roots: ImplementationRoot[]) {
+    return roots.map((root) => {
+      const project = this.projectById(root.projectId).path;
+      if (root.mode === "checkout") {
+        checkoutBaseline(root.path);
+        return { ...root, fingerprint: fingerprintCheckout(root.path) };
+      }
+      if (root.mode === "worktree") {
+        validateRequestedWorktree(project, root, root);
+      } else {
+        if (realpathSync(root.path) !== root.path) throw new Error("An isolated worktree location changed.");
+        validateCandidateWorktree(project, root);
+      }
+      return { ...root, fingerprint: fingerprintCandidate(root.path) };
+    });
+  }
+
+  private finishDirectTask(session: AgentSession, roots: ImplementationRoot[], check: CheckResult | undefined, detail?: string) {
     const task = session.agent.directTask!;
     try {
       if (detail) throw new Error(detail);
       if (this.hasRunningNativeChildren(session)) throw new Error("A Codex subagent is still running. Wait for it to finish and verify the candidate again.");
       if (check?.outcome !== "passed") throw new Error(check?.summary ?? "No passing verification was recorded for this turn.");
-      const candidates = this.directTaskCandidates(session);
-      const members = candidates.map((candidate) => ({ ...candidate, fingerprint: fingerprintCandidate(candidate.path) }));
+      const members = this.implementationMembers(roots);
       if (fingerprintMemberSnapshots(members) !== check.candidateFingerprint) {
-        throw new Error("The candidate changed after verification. Recheck the current worktrees.");
+        throw new Error("An approved destination changed after verification. Recheck the current contents.");
       }
-      const sources = members.map(({ fingerprint, ...member }) => ({
+      const includesCheckout = roots.some(({ mode }) => mode === "checkout");
+      const sources = members.filter(({ path, base, mode }) =>
+        mode !== "checkout" && (!includesCheckout || hasWorktreeChanges(path, base)),
+      ).map(({ fingerprint, ...member }) => ({
         ...member, agentId: session.agent.id, submissionId: check.submissionId, expectedFingerprint: fingerprint,
       }));
+      if (!sources.length) {
+        if (fingerprintMemberSnapshots(this.implementationMembers(roots)) !== check.candidateFingerprint) {
+          throw new Error("An approved destination changed during delivery. Recheck the current contents.");
+        }
+        task.phase = "planning";
+        session.agent.status = "done";
+        session.agent.messages.push(message("system",
+          `Implementation was verified in the approved destinations. No snapshot merge is needed.\n\nChecks: ${check.summary}`, "success"));
+        return true;
+      }
+      let delivery: NonNullable<WorkspaceAgent["integration"]>;
       if (sources.length > 1) {
-        const delivery = pinDirectCandidates(this.projects, sources);
-        if (delivery.members?.every(({ base, revision }) => base === revision)) {
-          for (const { projectId, path } of delivery.members) {
-            removeFeatureWorktree(this.projects.find(({ id }) => id === projectId)!.path, path);
+        const pinned = pinDirectCandidates(this.projects, sources);
+        if (pinned.members?.every(({ base, revision }) => base === revision)) {
+          for (const { projectId, path } of pinned.members) {
+            removeFeatureWorktree(this.projectById(projectId).path, path);
           }
           throw new Error("The task finished without changes to the approved repositories.");
         }
-        session.agent.integration = { id: check.submissionId, ...delivery, validationEvidence: check };
+        delivery = { id: check.submissionId, ...pinned, validationEvidence: check };
       } else {
         const source = sources[0];
-        const pinned = pinApprovedCandidate(this.projectForAgent(session).path, source);
+        const pinned = pinApprovedCandidate(this.projectById(source.projectId).path, source);
         const fingerprint = fingerprintCandidate(pinned.path);
-        session.agent.integration = {
+        delivery = {
           id: check.submissionId, path: pinned.path, base: source.base, fingerprint,
-          sources: [{ agentId: session.agent.id, submissionId: check.submissionId, head: pinned.revision }],
+          sources: [{ agentId: session.agent.id, submissionId: check.submissionId, head: pinned.revision, projectId: source.projectId }],
           members: [{ ...pinned, projectId: source.projectId, base: source.base, fingerprint }],
           validationEvidence: check,
         };
       }
+      try {
+        if (includesCheckout && fingerprintMemberSnapshots(this.implementationMembers(roots)) !== check.candidateFingerprint) {
+          throw new Error("An approved destination changed during delivery. Recheck the current contents.");
+        }
+      } catch (error) {
+        for (const { path, projectId } of delivery.members ?? []) {
+          removeFeatureWorktree(this.projectById(projectId).path, path);
+        }
+        throw error;
+      }
+      session.agent.integration = delivery;
       task.phase = "ready-for-review";
       session.agent.status = "awaiting-confirmation";
-      session.agent.messages.push(message("system", "A verified candidate is ready for review.", "success"));
+      session.agent.messages.push(message("system", includesCheckout
+        ? "Verified isolated candidates are ready for review. Changes in approved local checkouts are already applied."
+        : "A verified candidate is ready for review.", "success"));
       return true;
     } catch (error) {
       task.phase = "blocked";
@@ -580,7 +779,8 @@ export class WorkspaceRuntime {
   }
 
   private hasRunningNativeChildren(root: AgentSession) {
-    return this.subtree(root).some(({ agent }) => agent.nativeChild && agent.status === "working" && !agent.archivedAt);
+    return this.subtree(root).some(({ agent }) => agent.nativeChild && !agent.archivedAt &&
+      (agent.status === "working" || agent.unavailableReason?.startsWith(unresolvedSubagentPrefix)));
   }
 
   private async lifecycle(root: AgentSession, command: Extract<WorkspaceCommand, { type: "archive" }> | { type: "restore" | "delete"; agentId: string }) {
@@ -703,9 +903,10 @@ export class WorkspaceRuntime {
   private persist() {
     if (!this.store || !this.storageReady || this.storageFailed) return !this.storageFailed;
     try {
-      this.store.save([...this.sessions.values()].map(({ agent, threadId, freshThread, run, recovery, toolVersion }) => ({
+      this.store.save([...this.sessions.values()].map(({ agent, threadId, freshThread, run, recovery, toolVersion, checkoutReservation }) => ({
         toolVersion,
         agent,
+        checkoutReservation,
         threadId: agent.nativeChild || agent.archivedAt || run || recovery || (!freshThread && hasSubmittedMessage(agent)) ? threadId : undefined,
         run: run ? { messageId: run.message.id, turnId: run.turn?.id } : recovery,
       })));
@@ -734,13 +935,13 @@ export class WorkspaceRuntime {
     }
   }
 
-  private update(session: AgentSession) {
+  private update(session: AgentSession, save = true) {
     session.agent.queueDepth = session.queue.length;
     const running = Boolean(session.run?.turn || (this.demo && session.run));
     session.agent.canSteer = this.available && running;
     session.agent.canCancel = this.available && running;
     if (session.run) session.agent.status = "working";
-    this.publish();
+    this.publish(save);
   }
 
   private createAgent(id: string, name: string, role: AgentRole, parentId?: string, goal?: string) {
@@ -761,8 +962,12 @@ export class WorkspaceRuntime {
         if (this.projects.length === 1 && agent.directTask.projectIds.length === 1) {
           agent.projectId = this.projects[0].id;
           agent.directTask.projectIds = [agent.projectId];
-          for (const member of [...(agent.integration?.members ?? []), ...(agent.integration?.sources ?? [])]) {
+          for (const member of [...(agent.integration?.members ?? []), ...(agent.integration?.sources ?? []),
+            ...(agent.scopedWorktrees ?? [])]) {
             member.projectId = agent.projectId;
+          }
+          for (const entry of agent.messages) {
+            for (const target of entry.implementationRequest?.targets ?? []) target.projectId = agent.projectId;
           }
         }
         const ids = agent.directTask.projectIds;
@@ -778,6 +983,16 @@ export class WorkspaceRuntime {
             new Set(candidates.map(({ path }) => path)).size !== candidates.length)) {
           throw new Error(`Saved task ${agent.name} has invalid candidate repositories.`);
         }
+        const scoped = agent.scopedWorktrees;
+        if (scoped && (!Array.isArray(scoped) ||
+            scoped.some((candidate) => !candidate || !ids.includes(candidate.projectId) ||
+              typeof candidate.path !== "string" || !isAbsolute(candidate.path) ||
+              !/^[a-f0-9]{40}(?:[a-f0-9]{24})?$/i.test(candidate.base) ||
+              (candidate.mode !== "automatic" && candidate.mode !== "worktree") ||
+              (candidate.branch !== undefined && (candidate.mode !== "worktree" || typeof candidate.branch !== "string"))) ||
+            new Set(scoped.map(({ path }) => path)).size !== scoped.length)) {
+          throw new Error(`Saved task ${agent.name} has invalid approved worktrees.`);
+        }
       } else {
         let parent = agent.parentId ? entries.get(agent.parentId)?.agent : undefined;
         const visited = new Set([agent.id]);
@@ -791,7 +1006,7 @@ export class WorkspaceRuntime {
         agent.projectId = parent.projectId;
       }
     }
-    for (const { agent, threadId, run, toolVersion } of saved) {
+    for (const { agent, threadId, run, toolVersion, checkoutReservation } of saved) {
       const session = this.createAgent(agent.id, agent.name, "worker", agent.parentId, agent.goal);
       Object.assign(session.agent, agent, {
         projectId: agent.projectId, canSteer: false, canCancel: false, lifecycleBusy: undefined,
@@ -799,6 +1014,15 @@ export class WorkspaceRuntime {
       session.threadId = agent.nativeChild || agent.archivedAt || run || hasSubmittedMessage(agent) ? threadId : undefined;
       session.toolVersion = toolVersion;
       session.recovery = run;
+      if (checkoutReservation) {
+        const { id, pid, directories } = checkoutReservation;
+        if (!agent.directTask || !/^[a-f0-9-]{36}$/i.test(id) || !Number.isSafeInteger(pid) || pid < 1 ||
+            !Array.isArray(directories) || directories.some((path) =>
+              typeof path !== "string" || !isAbsolute(path) || basename(path) !== "orchestra-checkout-write")) {
+          throw new Error("The saved checkout reservation is invalid.");
+        }
+        session.checkoutReservation = checkoutReservation;
+      }
       session.queue = agent.messages.filter((entry) => entry.state === "queued");
       for (const entry of agent.messages) {
         if (entry.state === "streaming" || entry.id === run?.messageId) entry.state = "failed";
@@ -807,7 +1031,7 @@ export class WorkspaceRuntime {
       session.agent.queuePaused = session.queue.length > 0;
       if (session.agent.directTask?.phase === "implementing") {
         session.agent.directTask.phase = "blocked";
-        session.agent.directTask.detail = "Orchestra restarted during implementation. Review the worktree and run verification again.";
+        session.agent.directTask.detail = "Orchestra restarted during implementation. Review the approved destinations and run verification again.";
       }
       if (!agent.nativeChild && agent.status === "working") {
         session.agent.status = "error";
@@ -845,15 +1069,29 @@ export class WorkspaceRuntime {
       if (thread.id !== threadId || modelProvider !== this.providerId || this.threadSessions.has(thread.id)) {
         throw new Error("Codex returned an unexpected saved thread.");
       }
-      const turn = run?.turnId && (initialTurnsPage?.data ?? thread.turns)?.find((entry) => entry.id === run.turnId);
-      if (thread.status?.type === "active" || turn && turn.status === "inProgress") {
+      const turns = initialTurnsPage?.data ?? thread.turns;
+      const turn = run?.turnId && turns?.find((entry) => entry.id === run.turnId);
+      const unacknowledged = run && !run.turnId;
+      if (thread.status?.type === "active" || turn && turn.status === "inProgress" ||
+          unacknowledged && turns?.some(({ status }) => status === "inProgress")) {
         throw new Error("Codex still reports an active turn. Check again after restarting the workspace.");
+      }
+      const idleWithoutTurnId = unacknowledged && thread.status?.type === "idle";
+      if (run && !idleWithoutTurnId && (!turn || !["completed", "failed", "interrupted"].includes(turn.status))) {
+        throw new Error("Codex has not confirmed the outcome of the saved turn. Restart Orchestra to check again.");
       }
       this.recordModelSettings(session, settings, response);
       delete session.agent.unavailableReason;
       delete session.recovery;
       this.threadSessions.set(thread.id, session);
       session.toolVersion = toolVersion;
+      if (run && idleWithoutTurnId) {
+        this.supersedeImplementationRequest(session);
+        const submitted = session.agent.messages.find(({ id }) => id === run.messageId);
+        if (submitted?.answersProductQuestionId) this.reopenProductQuestion(session, submitted);
+        session.agent.messages.push(message("system",
+          "Codex reports the conversation is idle but did not confirm whether the previous message ran. Check the conversation and approved destinations before retrying.", "notice"));
+      }
       if (turn && turn.status === "completed") {
         session.agent.status = session.agent.directTask?.phase === "blocked" ? "error"
           : session.agent.directTask?.phase === "ready-for-review" ? "awaiting-confirmation" : "done";
@@ -872,12 +1110,14 @@ export class WorkspaceRuntime {
         session.agent.messages.push(message("system", "Codex confirmed that the interrupted turn completed.", "success"));
       }
       if (run && turn && (turn.status === "failed" || turn.status === "interrupted")) {
+        this.supersedeImplementationRequest(session);
         const answer = session.agent.messages.find(({ id }) => id === run.messageId);
         if (answer?.answersProductQuestionId) {
           answer.state = turn.status === "interrupted" ? "cancelled" : "failed";
           this.reopenProductQuestion(session, answer);
         }
       }
+      if (this.available) this.releaseSettledCheckouts(session);
     } catch (error) {
       session.agent.unavailableReason = errorText(error);
       session.agent.status = "error";
@@ -891,7 +1131,11 @@ export class WorkspaceRuntime {
   }
 
   private projectForAgent(session: AgentSession) {
-    const project = this.projects.find((entry) => entry.id === session.agent.projectId);
+    return this.projectById(session.agent.projectId);
+  }
+
+  private projectById(projectId: string | undefined) {
+    const project = this.projects.find((entry) => entry.id === projectId);
     if (!project) throw new Error("This agent has no configured project.");
     return project;
   }
@@ -915,18 +1159,25 @@ export class WorkspaceRuntime {
       "Plan and discuss by default. Use raise_product_decision if you need the user to choose, then end the turn. " +
       "When orchestra_pending_questions is supplied, use its question IDs and the resolution tool it indicates only if the current user reply answers that question. Leave unrelated questions open. " +
       "Never ask the user to type a trigger phrase to continue implementation. " +
-      "Perform code changes only in a turn explicitly approved for implementation, using its isolated worktree paths. " +
+      "Perform code changes only in a turn explicitly approved for implementation, using the writable destinations listed with that approval. " +
       (roots.length ? this.implementationRequestInstructions(session) : "") +
       "Follow the repository instructions. Verify the candidate, call submit_check_result with the actual result, and report blockers concisely.";
   }
 
   private implementationRequestInstructions(session: AgentSession) {
     const toolVersion = session.threadId ? session.toolVersion ?? 0 : taskToolVersion;
-    const requestTool = toolVersion >= taskToolVersion
+    const defaultRequest = toolVersion >= implementationRequestToolVersion
       ? "call request_implementation with a summary of the intended changes"
       : `call raise_product_decision with a question starting with "${legacyImplementationRequestPrefix}" followed by a summary of the intended changes`;
+    const customRequest = toolVersion >= taskToolVersion
+      ? "set the targets array on request_implementation"
+      : `call raise_product_decision with a question starting with "${legacyScopedImplementationPrefix}" followed by JSON with summary and targets`;
     return "If the user asks for code changes, confirms a plan, or asks you to proceed with implementation during a read-only turn, " +
-      `resolve any answered product questions first, then ${requestTool}. ` +
+      `resolve any answered product questions first, then ${defaultRequest}. ` +
+      "Use automatic isolated worktrees by default. Only if the user explicitly requests a different destination, " +
+      `${customRequest}. Each entry is {"projectId":"…","mode":"checkout"} for a configured local checkout, ` +
+      'or {"projectId":"…","mode":"worktree","path":"/absolute/path","branch":"optional-new-branch"} for a new isolated worktree. ' +
+      "Ask the user for any missing details instead of choosing a writable destination. " +
       "Use this tool instead of asking the user to type a specific phrase. End the turn and wait for the workspace approval button. ";
   }
 
@@ -969,8 +1220,8 @@ export class WorkspaceRuntime {
     } finally { session.opening = false; }
   }
 
-  private directTaskTurnScope(session: AgentSession, implementation: boolean) {
-    const roots = implementation ? this.directTaskCandidates(session).map(({ path }) => path) : this.directTaskReadRoots(session);
+  private directTaskTurnScope(session: AgentSession, implementation?: ImplementationRoot[]) {
+    const roots = implementation?.map(({ path }) => path) ?? this.directTaskReadRoots(session);
     return {
       cwd: roots[0] ?? tmpdir(),
       ...(roots.length ? { runtimeWorkspaceRoots: roots } : { environments: [] }),
@@ -1002,7 +1253,7 @@ export class WorkspaceRuntime {
 
   private resolveProductQuestion(session: AgentSession, questionId: unknown) {
     const run = session.run;
-    if (!session.agent.directTask || !run || run.taskImplementation || run.steered || run.message.answersProductQuestionId) {
+    if (!session.agent.directTask || !run || run.implementationRoots || run.steered || run.message.answersProductQuestionId) {
       throw new Error("Only a normal reply in this task can resolve a pending product question.");
     }
     const answer = run.message;
@@ -1036,21 +1287,46 @@ export class WorkspaceRuntime {
       : entry.text;
   }
 
-  private implementationInput(session: AgentSession, text: string, approvedScope: string) {
-    const roots = this.directTaskCandidates(session);
-    return text + "\n\nImplementation is explicitly approved for this turn. Write only in these isolated worktrees: " +
-      JSON.stringify(roots.map(({ projectId, path }) => ({ projectId, path }))) +
-      ". The approved scope is " + JSON.stringify(approvedScope) +
-      ". Keep implementation edits in this session. Wait for any subagents to finish, then run the agreed verification and call submit_check_result before ending the turn.";
+  private implementationInput(text: string, approvedScope: string, roots: ImplementationRoot[]) {
+    return text + "\n\nImplementation is explicitly approved for this turn. Write only in these approved destinations: " +
+      JSON.stringify(roots.map(({ projectId, path, mode, ...destination }) =>
+        ({ projectId, path, mode, branch: "branch" in destination ? destination.branch : undefined }))) +
+      ". The approved scope is " + JSON.stringify(approvedScope) + "." +
+      (roots.some(({ mode }) => mode === "checkout")
+        ? " Configured checkouts may contain existing user changes. Preserve them and stay on the checked-out branch."
+        : "") +
+      " Keep implementation edits in this session. Wait for any subagents to finish, then run the agreed verification and call submit_check_result before ending the turn.";
   }
 
-  private async begin(session: AgentSession, next: WorkspaceMessage, approvedScope?: string) {
+  private async begin(session: AgentSession, next: WorkspaceMessage,
+    implementation?: { roots: ImplementationRoot[]; summary: string; reservation?: CheckoutReservation }, rollback?: () => void) {
     if (!this.isActive(session)) return;
-    const taskImplementation = approvedScope !== undefined;
-    const run: Run = { message: next, taskImplementation };
+    const run: Run = { message: next, implementationRoots: implementation?.roots };
     session.run = run;
     delete next.state;
-    this.update(session);
+    if (rollback) {
+      session.agent.status = "working";
+      session.checkoutReservation = implementation?.reservation;
+      if (!this.persist()) {
+        delete session.run;
+        delete session.checkoutReservation;
+        rollback();
+        this.publish(false);
+        throw new Error("Orchestra could not save the approval. No implementation turn was started.");
+      }
+      if (session.checkoutReservation) {
+        try {
+          acquirePathReservations(session.checkoutReservation);
+        } catch (error) {
+          delete session.run;
+          delete session.checkoutReservation;
+          rollback();
+          this.publish();
+          throw error;
+        }
+      }
+    }
+    this.update(session, !rollback);
     if (this.storageFailed) {
       this.finish(session, false, "The turn was paused because Orchestra could not save it.");
       return;
@@ -1063,9 +1339,9 @@ export class WorkspaceRuntime {
       const { turn } = await this.server!.call<{ turn: Turn }>("turn/start", {
         threadId: session.threadId,
         approvalPolicy: "never",
-        ...this.directTaskTurnScope(session, taskImplementation),
-        input: input(approvedScope !== undefined ? this.implementationInput(session, next.text, approvedScope) : this.answerInput(session, next)),
-        additionalContext: this.pendingQuestionContext(session, next, taskImplementation),
+        ...this.directTaskTurnScope(session, run.implementationRoots),
+        input: input(implementation ? this.implementationInput(next.text, implementation.summary, implementation.roots) : this.answerInput(session, next)),
+        additionalContext: this.pendingQuestionContext(session, next, implementation !== undefined),
       });
       session.freshThread = false;
       if (session.threadId) this.trackTurn(session, session.threadId, turn.id, next);
@@ -1128,7 +1404,8 @@ export class WorkspaceRuntime {
   }
 
   private finish(session: AgentSession, completed: boolean, detail?: string, cancelled = false) {
-    const directTaskRun = session.run?.taskImplementation ? session.run : undefined;
+    const directTaskRun = session.run;
+    const implementationRoots = directTaskRun?.implementationRoots;
     if (session.run && !completed) {
       this.supersedeImplementationRequest(session);
       const answer = session.run.message;
@@ -1143,8 +1420,8 @@ export class WorkspaceRuntime {
     }
     session.stream.clear();
     session.agent.status = completed ? "done" : cancelled ? "idle" : "error";
-    if (directTaskRun) {
-      completed = this.finishDirectTask(session, directTaskRun.check,
+    if (directTaskRun && implementationRoots) {
+      completed = this.finishDirectTask(session, implementationRoots, directTaskRun.check,
         completed ? undefined : detail ?? "The implementation turn did not complete.");
       if (!completed && !cancelled) directTaskRun.message.state = "failed";
     } else if (session.agent.directTask?.phase === "ready-for-review") {
@@ -1153,6 +1430,7 @@ export class WorkspaceRuntime {
       session.agent.status = "error";
     }
     if (detail) session.agent.messages.push(message("system", detail, completed || cancelled ? "notice" : "error"));
+    this.releaseSettledCheckouts(session);
     if (!completed || !this.drain(session)) this.update(session);
     return completed;
   }
@@ -1167,14 +1445,21 @@ export class WorkspaceRuntime {
   private async resumeNativeChild(session: AgentSession) {
     const threadId = session.threadId;
     const parent = session.agent.parentId ? this.sessions.get(session.agent.parentId) : undefined;
-    if (!threadId || !parent?.threadId) return;
+    const mayStillBeRunning = session.agent.status === "working" ||
+      session.agent.unavailableReason?.startsWith(unresolvedSubagentPrefix);
     try {
+      if (!threadId || !parent?.threadId) throw new Error("The parent Codex thread is unavailable.");
       const { thread } = await this.server!.call<{ thread: Thread & {
         parentThreadId?: string; status?: { type: string };
         turns?: (Turn & { items?: { id: string; type: string; text?: string }[] })[];
       } }>("thread/read", { threadId, includeTurns: true });
       if (thread.id !== threadId || thread.parentThreadId !== parent.threadId) {
         throw new Error("Codex reported a different parent for this subagent.");
+      }
+      const last = thread.turns?.at(-1);
+      if (mayStillBeRunning && thread.status?.type !== "active" && thread.status?.type !== "idle" &&
+          (!last || !["completed", "failed", "interrupted"].includes(last.status))) {
+        throw new Error("Codex has not confirmed that the subagent stopped.");
       }
       this.threadSessions.set(threadId, session);
       this.trackUsage((usage) => usage.registerThread(threadId, false, session.agent.id));
@@ -1184,14 +1469,14 @@ export class WorkspaceRuntime {
         }
       }
       if (thread.status?.type === "active") session.agent.status = "working";
-      else if (session.agent.status === "working") {
-        const last = thread.turns?.at(-1);
-        session.agent.status = last?.status === "completed" ? "done" : "idle";
+      else if (mayStillBeRunning) {
+        session.agent.status = last?.status === "completed" ? "done" : last?.status === "failed" ? "error" : "idle";
       }
       delete session.agent.unavailableReason;
     } catch (error) {
-      session.agent.unavailableReason = errorText(error);
-      if (session.agent.status === "working") session.agent.status = "error";
+      const detail = errorText(error);
+      session.agent.unavailableReason = mayStillBeRunning ? unresolvedSubagentPrefix + detail : detail;
+      if (mayStillBeRunning) session.agent.status = "error";
     }
   }
 
@@ -1234,7 +1519,10 @@ export class WorkspaceRuntime {
     if (item.agentPath && child.agent.name === "Codex subagent") child.agent.name = item.agentPath;
     if (item.kind === "interrupted") child.agent.status = "idle";
     else if (item.kind === "completed" && child.agent.status !== "error") child.agent.status = "done";
-    if (completed && (item.kind === "completed" || item.kind === "interrupted")) this.signal(child.agent.id, parent.agent.id);
+    if (completed && (item.kind === "completed" || item.kind === "interrupted")) {
+      this.signal(child.agent.id, parent.agent.id);
+      this.releaseSettledCheckouts();
+    }
     this.publish();
   }
 
@@ -1260,6 +1548,7 @@ export class WorkspaceRuntime {
           else entry.state = "failed";
         }
         session.stream.clear();
+        this.releaseSettledCheckouts();
       }
       this.publish();
     }
@@ -1374,8 +1663,8 @@ export class WorkspaceRuntime {
     }
   }
 
-  private requestImplementation(session: AgentSession, rawSummary: unknown) {
-    if (!session.agent.directTask?.projectIds.length || session.run?.taskImplementation) {
+  private requestImplementation(session: AgentSession, rawSummary: unknown, rawTargets?: unknown) {
+    if (!session.agent.directTask?.projectIds.length || session.run?.implementationRoots) {
       throw new Error("Only a read-only repository task can request implementation.");
     }
     const summary = typeof rawSummary === "string" ? rawSummary.trim() : "";
@@ -1384,11 +1673,17 @@ export class WorkspaceRuntime {
       throw new Error("Resolve pending product questions before requesting implementation.");
     }
     if (session.queue.length) throw new Error("Wait for newer queued instructions before requesting implementation.");
+    const targets = resolveWriteTargets(rawTargets, this.projects, session.agent.directTask.projectIds);
     const pending = session.agent.messages.find((entry) => entry.implementationRequest?.status === "pending");
-    if (pending) return pending.id;
+    if (pending) {
+      if (pending.text === summary && JSON.stringify(pending.implementationRequest?.targets ?? []) === JSON.stringify(targets)) {
+        return pending.id;
+      }
+      throw new Error("An implementation request is already pending for this turn.");
+    }
     const request: WorkspaceMessage = {
       ...message("system", summary, "action"),
-      implementationRequest: { status: "pending" },
+      implementationRequest: { status: "pending", ...(targets.length ? { targets } : {}) },
     };
     session.agent.messages.push(request);
     if (!this.persist()) {
@@ -1422,7 +1717,7 @@ export class WorkspaceRuntime {
     }
     try {
       if (params.tool === implementationRequestTool.name) {
-        const requestId = this.requestImplementation(session, params.arguments?.summary);
+        const requestId = this.requestImplementation(session, params.arguments?.summary, params.arguments?.targets);
         reply(true, JSON.stringify({ requestId, message: "End the turn and wait for approval in the workspace." }));
         return;
       }
@@ -1434,7 +1729,21 @@ export class WorkspaceRuntime {
       if (params.tool === decisionTool.name) {
         const question = typeof params.arguments?.question === "string" ? params.arguments.question.trim() : "";
         if (!question || question.length > 4000) throw new Error("Provide a product question of up to 4,000 characters.");
-        if ((session.toolVersion ?? 0) < taskToolVersion && question.startsWith(legacyImplementationRequestPrefix)) {
+        if ((session.toolVersion ?? 0) < taskToolVersion && question.startsWith(legacyScopedImplementationPrefix)) {
+          let requested: { summary?: unknown; targets?: unknown };
+          try {
+            requested = JSON.parse(question.slice(legacyScopedImplementationPrefix.length));
+          } catch {
+            throw new Error("Provide a JSON object with summary and targets.");
+          }
+          if (!requested || !Array.isArray(requested.targets) || !requested.targets.length) {
+            throw new Error("Provide a JSON object with summary and targets.");
+          }
+          const requestId = this.requestImplementation(session, requested.summary, requested.targets);
+          reply(true, JSON.stringify({ requestId, message: "End the turn and wait for approval in the workspace." }));
+          return;
+        }
+        if ((session.toolVersion ?? 0) < implementationRequestToolVersion && question.startsWith(legacyImplementationRequestPrefix)) {
           const requestId = this.requestImplementation(session, question.slice(legacyImplementationRequestPrefix.length));
           reply(true, JSON.stringify({ requestId, message: "End the turn and wait for approval in the workspace." }));
           return;
@@ -1465,9 +1774,9 @@ export class WorkspaceRuntime {
         if ((outcome !== "passed" && outcome !== "changes-requested" && outcome !== "blocked") || !summary || summary.length > 2400) {
           throw new Error("Provide a check outcome and a summary of up to 2,400 characters.");
         }
-        if (!run.taskImplementation) throw new Error("Checks can be submitted only during approved implementation.");
+        if (!run.implementationRoots) throw new Error("Checks can be submitted only during approved implementation.");
         run.check = { outcome, summary, submissionId: run.turn.id,
-          candidateFingerprint: fingerprintIntegrationMembers(this.directTaskCandidates(session)) };
+          candidateFingerprint: fingerprintMemberSnapshots(this.implementationMembers(run.implementationRoots)) };
         reply(true, "Check result recorded.");
         return;
       }

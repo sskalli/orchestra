@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdtempSync, realpathSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { createFeatureWorktree, removeFeatureWorktree } from "./workspace-worktree.ts";
@@ -30,11 +30,18 @@ function repository(path: string) {
   return { root, common: realpathSync(resolve(root, git(root, ["rev-parse", "--git-common-dir"]))) };
 }
 
-function snapshot(path: string) {
+function snapshot(path: string, temporaryObjects = false) {
   const head = git(path, ["rev-parse", "--verify", "HEAD^{commit}"]);
   const temporary = mkdtempSync(join(tmpdir(), "orchestra-index-"));
-  const env = { GIT_INDEX_FILE: join(temporary, "index") };
+  const env: Record<string, string> = { GIT_INDEX_FILE: join(temporary, "index") };
   try {
+    if (temporaryObjects) {
+      const objects = resolve(path, git(path, ["rev-parse", "--git-path", "objects"]));
+      env.GIT_OBJECT_DIRECTORY = join(temporary, "objects");
+      const info = join(env.GIT_OBJECT_DIRECTORY, "info");
+      mkdirSync(info, { recursive: true });
+      writeFileSync(join(info, "alternates"), objects + "\n");
+    }
     git(path, ["read-tree", head], env);
     git(path, ["add", "-A", "--", "."], env);
     const tree = git(path, ["write-tree"], env);
@@ -50,6 +57,15 @@ function snapshot(path: string) {
 /** Current checked-out contents, including untracked files that Git does not ignore. */
 export function fingerprintCandidate(path: string) {
   return snapshot(repository(path).root).fingerprint;
+}
+
+export function fingerprintCheckout(path: string) {
+  return snapshot(repository(path).root, true).fingerprint;
+}
+
+export function hasWorktreeChanges(path: string, base: string) {
+  const root = repository(path).root;
+  return snapshot(root, true).tree !== git(root, ["rev-parse", "--verify", base + "^{tree}"]);
 }
 
 function isolatedRepository(target: ReturnType<typeof repository>, path: string) {

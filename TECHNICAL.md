@@ -4,13 +4,13 @@ Orchestra runs a local TypeScript server and a React browser UI. The server owns
 
 ## Sessions
 
-A direct task maps to one addressable Codex thread. Use read-only access for planning and ordinary follow-ups. An explicit implementation turn supplies isolated writable worktrees for the selected repositories. Native child records track provider thread IDs, parent relationships, activity, replies, and observed usage. Child chats are inspected by ID and the parent coordinates their work.
+A direct task maps to one addressable Codex thread. Use read-only access for planning and ordinary follow-ups. An explicit implementation turn supplies per-repository writable roots. Isolated linked worktrees are the default. The immutable request can instead name a configured checkout or an exact path and optional new branch for a linked worktree. Orchestra creates linked worktrees and scopes the Codex turn to the approved roots. Native child records track provider thread IDs, parent relationships, activity, replies, and observed usage. Child chats are inspected by ID and the parent coordinates their work.
 
 Product questions bind a pending decision to its task and message. An accepted answer is persisted with the continuation. Interrupted and uncertain provider turns are reconciled without blindly resending input.
 
 ## Delivery
 
-An implementation result must record passing checks against the same candidate contents Orchestra pins. Capture each repository separately in a clean detached worktree. The original checkout and its branch stay untouched until the user integrates the result.
+An implementation result must record passing checks against the same candidate contents Orchestra pins. Capture each repository separately in a clean detached worktree. For isolated edits, the original checkout stays untouched until the user integrates the result. Direct checkout edits appear in place and are verified without pinning a separate delivery revision.
 
 ## Local state
 
