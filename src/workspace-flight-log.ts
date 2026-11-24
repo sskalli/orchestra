@@ -56,7 +56,19 @@ export function recordFlightLog(log: FlightLog, events: InboxEvent[], agents: { 
     if (latest[event.id] === log.latest[event.id] || (previouslyArchived.has(event.agentId) && !event.needsInput)) return [];
     return [{ sequence: ++sequence, event: { ...event, text: "" } }];
   });
-  const updatedEntries = newestPerAgent([...newEntries, ...entries]);
+  const currentEntries = newestPerAgent([...newEntries, ...entries]);
+  const currentByAgent = new Map(currentEntries.map((entry) => [entry.event.agentId, entry]));
+  const pending = events.filter((event) => event.needsInput && activeIds.has(event.agentId));
+  const pendingIds = new Set(pending.map(({ id }) => id));
+  const latestPendingByAgent = new Map(pending.map((event) => [event.agentId, event]));
+  const fallbackEntries = [...latestPendingByAgent.values()].flatMap((event) => {
+    const current = currentByAgent.get(event.agentId);
+    if (current && pendingIds.has(current.event.id)) return [];
+    return [{ sequence: ++sequence, event: { ...event, text: "" } }];
+  });
+  const updatedEntries = fallbackEntries.length
+    ? newestPerAgent([...fallbackEntries, ...currentEntries])
+    : currentEntries;
   const sameEntries = updatedEntries.length === log.entries.length &&
     updatedEntries.every((entry, index) => entry === log.entries[index]);
   const sameArchive = archivedAgentIds.length === log.archivedAgentIds.length && archivedAgentIds.every((id) => previouslyArchived.has(id));
