@@ -26,7 +26,7 @@ export function demoTasks(projectId: string): DemoTask[] {
     },
   };
 
-  return [
+  const tasks: DemoTask[] = [
     {
       id: "demo-release",
       name: "Release notes",
@@ -156,4 +156,12 @@ export function demoTasks(projectId: string): DemoTask[] {
       ],
     },
   ];
+  const now = Date.now();
+  return tasks.map((task, taskIndex) => ({
+    ...task,
+    messages: task.messages.map((message, messageIndex) => ({
+      ...message,
+      createdAt: now - (tasks.length - taskIndex) * 5 * 60_000 - (task.messages.length - messageIndex - 1) * 30_000,
+    })),
+  }));
 }

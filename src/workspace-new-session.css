@@ -47,10 +47,9 @@
 
 .new-session-field :is(textarea, input)::placeholder { color: var(--text-muted); }
 
-.new-session-field :is(textarea, input):focus,
-.new-session input[type="checkbox"]:focus {
+.new-session-field :is(textarea, input):focus {
   outline: none;
-  border-color: var(--control-highlight);
+  border-color: var(--text-muted);
 }
 
 .new-session input[type="checkbox"] {
@@ -61,11 +60,13 @@
   width: 14px;
   height: 14px;
   margin: 0;
-  border: 1px solid var(--floating-frame);
+  border: 1px solid var(--text-muted);
   border-radius: 3px;
   background: var(--panel-input-bg);
   color: var(--control-highlight);
 }
+
+.new-session input[type="checkbox"]:focus { outline: none; border-color: var(--text-secondary); }
 
 .new-session input[type="checkbox"]:checked { background: var(--inbox-row-selected); }
 .new-session input[type="checkbox"]:checked::before {

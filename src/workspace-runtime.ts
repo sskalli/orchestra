@@ -20,6 +20,7 @@ export type WorkspaceMessage = {
   id: string;
   role: "user" | "assistant" | "system";
   text: string;
+  createdAt?: number;
   kind?: SystemMessageKind;
   providerItemId?: string;
   state?: "queued" | "streaming" | "failed" | "cancelled";
@@ -69,6 +70,7 @@ export type WorkspaceCommand =
   | { type: "approveImplementation"; agentId: string; requestId: string }
   | { type: "send" | "steer"; agentId: string; text: string }
   | { type: "resumeQueue" | "cancel" | "restore" | "delete"; agentId: string }
+  | { type: "rename"; agentId: string; name: string }
   | { type: "archive"; agentId: string; stopRunning?: boolean };
 
 type Candidate = { path: string; base: string };
@@ -144,8 +146,8 @@ const decisionTool = {
     required: ["question"], additionalProperties: false },
 };
 
-function message(role: WorkspaceMessage["role"], text: string, kind?: SystemMessageKind): WorkspaceMessage {
-  return { id: randomUUID(), role, text, ...(kind ? { kind } : {}) };
+function message(role: WorkspaceMessage["role"], text: string, kind?: SystemMessageKind, createdAt: number | null = Date.now()): WorkspaceMessage {
+  return { id: randomUUID(), role, text, ...(createdAt === null ? {} : { createdAt }), ...(kind ? { kind } : {}) };
 }
 
 function errorText(error: unknown) {
@@ -335,6 +337,10 @@ export class WorkspaceRuntime {
     const session = this.sessions.get(command.agentId);
     if (!session) throw new Error("This conversation no longer exists.");
     if (session.agent.nativeChild) throw new Error("Use the owning task to interact with this Codex subagent.");
+    if (command.type === "rename") {
+      this.renameTask(session, command.name);
+      return;
+    }
     if (command.type === "archive" || command.type === "restore" || command.type === "delete") {
       await this.lifecycle(session, command);
       return;
@@ -410,12 +416,31 @@ export class WorkspaceRuntime {
     if (!this.drain(session)) this.update(session);
   }
 
+  private taskName(name: string) {
+    const title = typeof name === "string" ? name.trim() : "";
+    if (!title || title.length > 60) throw new Error("Provide a task name of up to 60 characters.");
+    return title;
+  }
+
+  private renameTask({ agent }: AgentSession, name: string) {
+    if (agent.lifecycleBusy) throw new Error("Wait for the current task action to finish before renaming.");
+    const title = this.taskName(name);
+    const previousName = agent.name;
+    if (title === previousName) return;
+    agent.name = title;
+    if (!this.persist()) {
+      agent.name = previousName;
+      this.publish(false);
+      throw new Error("Orchestra could not save the task name.");
+    }
+    this.publish(false);
+  }
+
   private async createDirectTask(name: string, projectIds: string[]) {
     if (!this.available || this.demo || this.storageFailed) {
       throw new Error("Codex must be ready to create a task.");
     }
-    const title = typeof name === "string" ? name.trim() : "";
-    if (!title || title.length > 60) throw new Error("Provide a task name of up to 60 characters.");
+    const title = this.taskName(name);
     if (!Array.isArray(projectIds) || new Set(projectIds).size !== projectIds.length ||
         projectIds.some((id) => !this.projects.some((project) => project.id === id))) {
       throw new Error("Choose distinct configured repositories.");
@@ -841,7 +866,7 @@ export class WorkspaceRuntime {
             existing.text = item.text;
             delete existing.state;
           } else {
-            session.agent.messages.push({ ...message("assistant", item.text), providerItemId: item.id });
+            session.agent.messages.push({ ...message("assistant", item.text, undefined, null), providerItemId: item.id });
           }
         }
         session.agent.messages.push(message("system", "Codex confirmed that the interrupted turn completed.", "success"));
@@ -1155,7 +1180,7 @@ export class WorkspaceRuntime {
       this.trackUsage((usage) => usage.registerThread(threadId, false, session.agent.id));
       for (const turn of thread.turns ?? []) {
         for (const item of turn.items ?? []) {
-          if (item.type === "agentMessage" && typeof item.text === "string") this.recordNativeReply(session, item.id, item.text);
+          if (item.type === "agentMessage" && typeof item.text === "string") this.recordNativeReply(session, item.id, item.text, null);
         }
       }
       if (thread.status?.type === "active") session.agent.status = "working";
@@ -1170,14 +1195,14 @@ export class WorkspaceRuntime {
     }
   }
 
-  private recordNativeReply(session: AgentSession, itemId: string | undefined, text: string) {
+  private recordNativeReply(session: AgentSession, itemId: string | undefined, text: string, createdAt?: number | null) {
     const existing = itemId && session.agent.messages.find((entry) => entry.providerItemId === itemId);
     if (existing) {
       existing.text = text;
       delete existing.state;
       session.stream.delete(itemId);
     } else {
-      session.agent.messages.push({ ...message("assistant", text), providerItemId: itemId });
+      session.agent.messages.push({ ...message("assistant", text, undefined, createdAt), providerItemId: itemId });
     }
   }
 

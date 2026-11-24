@@ -1,11 +1,12 @@
+import { OrbitSpinner } from "./workspace-orbit-spinner.tsx";
 import { needsUserInput } from "./workspace-status.ts";
 import { agentAppearance } from "./workspace-agent-appearance.ts";
 import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { FormEvent, KeyboardEvent, PointerEvent } from "react";
 import Markdown from "react-markdown";
 import type { Components } from "react-markdown";
-import { LuEllipsis, LuLoaderCircle, LuMessageSquareX } from "react-icons/lu";
-import type { SystemMessageKind, WorkspaceAgent } from "./workspace-runtime.ts";
+import { LuArrowUp, LuCheck, LuCopy, LuEllipsis, LuSquare } from "react-icons/lu";
+import type { SystemMessageKind, WorkspaceAgent, WorkspaceMessage } from "./workspace-runtime.ts";
 
 import "./workspace-chat.css";
 
@@ -32,6 +33,7 @@ type ChatProps = {
   onResumeQueue?: () => Promise<void>;
   onClose: () => void;
   onOpenAgent?: (id: string) => void;
+  onRename?: (name: string) => Promise<void>;
   onLifecycle?: (action: "archive" | "restore" | "delete") => void;
   disabled?: boolean;
   disabledReason?: string;
@@ -66,9 +68,44 @@ const markdownComponents: Components = {
   },
 };
 
+const messageTime = new Intl.DateTimeFormat(undefined, { hour: "numeric", minute: "2-digit" });
+
+function MessageActions({ message }: { message: WorkspaceMessage }) {
+  const [copyStatus, setCopyStatus] = useState<"copied" | "failed">();
+  const reset = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  useEffect(() => () => clearTimeout(reset.current), []);
+
+  async function copy() {
+    try {
+      await navigator.clipboard.writeText(message.text);
+      setCopyStatus("copied");
+    } catch {
+      setCopyStatus("failed");
+    }
+    clearTimeout(reset.current);
+    reset.current = setTimeout(() => setCopyStatus(undefined), 2000);
+  }
+
+  const time = message.createdAt === undefined ? undefined : new Date(message.createdAt);
+  const copyLabel = copyStatus === "copied" ? "Copied" : "Copy message";
+  return (
+    <footer className="chat-message-actions">
+      {time && Number.isFinite(time.getTime()) &&
+        <time dateTime={time.toISOString()} title={time.toLocaleString()}>{messageTime.format(time)}</time>}
+      <button type="button" className="chat-icon-button" aria-label={copyLabel}
+        title={copyLabel} onClick={() => void copy()}>
+        {copyStatus === "copied" ? <LuCheck aria-hidden="true" /> : <LuCopy aria-hidden="true" />}
+      </button>
+      <span role="status" className={copyStatus === "copied" ? "chat-copy-announcement" : undefined}>
+        {copyStatus === "failed" ? "Could not copy" : copyStatus === "copied" ? "Copied" : ""}
+      </span>
+    </footer>
+  );
+}
+
 function Conversation({
   agent, projectLabel, repositoryScope, delivery, taskPhase, taskDetail, modelLabel, usageLabel, draft: initialDraft, composerHeight, onComposerHeightChange, onDraftInput, onDraftChange, onSend, onSteer, onCancel, onResumeQueue, onApproveImplementation, onClose,
-  disabled, disabledReason, focusMessageId, focusRequest, onOpenAgent, onLifecycle,
+  disabled, disabledReason, focusMessageId, focusRequest, onOpenAgent, onLifecycle, onRename,
 }: ChatProps) {
   const transcript = useRef<HTMLDivElement>(null);
   const actions = useRef<HTMLDivElement>(null);
@@ -123,12 +160,54 @@ function Conversation({
   const draftTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const mounted = useRef(true);
   draftChangeRef.current = onDraftChange;
+  const [steerEnabled, setSteerEnabled] = useState(false);
   const [sending, setSending] = useState(false);
   const [cancelling, setCancelling] = useState(false);
   const [resumingQueue, setResumingQueue] = useState(false);
   const [approvingImplementation, setApprovingImplementation] = useState(false);
   const [error, setError] = useState("");
   const { displayName } = agentAppearance(agent);
+  const title = useRef<HTMLHeadingElement>(null);
+  const renameInput = useRef<HTMLInputElement>(null);
+  const renameErrorId = useId();
+  const [nameDraft, setNameDraft] = useState<string | null>(null);
+  const [renameError, setRenameError] = useState("");
+  const [renaming, setRenaming] = useState(false);
+
+  const editingName = nameDraft !== null;
+  useLayoutEffect(() => {
+    if (editingName) {
+      renameInput.current?.focus();
+      renameInput.current?.select();
+    }
+  }, [editingName]);
+
+  function closeRename() {
+    setNameDraft(null);
+    setRenameError("");
+    requestAnimationFrame(() => title.current?.focus());
+  }
+
+  async function rename(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const name = nameDraft?.trim();
+    if (!onRename || !name || renaming || agent.lifecycleBusy) return;
+    setRenaming(true);
+    setRenameError("");
+    try {
+      await onRename(name);
+      closeRename();
+    } catch (failure) {
+      const detail = failure instanceof Error ? failure.message : "The task could not be renamed.";
+      setRenameError(detail === "Invalid workspace command"
+        ? "Restart Orchestra to load the server version that supports renaming."
+        : detail);
+      renameInput.current?.focus();
+    } finally {
+      setRenaming(false);
+    }
+  }
+
   const recipient = `${projectLabel ? `${projectLabel} / ` : ""}${displayName}`;
   const archived = agent.archivedAt !== undefined;
   const blocked = Boolean(disabled || archived || agent.lifecycleBusy || agent.nativeChild);
@@ -175,7 +254,7 @@ function Conversation({
     const height = chat.current?.clientHeight ?? 0;
     const header = chat.current?.querySelector<HTMLElement>(".chat-header")?.offsetHeight ?? 51;
     const max = Math.max(0, Math.min(height * 0.65, height - header - 64));
-    return { min: Math.min(80, max), max };
+    return { min: Math.min(136, max), max };
   }
 
   function updateDivider() {
@@ -318,9 +397,11 @@ function Conversation({
     }
   }
 
+  const steerAction = steerEnabled && agent.canSteer ? onSteer : undefined;
+
   function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    void send(onSend);
+    if (!showWorkingIndicator) void send(onSend);
   }
 
   async function resumeQueue() {
@@ -352,7 +433,7 @@ function Conversation({
   function handleComposerKey(event: KeyboardEvent<HTMLTextAreaElement>) {
     if (event.key !== "Enter" || event.shiftKey || event.nativeEvent.isComposing) return;
     event.preventDefault();
-    void send(onSend);
+    void send(steerAction ?? onSend);
   }
 
   const approveImplementation = useCallback(async (requestId: string) => {
@@ -408,6 +489,7 @@ function Conversation({
                   </button>
                 )}
               </div>
+              <MessageActions message={message} />
             </article>
           );
         }), [agent.messages, agent.canCancel, agent.queueDepth, approveImplementation, approvingImplementation, archived, blocked, hiddenMessages, onApproveImplementation]);
@@ -428,16 +510,33 @@ function Conversation({
     <section ref={chat} className="workspace-chat" aria-label={`${recipient} chat`}>
       <header className="chat-header">
         <div className="chat-header-copy">
-          <h2 className="chat-agent-title" tabIndex={0} aria-describedby={agentTooltipId}>
-            <span className="chat-agent-name">{displayName}</span>
-            <span className="chat-agent-divider" aria-hidden="true">|</span>
-            <span className="chat-agent-status" data-status={headerTone}>{headerStatus.toLowerCase()}</span>
-            {(headerTone === "working" || (!archived && agent.canCancel)) && <LuLoaderCircle className="chat-working-spinner" aria-hidden="true" />}
-          </h2>
-          <div className="chat-agent-tooltip" id={agentTooltipId} role="tooltip">
-            <strong>{displayName}</strong>
-            {nameTooltip && <span>{nameTooltip}</span>}
-          </div>
+          {nameDraft !== null ? (
+            <form className="chat-rename" onSubmit={rename} onKeyDown={(event) => {
+              if (event.key !== "Escape" || event.nativeEvent.isComposing) return;
+              event.stopPropagation();
+              if (!renaming) closeRename();
+            }}>
+              <input ref={renameInput} aria-label="Agent name" value={nameDraft} maxLength={60} required
+                aria-invalid={Boolean(renameError)} aria-describedby={renameError ? renameErrorId : undefined}
+                readOnly={renaming} onChange={(event) => {
+                  setNameDraft(event.target.value);
+                  setRenameError("");
+                }} />
+              <button type="submit" disabled={!nameDraft.trim() || renaming || agent.lifecycleBusy}>Save</button>
+              <button type="button" disabled={renaming} onClick={closeRename}>Cancel</button>
+              {renameError && <span className="chat-rename-error" id={renameErrorId} role="alert">{renameError}</span>}
+            </form>
+          ) : <>
+            <h2 ref={title} className="chat-agent-title" tabIndex={0} aria-describedby={agentTooltipId}>
+              <span className="chat-agent-name">{displayName}</span>
+              <span className="chat-agent-divider" aria-hidden="true">|</span>
+              <span className="chat-agent-status" data-status={headerTone}>{headerStatus.toLowerCase()}</span>
+            </h2>
+            <div className="chat-agent-tooltip" id={agentTooltipId} role="tooltip">
+              <strong>{displayName}</strong>
+              {nameTooltip && <span>{nameTooltip}</span>}
+            </div>
+          </>}
         </div>
         <div ref={actions} className="chat-lifecycle-menu">
           <button ref={actionsButton} className="interface-icon-button" type="button" aria-label="More actions"
@@ -446,14 +545,18 @@ function Conversation({
             <LuEllipsis aria-hidden="true" strokeWidth={1.5} />
           </button>
           <div id={actionsId} hidden={!actionsOpen}>
-            <button type="button" className="interface-icon-button" aria-label="Clear chat" title="Clear chat" onClick={() => {
+            {onRename && <button type="button" disabled={agent.lifecycleBusy || editingName} onClick={() => {
+              setActionsOpen(false);
+              setNameDraft(agent.name);
+            }}>Rename</button>}
+            <button type="button" onClick={() => {
               setActionsOpen(false);
               actionsButton.current?.focus();
               setHiddenMessages(new Set(agent.messages
                 .filter((message) => !needsUserInput(message))
                 .map((message) => message.id)));
               pinToBottom.current = true;
-            }}><LuMessageSquareX aria-hidden="true" strokeWidth={1.5} /></button>
+            }}>Clear chat</button>
             {onLifecycle && <>
               <button type="button" disabled={agent.lifecycleBusy} onClick={() => {
                 setActionsOpen(false);
@@ -471,31 +574,12 @@ function Conversation({
           <span aria-hidden="true">×</span>
         </button>
       </header>
-      {delivery && <details className="chat-delivery">
-        <summary>Delivery snapshots · Ready for review</summary>
-        <ul>
-          {delivery.members.map(({ projectId, path, revision }) => <li key={projectId}>
-            <label>{projectId}<input aria-label={`${projectId} candidate worktree`} value={path} readOnly
-              onFocus={(event) => event.currentTarget.select()} /></label>
-            {revision && <label>Revision<input aria-label={`${projectId} candidate revision`} value={revision} readOnly
-              onFocus={(event) => event.currentTarget.select()} /></label>}
-          </li>)}
-        </ul>
-        {delivery.taskChecks && <p className="chat-delivery-checks">Checks: {delivery.taskChecks}</p>}
-        <p>Review and merge each repository separately.</p>
-      </details>}
-
       {agent.nativeChild && <div className="chat-native-child">
         <span>Read-only subagent transcript.</span>
         {agent.parentId && <button className="chat-steer" type="button"
           onClick={() => onOpenAgent?.(agent.parentId!)}>Open parent conversation</button>}
       </div>}
-      {taskDetail && <p className="chat-task-detail" role="status">{taskDetail}</p>}
       {archived && <p className="chat-archive-notice">Archived {new Date(agent.archivedAt!).toLocaleString()}. Restore to continue this conversation.</p>}
-      {showWorkingIndicator && <div className="chat-working-indicator" role="status" aria-live="polite">
-        <LuLoaderCircle className="chat-working-spinner" aria-hidden="true" />
-        <span>{displayName} is working…</span>
-      </div>}
       <div className="chat-transcript-wrap">
         <div className="chat-transcript" role="log" aria-label={`Conversation with ${recipient}`} aria-relevant="additions"
           ref={transcript} onScroll={(event) => {
@@ -507,6 +591,20 @@ function Conversation({
             </p>
           ) : null}
           {messageElements}
+          {taskDetail && !shownInConversation(taskDetail) && <p className="chat-task-detail" role="status">{taskDetail}</p>}
+          {delivery && <details className="chat-delivery">
+            <summary>Delivery snapshots · Ready for review</summary>
+            <ul>
+              {delivery.members.map(({ projectId, path, revision }) => <li key={projectId}>
+                <label>{projectId}<input aria-label={`${projectId} candidate worktree`} value={path} readOnly
+                  onFocus={(event) => event.currentTarget.select()} /></label>
+                {revision && <label>Revision<input aria-label={`${projectId} candidate revision`} value={revision} readOnly
+                  onFocus={(event) => event.currentTarget.select()} /></label>}
+              </li>)}
+            </ul>
+            {delivery.taskChecks && <p className="chat-delivery-checks">Checks: {delivery.taskChecks}</p>}
+            <p>Review and merge each repository separately.</p>
+          </details>}
         </div>
         {showJumpToLatest && <button className="chat-jump-latest" type="button" onClick={scrollToLatest}
           aria-label="Jump to latest message" title="Jump to latest message">
@@ -520,9 +618,10 @@ function Conversation({
         onPointerDown={startComposerResize} onPointerMove={moveComposerResize} onPointerUp={endComposerResize}
         onPointerCancel={endComposerResize} onLostPointerCapture={endComposerResize} onKeyDown={composerResizeKey} />
       <form id={composerId} ref={composer} className="chat-composer" style={{ height: composerHeight }} onSubmit={submit}>
-        {agent.queueDepth > 0 || agent.status === "working" ? (
+        {agent.queueDepth > 0 || showWorkingIndicator ? (
           <div className="chat-queue" aria-live="polite">
-            {agent.queueDepth > 0 ? `${agent.queueDepth} queued${agent.queuePaused ? " · paused" : ""}` : "Agent is working — new messages will queue."}
+            {showWorkingIndicator && <OrbitSpinner />}
+            {agent.queueDepth > 0 ? `${agent.queueDepth} queued${agent.queuePaused ? " · paused" : ""}` : steerAction ? "Agent is working — sending will steer the current turn." : "Agent is working — new messages will queue."}
             {agent.queuePaused && onResumeQueue && <button className="chat-steer" type="button"
               disabled={blocked || resumingQueue} onClick={() => void resumeQueue()}>Resume queue</button>}
           </div>
@@ -530,19 +629,34 @@ function Conversation({
         {blocked && disabledReason && !shownInConversation(disabledReason) ? <p className="chat-disabled">{disabledReason}</p> : null}
         {error && !shownInConversation(error) ? <p className="chat-error" role="alert">{error}</p> : null}
         <div className="chat-composer-box">
-          <span className="chat-input-prompt" aria-hidden="true">&gt;</span>
-          <textarea aria-label={`Message ${recipient}`}
-            placeholder={repositoryScope?.length ? "Ask a question or describe a change" : undefined} rows={3} disabled={Boolean(agent.lifecycleBusy)}
-            value={draft} onChange={(event) => updateDraft(event.target.value)} onBlur={flushDraft} onKeyDown={handleComposerKey} />
+          <div className="chat-composer-input">
+            <span className="chat-input-prompt" aria-hidden="true">&gt;</span>
+            <textarea aria-label={`Message ${recipient}`} enterKeyHint="send"
+              placeholder={repositoryScope?.length ? "Ask a question or describe a change" : "Message the agent"} rows={2}
+              disabled={Boolean(agent.lifecycleBusy)} value={draft}
+              onChange={(event) => updateDraft(event.target.value)} onBlur={flushDraft} onKeyDown={handleComposerKey} />
+          </div>
+          <div className="chat-composer-actions">
+            {onSteer && <label className="chat-steer-toggle">
+              <input type="checkbox" role="switch" aria-label="Steer active turn" checked={steerEnabled}
+                onChange={(event) => setSteerEnabled(event.target.checked)} />
+              <span aria-hidden="true">{steerEnabled ? "Steer" : "Queue"}</span>
+            </label>}
+            {showWorkingIndicator ? (
+              <button className="chat-send-button" type="button" disabled={blocked || cancelling || !agent.canCancel || !onCancel}
+                aria-label={cancelling ? "Stopping current turn" : "Stop current turn"}
+                title={cancelling ? "Stopping current turn" : "Stop current turn"}
+                onClick={() => void cancelTurn()}>
+                <LuSquare className="chat-stop-icon" fill="currentColor" strokeWidth={1.5} aria-hidden="true" />
+              </button>
+            ) : (
+              <button className="chat-send-button" type="submit" disabled={!readyToSend}
+                aria-label="Send message" title="Send message">
+                <LuArrowUp strokeWidth={1.5} aria-hidden="true" />
+              </button>
+            )}
+          </div>
         </div>
-        {agent.canSteer && onSteer ? (
-          <button className="chat-steer" type="button" disabled={!readyToSend}
-            onClick={() => void send(onSteer)}>Steer current turn</button>
-        ) : null}
-        {agent.canCancel && onCancel ? (
-          <button className="chat-steer" type="button" disabled={blocked || cancelling}
-            onClick={() => void cancelTurn()}>{cancelling ? "Stopping…" : "Stop current turn"}</button>
-        ) : null}
       </form>
       </>}
     </section>

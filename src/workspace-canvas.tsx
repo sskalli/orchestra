@@ -1,7 +1,8 @@
+import { OrbitSpinner } from "./workspace-orbit-spinner.tsx";
 import { agentAppearance } from "./workspace-agent-appearance.ts";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties, KeyboardEvent, PointerEvent, RefObject } from "react";
-import { LuCircleAlert, LuCircleCheck, LuInfo, LuLoaderCircle, LuTriangleAlert } from "react-icons/lu";
+import { LuCircleAlert, LuCircleCheck, LuInfo, LuTriangleAlert } from "react-icons/lu";
 import type { IconType } from "react-icons";
 import type { Camera } from "./workspace-preferences.ts";
 import type { AgentSignal } from "./workspace-runtime.ts";
@@ -126,7 +127,7 @@ function pair(points: Map<number, Point>): Pinch | null {
 }
 
 const statuses: Partial<Record<string, { label: string; Icon: IconType }>> = {
-  working: { label: "Working", Icon: LuLoaderCircle },
+  working: { label: "Working", Icon: OrbitSpinner },
   attention: { label: "Needs attention", Icon: LuTriangleAlert },
   "awaiting-confirmation": { label: "Awaiting confirmation", Icon: LuInfo },
   done: { label: "Complete", Icon: LuCircleCheck },
