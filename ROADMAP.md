@@ -2,7 +2,8 @@
 
 ## Working today
 
-- Direct Codex sessions with optional repository scope and native child transcripts.
+- Direct Codex and Claude sessions with optional repository scope and native child transcripts.
+- One `orchestra codex|claude` launcher with sign-in checks and automatic ports.
 - Same-thread planning and approved implementation with isolated, pinned delivery.
 - Multi-repository workspaces, an agent map, and an inbox linked to task conversations.
 - Persistent product questions, restart recovery, queueing, and observable token usage.
@@ -16,3 +17,4 @@ See [WORKSPACE.md](WORKSPACE.md) for launch and recovery details.
 3. Verify the native delegation and delivery behavior needed for larger workstreams.
 4. Evaluate cross-workspace attention, roadmap dependencies, and GitLab intake.
 5. Consider desktop packaging and explicit shutdown behavior.
+6. Choose the engine per task within one workspace.

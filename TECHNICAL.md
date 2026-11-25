@@ -1,6 +1,6 @@
 # Technical design
 
-Orchestra runs a local TypeScript server and a React browser UI. The server owns configured repositories, session identities, queues, isolated worktrees, pinned delivery revisions, and persistent task data. Codex App Server executes turns and owns its native child threads.
+Orchestra runs a local TypeScript server and a React browser UI. The server owns configured repositories, session identities, queues, isolated worktrees, pinned delivery revisions, and persistent task data. Codex App Server executes turns and owns its native child threads. A Claude engine presents Claude Agent SDK sessions through the same App Server protocol subset. A thread is one Claude Code session, and a turn is one query over streamed input that also carries steering messages. Orchestra's workspace tools are an in-process MCP server. Claude permission prompts become the same approval requests. Subagent tasks become native child threads. A local journal records thread and turn outcomes for restart recovery.
 
 ## Sessions
 

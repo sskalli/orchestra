@@ -1,6 +1,6 @@
 # Orchestra product spec
 
-Orchestra is a local workspace for working with multiple Codex tasks. Group related repos in a workspace. Start independent sessions from the map and use the inbox to find the tasks that need your attention.
+Orchestra is a local workspace for working with multiple Codex or Claude tasks. Each launch uses one engine, and a user can run both side by side. Group related repos in a workspace. Start independent sessions from the map and use the inbox to find the tasks that need your attention.
 
 ## Workspace
 
@@ -10,7 +10,7 @@ Top-level tasks have large nodes. Native children appear on successive rings as 
 
 ## Task sessions
 
-A session can handle a general conversation, a read-only investigation, or work across one or more repositories. Keep planning, user decisions, delivery, and follow-up in the same task chat. The session can delegate through Codex and report results from its children. Child chats are available for inspection.
+A session can handle a general conversation, a read-only investigation, or work across one or more repositories. Keep planning, user decisions, delivery, and follow-up in the same task chat. The session can delegate through its engine's subagents and report results from its children. Child chats are available for inspection.
 
 Explicit implementation approval lets a task edit the selected repositories in isolated worktrees by default. The user can approve a configured checkout or a requested linked worktree for a specific repository. Show which scope the approval grants. Record verification against the exact edited contents and show pinned revisions for isolated changes that still need integration.
 

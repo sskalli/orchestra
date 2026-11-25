@@ -6,7 +6,8 @@ import { randomUUID } from "node:crypto";
 import { realpathSync } from "node:fs";
 import { basename, isAbsolute, relative, resolve, sep } from "node:path";
 import { tmpdir } from "node:os";
-import { AppServer, safeError } from "./app-server.ts";
+import { AppServer, codexCommand, safeError, type ProviderServer } from "./app-server.ts";
+import { ClaudeAppServer, claudeProviderId } from "./claude-app-server.ts";
 import type { Event, Id, Thread, Turn } from "./app-server.ts";
 import { createFeatureWorktree, removeFeatureWorktree } from "./workspace-worktree.ts";
 import { fingerprintCandidate, fingerprintCheckout, fingerprintMemberSnapshots, hasWorktreeChanges, pinApprovedCandidate, pinDirectCandidates, validateCandidateWorktree, type IntegrationMember } from "./workspace-integration.ts";
@@ -75,7 +76,7 @@ export type WorkspaceAgent = {
   lifecycleBusy?: boolean;
   lifecycleBlockedReason?: string;
 };
-export type WorkspaceProvider = "codex";
+export type WorkspaceProvider = "codex" | "claude";
 export type WorkspaceSnapshot = {
   project: { name: string; path: string };
   modelProvider: string;
@@ -137,7 +138,8 @@ const taskToolVersion = 16;
 const legacyScopedImplementationPrefix = "Request implementation targets: ";
 const legacyImplementationRequestPrefix = "Request implementation: ";
 const legacyQuestionResolutionPrefix = "Resolve product question: ";
-const unresolvedSubagentPrefix = "Codex subagent activity is unresolved. ";
+const unresolvedSubagentPrefix = "Subagent activity is unresolved. ";
+const legacyUnresolvedSubagentPrefix = "Codex subagent activity is unresolved. ";
 const workspaceThreadConfig = { "features.multi_agent": true, "features.multi_agent_v2": true };
 const input = (text: string) => [{ type: "text", text, text_elements: [] }];
 const hasSubmittedMessage = (agent: WorkspaceAgent) =>
@@ -276,17 +278,24 @@ export class WorkspaceRuntime {
   private readonly threadSessions = new Map<string, AgentSession>();
   private readonly listeners = new Set<(snapshot: WorkspaceSnapshot) => void>();
   private readonly signalListeners = new Set<(signal: AgentSignal) => void>();
-  private server?: AppServer;
+  private server?: ProviderServer;
+  private readonly engine: WorkspaceProvider;
+  private readonly engineName: string;
   private usage?: WorkspaceUsage;
   private usageIssue?: string;
   private started = false;
   private closed = false;
 
-  constructor({ cwd, projects = [defaultProject(cwd)], demo = false, modelProvider = "openai", store }: {
+  private readonly createServer?: () => ProviderServer;
+
+  constructor({ cwd, projects = [defaultProject(cwd)], demo = false, modelProvider = "openai", engine = "codex", store, createServer }: {
     cwd: string;
     projects?: WorkspaceProject[];
     demo?: boolean;
     modelProvider?: string;
+    engine?: WorkspaceProvider;
+    /** Replaces the provider connection, for tests. */
+    createServer?: () => ProviderServer;
     store?: ReturnType<typeof workspaceStore>;
   }) {
     if (!projects.length || new Set(projects.map((project) => project.id)).size !== projects.length ||
@@ -297,14 +306,17 @@ export class WorkspaceRuntime {
       .sort((a, b) => a.id.localeCompare(b.id));
     const path = this.projects[0].path;
     this.demo = demo;
-    this.providerId = modelProvider;
+    this.engine = engine;
+    this.createServer = createServer;
+    this.engineName = engine === "claude" ? "Claude" : "Codex";
+    this.providerId = engine === "claude" ? claudeProviderId : modelProvider;
     this.store = demo ? undefined : store;
     this.state = {
       project: { name: this.projects.length === 1 ? basename(path) : "Workspace", path },
       projects: this.projects,
       workspaceKey: workspaceIdentity(this.projects),
       modelProvider,
-      provider: { name: "codex", state: demo ? "demo" : "connecting" },
+      provider: { name: engine, state: demo ? "demo" : "connecting" },
       agents: [],
     };
     if (demo) this.seedDemo();
@@ -381,7 +393,9 @@ export class WorkspaceRuntime {
     } catch {
       this.usageIssue = "Usage tracking is unavailable because its local records could not be read.";
     }
-    const server = new AppServer(this.state.project.path);
+    const server: ProviderServer = this.createServer?.() ?? (this.engine === "claude"
+      ? new ClaudeAppServer(this.store?.claudeJournalPath)
+      : new AppServer(this.state.project.path));
     this.server = server;
     server.onEvent = (event) => this.onEvent(event);
     server.onRequest = (event) => this.onRequest(event);
@@ -405,7 +419,7 @@ export class WorkspaceRuntime {
       if (this.providerId === "openai") {
         const { account } = await server.call<{ account?: { type: string } }>("account/read", { refreshToken: false });
         if (account?.type !== "chatgpt") {
-          this.setProvider("signed-out", "Sign in to Codex with ChatGPT, then restart the workspace.");
+          this.setProvider("signed-out", `Sign in to ${this.engineName} with ChatGPT: run \`${codexCommand()} login\`, then restart the workspace.`);
           this.publish();
           return;
         }
@@ -458,7 +472,7 @@ export class WorkspaceRuntime {
     if (command.type === "createTask") return this.createDirectTask(command.name, command.projectIds);
     const session = this.sessions.get(command.agentId);
     if (!session) throw new Error("This conversation no longer exists.");
-    if (session.agent.nativeChild) throw new Error("Use the owning task to interact with this Codex subagent.");
+    if (session.agent.nativeChild) throw new Error(`Use the owning task to interact with this ${this.engineName} subagent.`);
     if (command.type === "rename") {
       this.renameTask(session, command.name);
       return;
@@ -487,7 +501,7 @@ export class WorkspaceRuntime {
     if (!this.available || session.agent.unavailableReason) {
       throw new Error(session.agent.unavailableReason ?? this.state.provider.message ?? "The provider is unavailable.");
     }
-    if (!this.demo && !session.threadId) throw new Error("This Codex conversation is still opening or failed to open.");
+    if (!this.demo && !session.threadId) throw new Error(`This ${this.engineName} conversation is still opening or failed to open.`);
     if (command.type === "resumeQueue") {
       if (!session.agent.queuePaused || !session.queue.length || session.run) throw new Error("There is no paused queue to resume.");
       session.agent.queuePaused = false;
@@ -564,7 +578,7 @@ export class WorkspaceRuntime {
 
   private async createDirectTask(name: string, projectIds: string[]) {
     if (!this.available || this.demo || this.storageFailed) {
-      throw new Error("Codex must be ready to create a task.");
+      throw new Error(`${this.engineName} must be ready to create a task.`);
     }
     const title = this.taskName(name);
     if (!Array.isArray(projectIds) || new Set(projectIds).size !== projectIds.length ||
@@ -594,14 +608,14 @@ export class WorkspaceRuntime {
     const task = session.agent.directTask;
     if (!task?.projectIds.length) throw new Error("Choose at least one repository for an implementation task.");
     if (!this.available || this.storageFailed || !session.threadId || session.agent.unavailableReason) {
-      throw new Error("This Codex task is unavailable.");
+      throw new Error(`This ${this.engineName} task is unavailable.`);
     }
     if (session.run || session.opening || session.recovery || session.queue.length ||
         task.phase === "implementing") {
       throw new Error("Wait for the task to finish its current turn before approving implementation.");
     }
     if (this.hasRunningNativeChildren(session)) {
-      throw new Error("Wait for this task's Codex subagents to finish before approving implementation.");
+      throw new Error(`Wait for this task's ${this.engineName} subagents to finish before approving implementation.`);
     }
     if (session.agent.messages.some((entry) => entry.productQuestion?.status === "pending")) {
       throw new Error("Answer the pending product questions before approving implementation.");
@@ -774,7 +788,7 @@ export class WorkspaceRuntime {
     const task = session.agent.directTask!;
     try {
       if (detail) throw new Error(detail);
-      if (this.hasRunningNativeChildren(session)) throw new Error("A Codex subagent is still running. Wait for it to finish and verify the candidate again.");
+      if (this.hasRunningNativeChildren(session)) throw new Error(`A ${this.engineName} subagent is still running. Wait for it to finish and verify the candidate again.`);
       if (check?.outcome !== "passed") throw new Error(check?.summary ?? "No passing verification was recorded for this turn.");
       const members = this.implementationMembers(roots);
       if (fingerprintMemberSnapshots(members) !== check.candidateFingerprint) {
@@ -861,7 +875,7 @@ export class WorkspaceRuntime {
 
   private hasRunningNativeChildren(root: AgentSession) {
     return this.subtree(root).some(({ agent }) => agent.nativeChild && !agent.archivedAt &&
-      (agent.status === "working" || agent.unavailableReason?.startsWith(unresolvedSubagentPrefix)));
+      (agent.status === "working" || (agent.unavailableReason?.startsWith(unresolvedSubagentPrefix) || agent.unavailableReason?.startsWith(legacyUnresolvedSubagentPrefix))));
   }
 
   private async lifecycle(root: AgentSession, command: Extract<WorkspaceCommand, { type: "archive" }> | { type: "restore" | "delete"; agentId: string }) {
@@ -876,7 +890,7 @@ export class WorkspaceRuntime {
       throw new Error("This task has unresolved provider work. Restart and reconcile it before archiving or deleting.");
     }
     if (command.type !== "restore" && affected.some((entry) => entry.agent.nativeChild && entry.agent.status === "working")) {
-      throw new Error("Wait for the Codex subagents to finish before archiving or deleting this task.");
+      throw new Error(`Wait for the ${this.engineName} subagents to finish before archiving or deleting this task.`);
     }
     const running = affected.filter((entry) => entry.run || entry.agent.status === "working");
     if (command.type === "delete" && running.length) {
@@ -1149,18 +1163,18 @@ export class WorkspaceRuntime {
       });
       const { thread, modelProvider, initialTurnsPage } = response;
       if (thread.id !== threadId || modelProvider !== this.providerId || this.threadSessions.has(thread.id)) {
-        throw new Error("Codex returned an unexpected saved thread.");
+        throw new Error(`${this.engineName} returned an unexpected saved thread.`);
       }
       const turns = initialTurnsPage?.data ?? thread.turns;
       const turn = run?.turnId && turns?.find((entry) => entry.id === run.turnId);
       const unacknowledged = run && !run.turnId;
       if (thread.status?.type === "active" || turn && turn.status === "inProgress" ||
           unacknowledged && turns?.some(({ status }) => status === "inProgress")) {
-        throw new Error("Codex still reports an active turn. Check again after restarting the workspace.");
+        throw new Error(`${this.engineName} still reports an active turn. Check again after restarting the workspace.`);
       }
       const idleWithoutTurnId = unacknowledged && thread.status?.type === "idle";
       if (run && !idleWithoutTurnId && (!turn || !["completed", "failed", "interrupted"].includes(turn.status))) {
-        throw new Error("Codex has not confirmed the outcome of the saved turn. Restart Orchestra to check again.");
+        throw new Error(`${this.engineName} has not confirmed the outcome of the saved turn. Restart Orchestra to check again.`);
       }
       this.recordModelSettings(session, settings, response);
       delete session.agent.unavailableReason;
@@ -1172,7 +1186,7 @@ export class WorkspaceRuntime {
         const submitted = session.agent.messages.find(({ id }) => id === run.messageId);
         if (submitted?.answersProductQuestionId) this.reopenProductQuestion(session, submitted);
         session.agent.messages.push(message("system",
-          "Codex reports the conversation is idle but did not confirm whether the previous message ran. Check the conversation and approved destinations before retrying.", "notice"));
+          `${this.engineName} reports the conversation is idle but did not confirm whether the previous message ran. Check the conversation and approved destinations before retrying.`, "notice"));
       }
       if (turn && turn.status === "completed") {
         session.agent.status = session.agent.directTask?.phase === "blocked" ? "error"
@@ -1189,7 +1203,7 @@ export class WorkspaceRuntime {
             session.agent.messages.push({ ...message("assistant", item.text, undefined, null), providerItemId: item.id });
           }
         }
-        session.agent.messages.push(message("system", "Codex confirmed that the interrupted turn completed.", "success"));
+        session.agent.messages.push(message("system", `${this.engineName} confirmed that the interrupted turn completed.`, "success"));
       }
       if (run && turn && (turn.status === "failed" || turn.status === "interrupted")) {
         this.supersedeImplementationRequest(session);
@@ -1203,7 +1217,7 @@ export class WorkspaceRuntime {
     } catch (error) {
       session.agent.unavailableReason = errorText(error);
       session.agent.status = "error";
-      session.agent.messages.push(message("system", `Unable to resume this Codex conversation. ${session.agent.unavailableReason}`, "error"));
+      session.agent.messages.push(message("system", `Unable to resume this ${this.engineName} conversation. ${session.agent.unavailableReason}`, "error"));
     }
   }
 
@@ -1244,7 +1258,7 @@ export class WorkspaceRuntime {
       (roots.length ? "Make planned changes to the selected repositories in a turn explicitly approved for implementation, using the writable destinations listed with that approval. " +
         this.implementationRequestInstructions(session) : "") +
       "When the user directly asks you to change a specific path, or to run something the sandbox blocks, do not stop at the sandbox error or ask the user to change settings. " +
-      "Request the access you need through the normal Codex approval flow: an escalated command, or a permission request for the exact paths, with a one-sentence reason. " +
+      "Request the access you need through the normal approval flow: an escalated command, or a permission request for the exact paths, with a one-sentence reason. " +
       "The user approves or declines each request in the workspace. Request only what the current step needs, and make these requests from this task rather than a subagent. " +
       "Follow the repository instructions. Verify the candidate, call submit_check_result with the actual result, and report blockers concisely.";
   }
@@ -1267,14 +1281,14 @@ export class WorkspaceRuntime {
   }
 
   private selectModelSettings(): ModelSettings {
-    return selectModelSettings(process.env.CODEX_MODEL);
+    return selectModelSettings(this.engine === "claude" ? process.env.CLAUDE_MODEL : process.env.CODEX_MODEL);
   }
 
   private recordModelSettings(session: AgentSession, settings: ModelSettings, response: ReportedModel) {
     const expectedModel = settings.reportedModel ?? settings.requestedModel;
     if (expectedModel && response.model && response.model !== expectedModel) {
       session.agent.messages.push(message("system",
-        `Codex reported model ${response.model} instead of ${expectedModel}. Check the provider configuration if this was unexpected.`, "notice"));
+        `${this.engineName} reported model ${response.model} instead of ${expectedModel}. Check the provider configuration if this was unexpected.`, "notice"));
     }
     session.agent.modelSettings = recordReportedModel(settings, response);
   }
@@ -1294,7 +1308,7 @@ export class WorkspaceRuntime {
       developerInstructions: this.instructions(session),
     });
     const { thread, modelProvider } = response;
-    if (modelProvider !== this.providerId || this.threadSessions.has(thread.id)) throw new Error("Codex returned an unexpected thread.");
+    if (modelProvider !== this.providerId || this.threadSessions.has(thread.id)) throw new Error(`${this.engineName} returned an unexpected thread.`);
     this.recordModelSettings(session, settings, response);
     session.threadId = thread.id;
     this.trackUsage((usage) => usage.registerThread(thread.id, true, session.agent.id));
@@ -1438,7 +1452,7 @@ export class WorkspaceRuntime {
       if (session.run === run) {
         if (errorText(error) === "Timed out calling turn/start") {
           session.agent.queuePaused = true;
-          session.agent.messages.push(message("system", "Codex did not acknowledge this turn in time. It may still be running. Queued messages are paused; wait for a provider update or restart to reconcile before retrying.", "warning"));
+          session.agent.messages.push(message("system", `${this.engineName} did not acknowledge this turn in time. It may still be running. Queued messages are paused; wait for a provider update or restart to reconcile before retrying.`, "warning"));
           this.update(session);
           return;
         }
@@ -1455,7 +1469,7 @@ export class WorkspaceRuntime {
       this.finish(session, false, "The turn was stopped.", true);
       return;
     }
-    if (!run.turn || !session.threadId) throw new Error("Wait for Codex to acknowledge the turn before stopping it.");
+    if (!run.turn || !session.threadId) throw new Error(`Wait for ${this.engineName} to acknowledge the turn before stopping it.`);
     if (run.interrupting) return;
     run.interrupting = true;
     try {
@@ -1482,7 +1496,7 @@ export class WorkspaceRuntime {
       } catch (error) {
         if (errorText(error) === "Timed out calling turn/steer") {
           session.agent.messages.push(message("user", text));
-          session.agent.messages.push(message("system", "Codex did not acknowledge this steering message. It may have received it; avoid resending until the turn result is clear.", "warning"));
+          session.agent.messages.push(message("system", `${this.engineName} did not acknowledge this steering message. It may have received it; avoid resending until the turn result is clear.`, "warning"));
           this.update(session);
           return;
         }
@@ -1539,20 +1553,20 @@ export class WorkspaceRuntime {
     const threadId = session.threadId;
     const parent = session.agent.parentId ? this.sessions.get(session.agent.parentId) : undefined;
     const mayStillBeRunning = session.agent.status === "working" ||
-      session.agent.unavailableReason?.startsWith(unresolvedSubagentPrefix);
+      (session.agent.unavailableReason?.startsWith(unresolvedSubagentPrefix) || session.agent.unavailableReason?.startsWith(legacyUnresolvedSubagentPrefix));
     try {
-      if (!threadId || !parent?.threadId) throw new Error("The parent Codex thread is unavailable.");
+      if (!threadId || !parent?.threadId) throw new Error(`The parent ${this.engineName} thread is unavailable.`);
       const { thread } = await this.server!.call<{ thread: Thread & {
         parentThreadId?: string; status?: { type: string };
         turns?: (Turn & { items?: { id: string; type: string; text?: string }[] })[];
       } }>("thread/read", { threadId, includeTurns: true });
       if (thread.id !== threadId || thread.parentThreadId !== parent.threadId) {
-        throw new Error("Codex reported a different parent for this subagent.");
+        throw new Error(`${this.engineName} reported a different parent for this subagent.`);
       }
       const last = thread.turns?.at(-1);
       if (mayStillBeRunning && thread.status?.type !== "active" && thread.status?.type !== "idle" &&
           (!last || !["completed", "failed", "interrupted"].includes(last.status))) {
-        throw new Error("Codex has not confirmed that the subagent stopped.");
+        throw new Error(`${this.engineName} has not confirmed that the subagent stopped.`);
       }
       this.threadSessions.set(threadId, session);
       this.trackUsage((usage) => usage.registerThread(threadId, false, session.agent.id));
@@ -1591,7 +1605,7 @@ export class WorkspaceRuntime {
     if (!child) {
       const id = `native:${threadId}`;
       if (this.sessions.has(id)) return;
-      child = this.createAgent(id, name || "Codex subagent", "worker", parent.agent.id);
+      child = this.createAgent(id, name || `${this.engineName} subagent`, "worker", parent.agent.id);
       Object.assign(child.agent, { nativeChild: true, projectId: parent.agent.projectId, status: "working" });
       child.threadId = threadId;
       this.threadSessions.set(threadId, child);
@@ -1609,7 +1623,7 @@ export class WorkspaceRuntime {
     if (!item.agentThreadId || !["started", "interacted", "interrupted", "completed"].includes(item.kind ?? "")) return;
     const child = this.registerNativeChild(parent, item.agentThreadId, item.agentNickname, item.model, item.agentRole);
     if (!child) return;
-    if (item.agentPath && child.agent.name === "Codex subagent") child.agent.name = item.agentPath;
+    if (item.agentPath && child.agent.name === `${this.engineName} subagent`) child.agent.name = item.agentPath;
     if (item.kind === "interrupted") child.agent.status = "idle";
     else if (item.kind === "completed" && child.agent.status !== "error") child.agent.status = "done";
     if (completed && (item.kind === "completed" || item.kind === "interrupted")) {
@@ -1647,7 +1661,7 @@ export class WorkspaceRuntime {
     }
     if (method === "error" && !params.willRetry) {
       session.agent.status = "error";
-      session.agent.messages.push(message("system", errorText(params.error?.message ?? params.message ?? "Codex subagent reported an error."), "error"));
+      session.agent.messages.push(message("system", errorText(params.error?.message ?? params.message ?? `${this.engineName} subagent reported an error.`), "error"));
       this.publish();
       return;
     }
@@ -1705,7 +1719,7 @@ export class WorkspaceRuntime {
       return;
     }
     if (method === "error") {
-      const detail = errorText(params.error?.message ?? params.message ?? "Codex reported an error.");
+      const detail = errorText(params.error?.message ?? params.message ?? `${this.engineName} reported an error.`);
       if (/usage.?limit|rate.?limit|quota/i.test(detail)) {
         this.setProvider("usage-limit", detail);
         for (const session of this.sessions.values()) session.agent.canSteer = false;
@@ -1731,7 +1745,7 @@ export class WorkspaceRuntime {
       const cancelled = params.turn.status === "interrupted";
       if (completed && this.state.provider.state === "connecting") this.setProvider("ready");
       else if (!completed && this.state.provider.state === "connecting") {
-        this.setProvider("error", errorText(params.turn.error?.message ?? "Codex connection failed."));
+        this.setProvider("error", errorText(params.turn.error?.message ?? `${this.engineName} connection failed.`));
       }
       if (cancelled) session.agent.queuePaused = session.queue.length > 0;
       const detail = params.turn.error?.message ?? (cancelled ? "The turn was interrupted." : "The turn did not complete.");
@@ -1832,8 +1846,10 @@ export class WorkspaceRuntime {
       // Never ask the user to approve changes they cannot see.
       if ((!files?.length && !grantRoot) || files?.some((path) => unsafeDisplayText.test(path)) ||
           (grantRoot && unsafeDisplayText.test(grantRoot))) return undefined;
+      const offered = Array.isArray(params.availableDecisions) ? params.availableDecisions : ["accept", "acceptForSession", "decline"];
       return {
-        responses: { approve: { decision: "accept" }, approveForSession: { decision: "acceptForSession" }, decline: { decision: "decline" } },
+        responses: { approve: { decision: "accept" }, decline: { decision: "decline" },
+          ...(offered.includes("acceptForSession") ? { approveForSession: { decision: "acceptForSession" } } : {}) },
         view: { kind: "fileChange", reason, ...(files?.length ? { files } : {}), ...(grantRoot ? { writePaths: [grantRoot] } : {}) },
       };
     }
@@ -1904,7 +1920,7 @@ export class WorkspaceRuntime {
     }
     const [id, { message: request, responses }] = pending;
     const chosen = responses[decision];
-    if (!chosen) throw new Error("Codex did not offer that choice for this request.");
+    if (!chosen) throw new Error(`${this.engineName} did not offer that choice for this request.`);
     const approval = request.commandApproval!;
     const granting = decision !== "decline";
     // Save a consumed request before handing it off, without claiming delivery.
@@ -1916,7 +1932,7 @@ export class WorkspaceRuntime {
       this.server!.reply(id, allowed || !granting ? chosen : responses.decline);
     } catch {
       this.publish(false);
-      throw new Error("Orchestra could not confirm that Codex received this decision.");
+      throw new Error(`Orchestra could not confirm that ${this.engineName} received this decision.`);
     }
     approval.status = !saved ? "expired" : allowed ? (decision === "approveForSession" ? "approved-for-session" : "approved")
       : granting ? "expired" : "declined";

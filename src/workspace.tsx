@@ -60,14 +60,15 @@ function WorkspaceUsage({ usage }: { usage: NonNullable<Snapshot["usage"]> }) {
   </details>;
 }
 
-function providerLabel({ state }: Snapshot["provider"]) {
+function providerLabel({ name, state }: Snapshot["provider"]) {
+  const engine = name === "claude" ? "Claude" : "Codex";
   return {
     demo: "Demo mode",
-    connecting: "Connecting to Codex",
-    ready: "Codex connected",
-    "signed-out": "Codex sign-in required",
-    error: "Codex unavailable",
-    "usage-limit": "Codex usage limit",
+    connecting: `Connecting to ${engine}`,
+    ready: `${engine} connected`,
+    "signed-out": `${engine} sign-in required`,
+    error: `${engine} unavailable`,
+    "usage-limit": `${engine} usage limit`,
   }[state];
 }
 
@@ -167,11 +168,11 @@ function Workspace() {
     return <main className="sw-loading"><Mark /><span>Connecting to Orchestra…</span></main>;
   }
 
-  const mode = snapshot.provider.state === "demo" ? "demo" : "codex";
+  const mode = snapshot.provider.state === "demo" ? "demo" : snapshot.provider.name;
   return <WorkspaceView key={JSON.stringify([snapshot.workspaceKey, mode, snapshot.modelProvider])} snapshot={snapshot} connected={connected} mode={mode} signals={signals} />;
 }
 
-function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snapshot; connected: boolean; mode: "demo" | "codex"; signals: AgentSignal[] }) {
+function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snapshot; connected: boolean; mode: "demo" | "codex" | "claude"; signals: AgentSignal[] }) {
   const { project, provider } = snapshot;
   const [storageUnavailable, setStorageUnavailable] = useState(false);
   useEffect(() => {
