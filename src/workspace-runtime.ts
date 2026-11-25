@@ -31,8 +31,23 @@ export type WorkspaceMessage = {
   state?: "queued" | "streaming" | "failed" | "cancelled";
   productQuestion?: { status: "pending" } | { status: "answered"; answerMessageId: string };
   answersProductQuestionId?: string;
-  commandApproval?: { status: "pending" | "approved" | "declined" | "expired" | "unconfirmed"; command: string; cwd: string; reason?: string };
+  commandApproval?: PermissionApproval;
   implementationRequest?: { status: "pending" | "approved" | "superseded"; targets?: WriteTarget[] };
+};
+export type ApprovalChoice = "approve" | "approveForSession" | "decline";
+/** A native Codex permission request. Saved entries without a kind are command approvals. */
+export type PermissionApproval = {
+  status: "pending" | "approved" | "approved-for-session" | "declined" | "expired" | "unconfirmed";
+  kind?: "command" | "fileChange" | "permissions";
+  command?: string;
+  cwd?: string;
+  reason?: string;
+  files?: string[];
+  writePaths?: string[];
+  readPaths?: string[];
+  network?: string;
+  choices?: ApprovalChoice[];
+  declineStopsTurn?: boolean;
 };
 export type WorkspaceAgent = {
   id: string;
@@ -74,7 +89,7 @@ export type AgentSignal = { id: string; senderId: string; recipientId: string };
 export type WorkspaceCommand =
   | { type: "createTask"; name: string; projectIds: string[] }
   | { type: "answerProductQuestion"; agentId: string; questionId: string; text: string }
-  | { type: "resolveCommandApproval"; agentId: string; requestId: string; decision: "approve" | "decline" }
+  | { type: "resolveCommandApproval"; agentId: string; requestId: string; decision: ApprovalChoice }
   | { type: "approveImplementation"; agentId: string; requestId: string }
   | { type: "send" | "steer"; agentId: string; text: string }
   | { type: "resumeQueue" | "cancel" | "restore" | "delete"; agentId: string }
@@ -96,10 +111,13 @@ type Run = {
   turn?: Turn;
   message: WorkspaceMessage;
   check?: CheckResult;
-  commandApprovals?: Map<Id, WorkspaceMessage>;
+  commandApprovals?: Map<Id, { message: WorkspaceMessage; responses: ApprovalResponses }>;
+  fileChanges?: Map<string, string[]>;
   interrupting?: boolean;
   demoTimer?: ReturnType<typeof setTimeout>;
 };
+type ApprovalResponses = { approve?: object; approveForSession?: object; decline: object };
+type ApprovalOffer = { view: Omit<PermissionApproval, "status">; responses: ApprovalResponses };
 type AgentSession = {
   agent: WorkspaceAgent;
   threadId?: string;
@@ -189,6 +207,60 @@ function message(role: WorkspaceMessage["role"], text: string, kind?: SystemMess
 
 function errorText(error: unknown) {
   return safeError(error instanceof Error ? error.message : error);
+}
+
+// Characters that can hide or reorder what the user reviews on an approval card.
+const unsafeDisplayText = /[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u061c\u200b-\u200f\u2028-\u202e\u2060-\u2069\ufeff]/;
+
+function commandDecline(params: Event["params"]) {
+  const decisions = Array.isArray(params.availableDecisions) ? params.availableDecisions : undefined;
+  // "cancel" also interrupts the turn, so prefer "decline" whenever Codex offers it.
+  const stopsTurn = !!decisions && !decisions.includes("decline");
+  return { response: { decision: stopsTurn ? "cancel" : "decline" }, stopsTurn };
+}
+
+/** Lists requested paths for review. Incomplete means the card could not show everything an approval would grant. */
+function permissionPaths(raw: unknown) {
+  const profile = raw && typeof raw === "object" ? raw as Record<string, any> : {};
+  const fileSystem = profile.fileSystem && typeof profile.fileSystem === "object" ? profile.fileSystem : {};
+  let complete = true;
+  const special = (value: any) => {
+    const kind = typeof value === "string" ? value : value?.kind;
+    if (typeof kind !== "string") return undefined;
+    const detail = typeof value?.subpath === "string" ? value.subpath : typeof value?.path === "string" ? value.path : undefined;
+    return detail ? `[${kind}] ${detail}` : `[${kind}]`;
+  };
+  const display = (path: any) => typeof path === "string" ? path
+    : path?.type === "path" && typeof path.path === "string" ? path.path
+    : path?.type === "glob_pattern" && typeof path.pattern === "string" ? path.pattern
+    : path?.type === "special" ? special(path.value) : undefined;
+  const collect = (legacy: unknown, access: string) => {
+    const entries = [
+      ...(Array.isArray(legacy) ? legacy : []),
+      ...(Array.isArray(fileSystem.entries) ? fileSystem.entries.filter((entry: any) => entry?.access === access).map((entry: any) => entry.path) : []),
+    ].map(display);
+    if (entries.some((path) => !path || unsafeDisplayText.test(path)) || entries.length > 100) complete = false;
+    return [...new Set(entries.filter((path): path is string => !!path))].slice(0, 100);
+  };
+  const writePaths = collect(fileSystem.write, "write");
+  const readPaths = collect(fileSystem.read, "read");
+  if (Array.isArray(fileSystem.entries) && fileSystem.entries.some((entry: any) => !["read", "write", "deny"].includes(entry?.access))) complete = false;
+  return {
+    complete,
+    paths: { ...(writePaths.length ? { writePaths } : {}), ...(readPaths.length ? { readPaths } : {}) },
+    network: profile.network?.enabled === true,
+  };
+}
+
+function networkHost(context: unknown) {
+  const host = (context as { host?: unknown } | null | undefined)?.host;
+  return typeof host === "string" && host && !unsafeDisplayText.test(host) ? host : undefined;
+}
+
+function approvalSummary(kind: NonNullable<PermissionApproval["kind"]>) {
+  return kind === "fileChange" ? "Permission requested to change files."
+    : kind === "permissions" ? "Permission requested for additional access."
+    : "Permission requested to run a command outside the sandbox.";
 }
 
 export class WorkspaceRuntime {
@@ -1154,7 +1226,7 @@ export class WorkspaceRuntime {
     const roots = this.directTaskReadRoots(session);
     return {
       ...(roots.length ? { runtimeWorkspaceRoots: roots } : { environments: [] }),
-      sandbox: "read-only", approvalPolicy: "never", approvalsReviewer: "user",
+      sandbox: "read-only", approvalPolicy: "on-request", approvalsReviewer: "user",
     };
   }
 
@@ -1169,8 +1241,11 @@ export class WorkspaceRuntime {
       "Plan and discuss by default. Use raise_product_decision if you need the user to choose, then end the turn. " +
       "When orchestra_pending_questions is supplied, use its question IDs and the resolution tool it indicates only if the current user reply answers that question. Leave unrelated questions open. " +
       "Never ask the user to type a trigger phrase to continue implementation. " +
-      "Perform code changes only in a turn explicitly approved for implementation, using the writable destinations listed with that approval. " +
-      (roots.length ? this.implementationRequestInstructions(session) : "") +
+      (roots.length ? "Make planned changes to the selected repositories in a turn explicitly approved for implementation, using the writable destinations listed with that approval. " +
+        this.implementationRequestInstructions(session) : "") +
+      "When the user directly asks you to change a specific path, or to run something the sandbox blocks, do not stop at the sandbox error or ask the user to change settings. " +
+      "Request the access you need through the normal Codex approval flow: an escalated command, or a permission request for the exact paths, with a one-sentence reason. " +
+      "The user approves or declines each request in the workspace. Request only what the current step needs, and make these requests from this task rather than a subagent. " +
       "Follow the repository instructions. Verify the candidate, call submit_check_result with the actual result, and report blockers concisely.";
   }
 
@@ -1305,7 +1380,7 @@ export class WorkspaceRuntime {
       (roots.some(({ mode }) => mode === "checkout")
         ? " Configured checkouts may contain existing user changes. Preserve them and stay on the checked-out branch."
         : "") +
-      " Keep implementation edits in this session. If a verification command is blocked by the sandbox, request one-time command escalation through the shell tool, using the approved checkout as its working directory and explaining why it is needed. Run it from this task rather than a subagent. Wait for any subagents to finish, then run the agreed verification and call submit_check_result with the actual results before ending the turn.";
+      " Keep implementation edits in this session. If a verification command is blocked by the sandbox, request command escalation through the shell tool with a one-sentence reason; the user approves it in the workspace. Run it from this task rather than a subagent. Wait for any subagents to finish, then run the agreed verification and call submit_check_result with the actual results before ending the turn.";
   }
 
   private async begin(session: AgentSession, next: WorkspaceMessage,
@@ -1348,7 +1423,7 @@ export class WorkspaceRuntime {
     try {
       const { turn } = await this.server!.call<{ turn: Turn }>("turn/start", {
         threadId: session.threadId,
-        approvalPolicy: implementation ? "on-request" : "never",
+        approvalPolicy: "on-request",
         ...this.directTaskTurnScope(session, run.implementationRoots),
         input: input(implementation ? this.implementationInput(next.text, implementation.summary, implementation.roots) : this.answerInput(session, next)),
         additionalContext: this.pendingQuestionContext(session, next, implementation !== undefined),
@@ -1597,7 +1672,7 @@ export class WorkspaceRuntime {
   private onEvent({ method, params }: Event) {
     const session = params.threadId ? this.threadSessions.get(params.threadId) : undefined;
     if (method === "serverRequest/resolved" && session?.run && params.requestId !== undefined) {
-      const approval = session.run.commandApprovals?.get(params.requestId)?.commandApproval;
+      const approval = session.run.commandApprovals?.get(params.requestId)?.message.commandApproval;
       if (approval?.status === "pending") {
         approval.status = "expired";
         this.publish();
@@ -1664,6 +1739,13 @@ export class WorkspaceRuntime {
       return;
     }
     if (!session.run.turn || params.turnId !== session.run.turn.id) return;
+    if (method === "item/started" && params.item?.type === "fileChange" && params.item.id && Array.isArray(params.item.changes)) {
+      const files = params.item.changes.map((change) => change?.path);
+      // An unlisted path leaves the request without a reviewable file list, so it is declined.
+      if (files.length <= 200 && files.every((path) => typeof path === "string")) {
+        (session.run.fileChanges ??= new Map()).set(params.item.id, files as string[]);
+      }
+    }
     if (method === "item/agentMessage/delta" && params.itemId) {
       const { delta } = params as typeof params & { delta?: string };
       if (typeof delta !== "string") return;
@@ -1721,81 +1803,131 @@ export class WorkspaceRuntime {
     return request.id;
   }
 
-  private commandCwdAllowed(run: Run, cwd: string) {
-    if (!isAbsolute(cwd)) return false;
-    try {
-      if (realpathSync(cwd) !== cwd) return false;
-      return run.implementationRoots?.some(({ path }) => {
-        if (realpathSync(path) !== path) return false;
-        const offset = relative(path, cwd);
-        return offset !== ".." && !offset.startsWith(".." + sep) && !isAbsolute(offset);
-      }) ?? false;
-    } catch {
-      return false;
+  private approvalOffer(method: string, params: Event["params"], run: Run | undefined): ApprovalOffer | undefined {
+    const reason = typeof params.reason === "string" && params.reason.trim() ? params.reason.trim().slice(0, 2400) : undefined;
+    const cwd = typeof params.cwd === "string" && isAbsolute(params.cwd) ? params.cwd : undefined;
+    if (method === "item/commandExecution/requestApproval") {
+      const { command } = params;
+      if ((params.kind != null && params.kind !== "command") || typeof command !== "string" || !command.trim() ||
+          command.length > 24000 || unsafeDisplayText.test(command) || !cwd) return undefined;
+      // Codex lists the choices it accepts. A sandbox escalation offers accept and cancel without decline.
+      const decisions = Array.isArray(params.availableDecisions) ? params.availableDecisions : ["accept", "decline"];
+      const decline = commandDecline(params);
+      const responses: ApprovalResponses = { decline: decline.response };
+      if (decisions.includes("accept")) responses.approve = { decision: "accept" };
+      if (decisions.includes("acceptForSession")) responses.approveForSession = { decision: "acceptForSession" };
+      if (!responses.approve && !responses.approveForSession) return undefined;
+      const extra = permissionPaths(params.additionalPermissions);
+      if (!extra.complete) return undefined;
+      const network = networkHost(params.networkApprovalContext) ??
+        (extra.network ? "Network access" : undefined);
+      return { responses, view: {
+        kind: "command", command, cwd, reason, ...extra.paths, ...(network ? { network } : {}),
+        ...(decline.stopsTurn ? { declineStopsTurn: true } : {}),
+      } };
     }
+    if (method === "item/fileChange/requestApproval") {
+      const files = params.itemId ? run?.fileChanges?.get(params.itemId) : undefined;
+      const grantRoot = typeof params.grantRoot === "string" && isAbsolute(params.grantRoot) ? params.grantRoot : undefined;
+      // Never ask the user to approve changes they cannot see.
+      if ((!files?.length && !grantRoot) || files?.some((path) => unsafeDisplayText.test(path)) ||
+          (grantRoot && unsafeDisplayText.test(grantRoot))) return undefined;
+      return {
+        responses: { approve: { decision: "accept" }, approveForSession: { decision: "acceptForSession" }, decline: { decision: "decline" } },
+        view: { kind: "fileChange", reason, ...(files?.length ? { files } : {}), ...(grantRoot ? { writePaths: [grantRoot] } : {}) },
+      };
+    }
+    if (method === "item/permissions/requestApproval") {
+      const requested = params.permissions && typeof params.permissions === "object" ? params.permissions as Record<string, unknown> : undefined;
+      if (!requested || !cwd) return undefined;
+      const extra = permissionPaths(requested);
+      if (!extra.complete || (!extra.paths.writePaths && !extra.paths.readPaths && !extra.network)) return undefined;
+      const granted = { ...(requested.fileSystem ? { fileSystem: requested.fileSystem } : {}),
+        ...(requested.network ? { network: requested.network } : {}) };
+      return {
+        responses: {
+          approve: { permissions: granted, scope: "turn" },
+          approveForSession: { permissions: granted, scope: "session" },
+          decline: { permissions: {}, scope: "turn" },
+        },
+        view: { kind: "permissions", cwd, reason, ...extra.paths, ...(extra.network ? { network: "Network access" } : {}) },
+      };
+    }
+    return undefined;
   }
 
-  private receiveCommandApproval(id: Id, session: AgentSession | undefined, params: Event["params"]) {
+  private receiveApproval(id: Id, method: string, session: AgentSession | undefined, params: Event["params"]) {
     const run = session?.run;
     if (run?.commandApprovals?.has(id)) return;
-    const { cwd, command, reason } = params;
-    const decisions = Array.isArray(params.availableDecisions) ? params.availableDecisions : undefined;
-    if (!session?.agent.directTask || !this.isActive(session) || !run?.turn ||
-        run.turn.id !== params.turnId || run.interrupting || !params.itemId || this.storageFailed || !this.available ||
-        typeof command !== "string" || !command.trim() || command.length > 24000 ||
-        /[\u0000-\u0008\u000b-\u001f\u007f\u202a-\u202e\u2066-\u2069]/.test(command) ||
-        (params.kind != null && params.kind !== "command") ||
-        params.additionalPermissions != null || params.networkApprovalContext != null ||
-        (params.availableDecisions != null &&
-          (!decisions?.includes("accept") || !decisions.includes("decline"))) ||
-        typeof cwd !== "string" || !this.commandCwdAllowed(run, cwd)) {
-      this.server!.reply(id, { decision: decisions?.includes("cancel") && !decisions.includes("decline") ? "cancel" : "decline" });
+    const offer = this.approvalOffer(method, params, run);
+    const decline = offer?.responses.decline ?? (method === "item/permissions/requestApproval"
+      ? { permissions: {}, scope: "turn" }
+      : method === "item/commandExecution/requestApproval" ? commandDecline(params).response : { decision: "decline" });
+    if (!offer || !session?.agent.directTask || !this.isActive(session) || !run?.turn || run.turn.id !== params.turnId ||
+        run.interrupting || !params.itemId || this.storageFailed || !this.available) {
+      this.server!.reply(id, decline);
+      if (session && this.isActive(session) && (session.agent.directTask || session.agent.nativeChild)) {
+        session.agent.messages.push(message("system", session.agent.nativeChild
+          ? "Orchestra declined a permission request from this subagent. Ask the parent task to request access."
+          : "Orchestra declined a permission request it could not show for review.", "warning"));
+        this.publish();
+      }
       return;
     }
+    const choices = (["approve", "approveForSession", "decline"] as const).filter((choice) => offer.responses[choice]);
     const request: WorkspaceMessage = {
-      ...message("system", "Permission requested to run a command outside the sandbox.", "action"),
-      commandApproval: { status: "pending", command, cwd,
-        ...(typeof reason === "string" && reason.trim() ? { reason: reason.slice(0, 2400) } : {}) },
+      ...message("system", approvalSummary(offer.view.kind!), "action"),
+      commandApproval: { status: "pending", ...offer.view, choices },
     };
-    (run.commandApprovals ??= new Map()).set(id, request);
+    (run.commandApprovals ??= new Map()).set(id, { message: request, responses: offer.responses });
     session.agent.messages.push(request);
     if (!this.persist()) {
       request.commandApproval!.status = "expired";
-      this.server!.reply(id, { decision: "decline" });
+      this.server!.reply(id, decline);
     }
     this.publish(false);
   }
 
-  private resolveCommandApproval(session: AgentSession, requestId: string, decision: "approve" | "decline") {
-    const run = session.run;
-    const pending = [...(run?.commandApprovals ?? [])].find(([, request]) => request.id === requestId);
-    if (run?.interrupting) throw new Error("This turn is stopping.");
-    if (!run || !pending || pending[1].commandApproval?.status !== "pending") {
-      throw new Error("This command approval is no longer pending.");
+  private resolveCommandApproval(session: AgentSession, requestId: string, decision: ApprovalChoice) {
+    if (this.demo) {
+      const approval = session.agent.messages.find(({ id }) => id === requestId)?.commandApproval;
+      if (approval?.status !== "pending" || !approval.choices?.includes(decision)) throw new Error("This approval is no longer pending.");
+      approval.status = decision === "decline" ? "declined" : decision === "approveForSession" ? "approved-for-session" : "approved";
+      this.publish();
+      return;
     }
-    const [id, request] = pending;
+    const run = session.run;
+    const pending = [...(run?.commandApprovals ?? [])].find(([, request]) => request.message.id === requestId);
+    if (run?.interrupting) throw new Error("This turn is stopping.");
+    if (!run || !pending || pending[1].message.commandApproval?.status !== "pending") {
+      throw new Error("This approval is no longer pending.");
+    }
+    const [id, { message: request, responses }] = pending;
+    const chosen = responses[decision];
+    if (!chosen) throw new Error("Codex did not offer that choice for this request.");
     const approval = request.commandApproval!;
-    const allowed = decision === "approve" && this.available && !this.storageFailed &&
-      this.commandCwdAllowed(run, approval.cwd);
+    const granting = decision !== "decline";
     // Save a consumed request before handing it off, without claiming delivery.
     approval.status = "unconfirmed";
     const saved = this.persist();
-    if (allowed && saved) delete run.check;
+    const allowed = granting && saved && this.available && !this.storageFailed;
+    if (allowed) delete run.check;
     try {
-      this.server!.reply(id, { decision: allowed && saved ? "accept" : "decline" });
+      this.server!.reply(id, allowed || !granting ? chosen : responses.decline);
     } catch {
       this.publish(false);
       throw new Error("Orchestra could not confirm that Codex received this decision.");
     }
-    approval.status = !saved ? "expired" : allowed ? "approved" : decision === "decline" ? "declined" : "expired";
+    approval.status = !saved ? "expired" : allowed ? (decision === "approveForSession" ? "approved-for-session" : "approved")
+      : granting ? "expired" : "declined";
     this.publish();
-    if (decision === "approve" && (!allowed || !saved)) {
-      throw new Error("Orchestra could not approve this command. Ask the agent to request it again.");
+    if (granting && !allowed) {
+      throw new Error("Orchestra could not approve this request. Ask the agent to request it again.");
     }
   }
 
   private expireCommandApprovals(run?: Run) {
-    for (const request of run?.commandApprovals?.values() ?? []) {
+    for (const { message: request } of run?.commandApprovals?.values() ?? []) {
       if (request.commandApproval?.status === "pending") request.commandApproval.status = "expired";
     }
   }
@@ -1803,16 +1935,9 @@ export class WorkspaceRuntime {
   private async onRequest({ id, method, params }: Event & { id: Id }) {
     const session = params.threadId ? this.threadSessions.get(params.threadId) : undefined;
     const run = session?.run;
-    if (method === "item/commandExecution/requestApproval") {
-      this.receiveCommandApproval(id, session, params);
-      return;
-    }
-    if (method === "item/fileChange/requestApproval") {
-      this.server!.reply(id, { decision: "decline" });
-      if (session && this.isActive(session)) {
-        session.agent.messages.push(message("system", "Orchestra declined a permission request outside the task's write scope.", "warning"));
-        this.publish();
-      }
+    if (method === "item/commandExecution/requestApproval" || method === "item/fileChange/requestApproval" ||
+        method === "item/permissions/requestApproval") {
+      this.receiveApproval(id, method, session, params);
       return;
     }
     if (method !== "item/tool/call") {

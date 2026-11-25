@@ -6,14 +6,13 @@ import type { FormEvent, KeyboardEvent, PointerEvent } from "react";
 import Markdown from "react-markdown";
 import type { Components } from "react-markdown";
 import { LuArrowUp, LuCheck, LuCopy, LuEllipsis, LuSquare } from "react-icons/lu";
-import type { SystemMessageKind, WorkspaceAgent, WorkspaceMessage } from "./workspace-runtime.ts";
+import type { ApprovalChoice, PermissionApproval, SystemMessageKind, WorkspaceAgent, WorkspaceMessage } from "./workspace-runtime.ts";
 
 import "./workspace-chat.css";
 
 type ChatAgent = WorkspaceAgent;
 type RepositoryScope = { id: string; path?: string };
-type CommandApprovalDecision = "approve" | "decline";
-type ResolveCommandApproval = (requestId: string, decision: CommandApprovalDecision) => Promise<void>;
+type ResolveCommandApproval = (requestId: string, decision: ApprovalChoice) => Promise<void>;
 
 type ChatProps = {
   agent: ChatAgent;
@@ -104,50 +103,77 @@ function ImplementationTargets({ request, repositories }: {
   );
 }
 
-const commandApprovalLabels = {
-  pending: "Command approval required",
-  approved: "Command approved",
-  declined: "Command declined",
-  expired: "Command approval expired",
+const commandApprovalLabels: Record<PermissionApproval["status"], string> = {
+  pending: "Approval required",
+  approved: "Approved once",
+  "approved-for-session": "Allowed for this task",
+  declined: "Declined",
+  expired: "Approval expired",
   unconfirmed: "Decision delivery unconfirmed",
 };
 
+const approvalChoiceLabels: Record<ApprovalChoice, [idle: string, busy: string]> = {
+  decline: ["Decline", "Declining…"],
+  approveForSession: ["Allow for this task", "Allowing…"],
+  approve: ["Approve once", "Approving…"],
+};
+
+function approvalWarning(approval: PermissionApproval) {
+  const session = approval.choices?.includes("approveForSession")
+    ? " Allow for this task also covers similar requests until Orchestra restarts." : "";
+  if (approval.kind === "fileChange") return "Approving lets the agent apply these file changes outside its current write access." + session;
+  if (approval.kind === "permissions") return "Approving extends the agent’s sandbox with the access listed below." + session;
+  return "Approving runs this command outside the sandbox with your local account’s access." + session;
+}
+
+function PathList({ paths }: { paths: string[] }) {
+  return <>{paths.map((path) => <code key={path} className="chat-command-approval-path">{path}</code>)}</>;
+}
+
 function CommandApprovalCard({ approval, requestId, blocked, onResolve }: {
-  approval: NonNullable<WorkspaceMessage["commandApproval"]>;
+  approval: PermissionApproval;
   requestId: string;
   blocked: boolean;
   onResolve?: ResolveCommandApproval;
 }) {
-  const [submitting, setSubmitting] = useState<CommandApprovalDecision>();
+  const [submitting, setSubmitting] = useState<ApprovalChoice>();
   const [error, setError] = useState("");
+  // Entries saved before choices were recorded offered a single approval and a decline.
+  const choices = (["decline", "approveForSession", "approve"] as const)
+    .filter((choice) => (approval.choices ?? ["approve", "decline"]).includes(choice));
 
-  async function resolve(decision: CommandApprovalDecision) {
+  async function resolve(decision: ApprovalChoice) {
     if (approval.status !== "pending" || blocked || !onResolve || submitting) return;
     setSubmitting(decision);
     setError("");
     try {
       await onResolve(requestId, decision);
     } catch (failure) {
-      setError(failure instanceof Error ? failure.message : "Could not resolve command approval.");
+      setError(failure instanceof Error ? failure.message : "Could not resolve this approval.");
       setSubmitting(undefined);
     }
   }
 
   return (
     <div className="chat-command-approval">
-      <p className="chat-command-approval-warning">An approval runs this command once outside the sandbox with your local account’s access.</p>
+      {approval.status === "pending" && <p className="chat-command-approval-warning">{approvalWarning(approval)}</p>}
       <dl>
-        <div><dt>Command</dt><dd><code>{approval.command}</code></dd></div>
-        <div><dt>Working directory</dt><dd><code>{approval.cwd}</code></dd></div>
+        {approval.command && <div><dt>Command</dt><dd><code>{approval.command}</code></dd></div>}
+        {approval.files && <div><dt>Files</dt><dd><PathList paths={approval.files} /></dd></div>}
+        {approval.writePaths && <div><dt>Write access</dt><dd><PathList paths={approval.writePaths} /></dd></div>}
+        {approval.readPaths && <div><dt>Read access</dt><dd><PathList paths={approval.readPaths} /></dd></div>}
+        {approval.network && <div><dt>Network</dt><dd>{approval.network}</dd></div>}
+        {approval.cwd && <div><dt>Working directory</dt><dd><code>{approval.cwd}</code></dd></div>}
         {approval.reason && <div><dt>Reason</dt><dd>{approval.reason}</dd></div>}
       </dl>
       {approval.status === "pending" && onResolve && (
         <>
+          {approval.declineStopsTurn && <p className="chat-command-approval-note">Declining stops this turn so you can reply with other instructions.</p>}
           <div className="chat-command-approval-actions">
-            <button type="button" className="chat-steer" disabled={blocked || !!submitting}
-              onClick={() => void resolve("decline")}>{submitting === "decline" ? "Declining…" : "Decline"}</button>
-            <button type="button" className="chat-steer" disabled={blocked || !!submitting}
-              onClick={() => void resolve("approve")}>{submitting === "approve" ? "Approving…" : "Approve once"}</button>
+            {choices.map((choice) => (
+              <button key={choice} type="button" className="chat-steer" disabled={blocked || !!submitting}
+                onClick={() => void resolve(choice)}>{approvalChoiceLabels[choice][submitting === choice ? 1 : 0]}</button>
+            ))}
           </div>
           {error && <p className="chat-error" role="alert">{error}</p>}
         </>

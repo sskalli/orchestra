@@ -12,7 +12,7 @@ type Params = {
   turn?: Turn;
   item?: { id?: string; type: string; text?: string;
     agentThreadId?: string; agentPath?: string; agentNickname?: string | null; agentRole?: string | null;
-    kind?: string; model?: string | null };
+    kind?: string; model?: string | null; changes?: { path?: unknown }[] };
   itemId?: string;
   requestId?: Id;
   command?: string | null;
@@ -21,6 +21,8 @@ type Params = {
   availableDecisions?: unknown;
   additionalPermissions?: unknown;
   networkApprovalContext?: unknown;
+  permissions?: unknown;
+  grantRoot?: string | null;
   kind?: string;
   namespace?: string | null;
   tool?: string;

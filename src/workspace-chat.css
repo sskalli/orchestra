@@ -553,6 +553,8 @@
 .chat-command-approval dd { margin: 0; white-space: pre-wrap; }
 .chat-command-approval-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; margin-top: 7px; }
 .chat-command-approval-actions .chat-steer { margin: 0; }
+.chat-command-approval-path { display: block; overflow-wrap: anywhere; }
+.chat-command-approval p.chat-command-approval-note { margin: 7px 0 0; color: var(--text-secondary); }
 .chat-markdown :is(h1, h2, h3, h4, h5, h6) {
   margin: 1.15em 0 .45em;
   color: var(--text-primary);

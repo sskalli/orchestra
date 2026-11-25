@@ -54,8 +54,9 @@ async function readCommand(request: IncomingMessage) {
     return { type: "answerProductQuestion" as const, agentId: command.agentId, questionId: command.questionId, text: command.text };
   }
   if (command.type === "resolveCommandApproval" && typeof command.requestId === "string" && command.requestId &&
-      (command.decision === "approve" || command.decision === "decline")) {
-    return { type: "resolveCommandApproval" as const, agentId: command.agentId, requestId: command.requestId, decision: command.decision as "approve" | "decline" };
+      (command.decision === "approve" || command.decision === "approveForSession" || command.decision === "decline")) {
+    return { type: "resolveCommandApproval" as const, agentId: command.agentId, requestId: command.requestId,
+      decision: command.decision as "approve" | "approveForSession" | "decline" };
   }
   if (command.type === "approveImplementation" && typeof command.requestId === "string" && command.requestId) {
     return { type: "approveImplementation" as const, agentId: command.agentId, requestId: command.requestId };
