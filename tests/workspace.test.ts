@@ -13,9 +13,9 @@ import { workspacePreferences } from "../src/workspace-preferences.ts";
 import { resolveProjects, workspaceIdentity } from "../src/workspace-projects.ts";
 
 test("workspace launch options start a live workspace when a Codex provider is selected", () => {
-  assert.deepEqual(parseWorkspaceArgs([]), { live: false, projectPath: undefined, projects: [], provider: "openai" });
+  assert.deepEqual(parseWorkspaceArgs([]), { live: false, projectPath: undefined, projects: [], provider: "openai", engine: "codex" });
   assert.deepEqual(parseWorkspaceArgs(["--live", "/project", "--provider", "company-gateway"]), {
-    live: true, projectPath: "/project", projects: [], provider: "company-gateway",
+    live: true, projectPath: "/project", projects: [], provider: "company-gateway", engine: "codex",
   });
   assert.throws(() => parseWorkspaceArgs(["--claude", "/project"]), /Unknown workspace option/);
   assert.deepEqual(parseWorkspaceArgs(["--project", "app=/app", "--project", "api=/api"]).projects, [
@@ -23,8 +23,13 @@ test("workspace launch options start a live workspace when a Codex provider is s
   ]);
   assert.equal(parseWorkspaceArgs(["--project", "app=/app"]).live, true);
   assert.deepEqual(parseWorkspaceArgs(["--provider", "company-gateway"]), {
-    live: true, projectPath: undefined, projects: [], provider: "company-gateway",
+    live: true, projectPath: undefined, projects: [], provider: "company-gateway", engine: "codex",
   });
+  assert.deepEqual(parseWorkspaceArgs(["--engine", "claude", "--live", "/project"]), {
+    live: true, projectPath: "/project", projects: [], provider: "openai", engine: "claude",
+  });
+  assert.throws(() => parseWorkspaceArgs(["--engine", "claude", "--provider", "company"]), /Codex provider/);
+  assert.throws(() => parseWorkspaceArgs(["--engine", "gemini"]), /codex or claude/);
   assert.equal(parseWorkspaceArgs(["--project", "app=/app", "--project", "api=/api", "--provider", "company"]).provider, "company");
   assert.throws(() => parseWorkspaceArgs(["--live", "--provider"]), /provider ID/);
   assert.throws(() => parseWorkspaceArgs(["--project", "app=/app", "--project", "app=/other"]), /Duplicate project/);

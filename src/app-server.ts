@@ -1,5 +1,7 @@
 import { spawn } from "node:child_process";
 import { createInterface } from "node:readline";
+import { accessSync, constants } from "node:fs";
+import { delimiter, join } from "node:path";
 
 export type Id = string | number;
 export type Turn = { id: string; rootTurnId: string | null; status: string; error?: { message: string } };
@@ -34,7 +36,35 @@ type Params = {
 type Message = { id?: Id; method?: string; params?: Params; result?: unknown; error?: { code: number; message: string } };
 export type Event = Message & { method: string; params: Params };
 const timeoutMs = Number(process.env.CODEX_TIMEOUT_MS ?? "120000");
-const command = process.env.CODEX_BIN ?? "codex";
+const bundledCodex = ["/usr/lib/chatgpt/resources/codex", "/Applications/ChatGPT.app/Contents/Resources/codex"];
+
+/** Finds Codex on PATH, then in the ChatGPT desktop bundle, unless CODEX_BIN names it. */
+export function codexCommand(environment = process.env) {
+  if (environment.CODEX_BIN) return environment.CODEX_BIN;
+  const onPath = (environment.PATH ?? "").split(delimiter).some((directory) => directory && isExecutable(join(directory, "codex")));
+  return onPath ? "codex" : bundledCodex.find(isExecutable) ?? "codex";
+}
+
+function isExecutable(path: string) {
+  try {
+    accessSync(path, constants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** The App Server protocol surface the workspace runtime depends on. */
+export interface ProviderServer {
+  onEvent?: (event: Event) => void;
+  onRequest?: (request: Event & { id: Id }) => Promise<void>;
+  onFailure?: (error: Error) => void;
+  call<T>(method: string, params: object, requestTimeoutMs?: number): Promise<T>;
+  notify(method: string): void;
+  reply(id: Id, result: object): void;
+  reject(id: Id, message: string): void;
+  close(): Promise<void>;
+}
 
 export function safeError(error: unknown) {
   return String(error)
@@ -43,7 +73,7 @@ export function safeError(error: unknown) {
     .replace(/[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}/g, "[redacted email]");
 }
 
-export class AppServer {
+export class AppServer implements ProviderServer {
   private readonly child;
   private nextId = 1;
   private readonly pending = new Map<Id, { resolve: (result: unknown) => void; reject: (error: Error) => void }>();
@@ -58,7 +88,7 @@ export class AppServer {
     const env = { ...environment };
     delete env.OPENAI_API_KEY;
     delete env.CODEX_API_KEY;
-    this.child = spawn(command, ["app-server", "--listen", "stdio://"], {
+    this.child = spawn(codexCommand(environment), ["app-server", "--listen", "stdio://"], {
       cwd,
       env,
       stdio: ["pipe", "pipe", "pipe"],

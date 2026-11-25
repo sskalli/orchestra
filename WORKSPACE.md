@@ -1,33 +1,42 @@
 # Orchestra workspace
 
-Use Node.js 22.18 or newer. Run `npm ci` before starting the workspace. The local server listens on port 4317 by default.
+Use Node.js 22.18 or newer. Run `npm ci`, then `npm link` to install the `orchestra` command.
 
 ## Launch modes
 
 ```bash
-npm run workspace
-npm run workspace -- --live /path/to/git/project
-npm run workspace -- --project app=/path/to/app --project api=/path/to/api
+orchestra codex  /path/to/git/project
+orchestra claude /path/to/git/project
+orchestra codex:ID --project app=/path/to/app --project api=/path/to/api
+orchestra demo
 ```
 
-The first command is a simulated demo. Live sessions use a local Codex App Server. Sign in through ChatGPT before launching. Worktrees require a Git repository with a commit.
+`orchestra codex` uses a local Codex App Server and your ChatGPT sign-in. `orchestra claude` runs Claude Code sessions through the Claude Agent SDK with the sign-in from `claude auth login`, so usage counts against your Claude plan. Orchestra removes `ANTHROPIC_API_KEY` and `ANTHROPIC_AUTH_TOKEN` from Claude sessions so they don't switch to API billing. Before starting, the launcher checks the sign-in and offers to run the login command. Worktrees require a Git repository with a commit. The demo is a simulated workspace.
 
-All configured repos share one map and Inbox. Define each repository ID once. The workspace identity is based on resolved paths and IDs. Argument order does not affect it. A single-repository workspace keeps its identity if you change only its repository ID.
+Codex starts on port 4317 and Claude on 4327. If a port is taken, Orchestra uses the next free one and prints the address. Browser layout and drafts are kept per address, so a workspace that moves to another port starts with a default layout. The underlying server options still work: `npm run workspace -- --engine claude --live /path`, `--provider ID`, and `--project ID=/path`.
+
+All configured repos share one map and Inbox. Define each repository ID once. The workspace identity is based on resolved paths and IDs. Argument order does not affect it. A single-repository workspace keeps its identity if you change only its repository ID. Codex, each custom Codex provider, and Claude keep separate saved tasks for the same repositories.
 
 | Setting | Purpose |
 | --- | --- |
-| `ORCHESTRA_PORT` | Set the local HTTP port. |
+| `ORCHESTRA_PORT` | Use this exact local HTTP port. |
 | `ORCHESTRA_STATE_DIR` | Override where live workspace state is stored. |
-| `CODEX_BIN` | Set the Codex executable path. |
+| `CODEX_BIN` | Set the Codex executable path. By default Orchestra looks on `PATH`, then in the ChatGPT desktop app. |
 | `CODEX_MODEL` | Override Codex model selection for new tasks. |
+| `CLAUDE_BIN` | Run a specific Claude Code executable instead of the one bundled with the Agent SDK. |
+| `CLAUDE_MODEL` | Override Claude model selection for new tasks, for example `claude-opus-5-5`. |
 
-For a separately configured Codex provider, define it in Codex's configuration and pass `--provider ID`. On its own it opens a live workspace for the current Git repository. Use `--live /path/to/repository` or `--project ID=/path/to/repository` to select other repositories. Use a dedicated environment variable for that provider's credentials. Orchestra strips `OPENAI_API_KEY` and `CODEX_API_KEY` from the App Server process. Each provider has separate saved sessions.
+For a separately configured Codex provider, define it in Codex's configuration and launch with `orchestra codex:ID`. Use a dedicated environment variable for that provider's credentials. Orchestra strips `OPENAI_API_KEY` and `CODEX_API_KEY` from the App Server process.
+
+### Claude sessions
+
+Claude tasks load your Claude Code settings and the repository's `CLAUDE.md`, as `claude` does in a terminal. Planning turns ask before edits and before commands that aren't read-only. During an approved implementation turn, Claude edits the approved worktrees directly and runs sandboxed commands without asking. Anything outside those destinations still comes to the chat for approval. Claude subagents appear as children of their task on the map. If Orchestra stops during a Claude turn, that turn is reported as interrupted after restart, because Claude Code runs as a child of the Orchestra server.
 
 ## Task flow
 
 - Use **+** to open a new-session composer. Write the first message, add an optional name, and select any repositories the task needs before starting the session. Leave repository scope empty for a general chat.
 - Open the floating **Inbox** from the map’s top-left corner. **Open conversation** jumps to the relevant message. Selecting a task opens a floating conversation at the last width you used (65% by default) and frames its group in the space beside it. Drag the conversation’s left edge to resize it on desktop. Drag the Inbox’s right edge, bottom edge, or bottom-right corner to adjust its size. The windows leave a gap when both are open. Closing the chat keeps the current map view.
-- Native Codex children orbit their parent. Their transcripts are available for inspection, and you give further instructions in the parent chat.
+- Native Codex and Claude subagents orbit their parent. Their transcripts are available for inspection, and you give further instructions in the parent chat.
 - Product questions keep their source message and pending status across restart. Answer in the task chat and the agent can link your reply to the question. Unrelated replies leave it pending. The Inbox retains activity across reloads. **Clear** removes its history and keeps pending questions. Archiving or deleting a task removes its entries and its subagents’ entries from the Inbox.
 - A repository-backed task starts read-only. Describe the change in chat as usual. When the agent is ready to edit, it asks for permission to edit in the conversation. Click **Allow edits** to authorize one implementation turn in isolated worktrees for the selected repositories. Answer pending product questions in the chat before allowing edits. The agent can ask for permission again to revise a candidate. Orchestra requires passing verification before it pins a delivery revision. Review and merge isolated changes manually.
 - To edit the original folder, ask the agent to edit the configured checkout for the named repository. To use a specific linked worktree, ask for its absolute path and optionally a new branch name. Choose an unused path outside configured repositories whose parent already exists. The approval card lists the write mode for each selected repository. Direct edits apply in place, including when the checkout already has local changes, and do not produce a delivery snapshot. Orchestra reserves that checkout across workspace servers until the turn and its subagents stop. If a server stops unexpectedly, restart its workspace so Orchestra can confirm the provider is idle and release the reservation. One server at a time can open the same saved workspace. Other selected repositories still use automatic worktrees unless the request specifies their own write modes.

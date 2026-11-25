@@ -55,6 +55,7 @@ export function workspaceStore(project: string, directory?: string, modelProvide
 
   return {
     usagePath: path.replace(/\.json$/, ".usage.json"),
+    claudeJournalPath: path.replace(/\.json$/, ".claude.json"),
     previousUsagePath: previousPath.replace(/\.json$/, ".usage.json"),
     reserveProcess() {
       mkdirSync(directory, { recursive: true, mode: 0o700 });

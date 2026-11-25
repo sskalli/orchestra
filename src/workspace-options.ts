@@ -3,6 +3,7 @@ export type WorkspaceOptions = {
   projectPath?: string;
   projects: { id: string; path: string }[];
   provider: string;
+  engine: "codex" | "claude";
 };
 
 export function parseWorkspaceArgs(args: string[]): WorkspaceOptions {
@@ -11,6 +12,7 @@ export function parseWorkspaceArgs(args: string[]): WorkspaceOptions {
   const projects: WorkspaceOptions["projects"] = [];
   let provider = "openai";
   let providerSpecified = false;
+  let engine: WorkspaceOptions["engine"] | undefined;
 
   for (let index = 0; index < args.length; index++) {
     const arg = args[index];
@@ -26,6 +28,11 @@ export function parseWorkspaceArgs(args: string[]): WorkspaceOptions {
       }
       provider = value;
       providerSpecified = true;
+    } else if (arg === "--engine") {
+      if (engine) throw new Error("Specify --engine only once.");
+      const value = args[++index];
+      if (value !== "codex" && value !== "claude") throw new Error("--engine requires codex or claude.");
+      engine = value;
     } else if (arg === "--project") {
       const value = args[++index];
       const separator = value?.indexOf("=") ?? -1;
@@ -44,6 +51,7 @@ export function parseWorkspaceArgs(args: string[]): WorkspaceOptions {
   }
 
   if (projects.length && projectPath) throw new Error("Use either --live with a project path or --project, not both.");
-  if (projects.length || providerSpecified) live = true;
-  return { live, projectPath, projects, provider };
+  if (engine === "claude" && providerSpecified) throw new Error("--provider selects a Codex provider and cannot be used with Claude.");
+  if (projects.length || providerSpecified || engine) live = true;
+  return { live, projectPath, projects, provider, engine: engine ?? "codex" };
 }

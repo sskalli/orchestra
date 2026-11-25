@@ -7,17 +7,20 @@ import { workspaceStore } from "./workspace-store.ts";
 import { parseWorkspaceArgs } from "./workspace-options.ts";
 import { defaultProject, resolveProjects, workspaceIdentity } from "./workspace-projects.ts";
 
-const { live, projectPath, projects: specifiedProjects, provider: modelProvider } = parseWorkspaceArgs(process.argv.slice(2));
+const { live, projectPath, projects: specifiedProjects, provider: modelProvider, engine } = parseWorkspaceArgs(process.argv.slice(2));
 let projects = live
   ? resolveProjects(specifiedProjects.length ? specifiedProjects : [defaultProject(projectPath ?? ".")])
   : [defaultProject(process.cwd())];
 if (live && !specifiedProjects.length) projects = [defaultProject(projects[0].path)];
 const cwd = projects[0].path;
 const identity = workspaceIdentity(projects);
-const port = Number(process.env.ORCHESTRA_PORT ?? 4317);
-if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error("Invalid ORCHESTRA_PORT");
-const host = `127.0.0.1:${port}`;
-const origin = `http://${host}`;
+// Each engine starts from its own default port and moves up when that one is taken, so Codex and Claude can run side by side.
+const fixedPort = process.env.ORCHESTRA_PORT !== undefined;
+const preferredPort = Number(process.env.ORCHESTRA_PORT ?? (live && engine === "claude" ? 4327 : 4317));
+if (!Number.isInteger(preferredPort) || preferredPort < 1 || preferredPort > 65535) throw new Error("Invalid ORCHESTRA_PORT");
+let port = preferredPort;
+let host = `127.0.0.1:${port}`;
+let origin = `http://${host}`;
 const dist = fileURLToPath(new URL("../dist/", import.meta.url));
 let runtime: WorkspaceRuntime;
 
@@ -129,22 +132,35 @@ const server = createServer(async (request, response) => {
   response.writeHead(404).end();
 });
 
-server.listen(port, "127.0.0.1", () => {
+function listen() {
+  host = `127.0.0.1:${port}`;
+  origin = `http://${host}`;
+  server.listen(port, "127.0.0.1");
+}
+server.on("listening", () => {
   runtime = new WorkspaceRuntime({
     cwd,
     projects,
     demo: !live,
     modelProvider,
-    store: live ? workspaceStore(identity, undefined, modelProvider) : undefined,
+    engine,
+    // Provider IDs cannot contain ":", so Claude state never shares a file with a Codex provider.
+    store: live ? workspaceStore(identity, undefined, engine === "claude" ? "engine:claude" : modelProvider) : undefined,
   });
-  const mode = live ? `Codex: ${modelProvider}` : "demo";
+  const mode = !live ? "demo" : engine === "claude" ? "Claude" : modelProvider === "openai" ? "Codex" : `Codex: ${modelProvider}`;
   console.log(`Orchestra (${mode}) is available at ${origin}`);
   void runtime.start().catch((error) => console.error("Workspace startup failed:", error instanceof Error ? error.message : error));
 });
-server.on("error", (error) => {
+server.on("error", (error: NodeJS.ErrnoException) => {
+  if (error.code === "EADDRINUSE" && !fixedPort && port < preferredPort + 20) {
+    port++;
+    listen();
+    return;
+  }
   console.error(error.message);
   process.exitCode = 1;
 });
+listen();
 for (const signal of ["SIGINT", "SIGTERM"] as const) {
   process.once(signal, () => {
     server.close();
