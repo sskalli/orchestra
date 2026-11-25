@@ -72,6 +72,8 @@ export type WorkspaceAgent = {
   unavailableReason?: string;
   canSteer: boolean;
   canCancel?: boolean;
+  /** The agent ended its response and its turn stays open for this many background subagents. */
+  awaitingSubagents?: number;
   archivedAt?: number;
   lifecycleBusy?: boolean;
   lifecycleBlockedReason?: string;
@@ -115,6 +117,8 @@ type Run = {
   commandApprovals?: Map<Id, { message: WorkspaceMessage; responses: ApprovalResponses }>;
   fileChanges?: Map<string, string[]>;
   interrupting?: boolean;
+  /** Background subagents the provider is still running after the agent ended its response. */
+  awaitingSubagents?: number;
   demoTimer?: ReturnType<typeof setTimeout>;
 };
 type ApprovalResponses = { approve?: object; approveForSession?: object; decline: object };
@@ -518,7 +522,7 @@ export class WorkspaceRuntime {
       return;
     }
     if (command.type === "answerProductQuestion") {
-      this.answerProductQuestion(session, command.questionId, text);
+      await this.answerProductQuestion(session, command.questionId, text);
       return;
     }
     this.supersedeImplementationRequest(session);
@@ -533,7 +537,7 @@ export class WorkspaceRuntime {
     return request;
   }
 
-  private answerProductQuestion(session: AgentSession, questionId: string, text: string) {
+  private async answerProductQuestion(session: AgentSession, questionId: string, text: string) {
     const question = session.agent.directTask
       ? session.agent.messages.find((entry) => entry.id === questionId)
       : undefined;
@@ -544,16 +548,41 @@ export class WorkspaceRuntime {
     const answer = { ...message("user", text), answersProductQuestionId: question.id, state: "queued" as const };
     question.productQuestion = { status: "answered", answerMessageId: answer.id };
     session.agent.messages.push(answer);
-    session.queue.push(answer);
+    const live = this.acceptsLiveMessages(session);
+    if (!live) session.queue.push(answer);
     if (!this.persist()) {
-      session.queue.pop();
+      if (!live) session.queue.pop();
       session.agent.messages.pop();
       if (superseded?.implementationRequest) superseded.implementationRequest.status = "pending";
       question.productQuestion = { status: "pending" };
       this.publish(false);
       throw new Error("Orchestra could not save the answer. The question remains pending.");
     }
+    if (live) {
+      if (await this.deliverToWaitingTurn(session, answer, this.answerInput(session, answer))) return;
+      session.queue.push(answer);
+    }
     if (!this.drain(session)) this.update(session);
+  }
+
+  /** A turn kept open only for background subagents takes new messages now instead of queueing them behind the subagents. */
+  private acceptsLiveMessages(session: AgentSession) {
+    return Boolean(!this.demo && session.run?.turn && session.run.awaitingSubagents && session.agent.canSteer &&
+      !session.agent.queuePaused && !session.queue.length);
+  }
+
+  private async deliverToWaitingTurn(session: AgentSession, entry: WorkspaceMessage, text: string) {
+    const run = session.run;
+    if (!run?.turn || !this.acceptsLiveMessages(session)) return false;
+    try {
+      await this.server!.call("turn/steer", { threadId: session.threadId, expectedTurnId: run.turn.id, input: input(text) });
+    } catch {
+      return false;
+    }
+    if (session.agent.directTask) run.steered = true;
+    delete entry.state;
+    this.update(session);
+    return true;
   }
 
   private taskName(name: string) {
@@ -980,6 +1009,7 @@ export class WorkspaceRuntime {
 
   private async enqueue(session: AgentSession, next: WorkspaceMessage) {
     if (!this.isActive(session)) throw new Error("This agent is archived or being removed.");
+    if (this.acceptsLiveMessages(session) && await this.deliverToWaitingTurn(session, next, next.text)) return;
     if (session.run || session.agent.queuePaused || session.queue.length) {
       next.state = "queued";
       session.queue.push(next);
@@ -1104,7 +1134,7 @@ export class WorkspaceRuntime {
     for (const { agent, threadId, run, toolVersion, checkoutReservation } of saved) {
       const session = this.createAgent(agent.id, agent.name, "worker", agent.parentId, agent.goal);
       Object.assign(session.agent, agent, {
-        projectId: agent.projectId, canSteer: false, canCancel: false, lifecycleBusy: undefined,
+        projectId: agent.projectId, canSteer: false, canCancel: false, lifecycleBusy: undefined, awaitingSubagents: undefined,
       });
       session.threadId = agent.nativeChild || agent.archivedAt || run || hasSubmittedMessage(agent) ? threadId : undefined;
       session.toolVersion = toolVersion;
@@ -1520,6 +1550,7 @@ export class WorkspaceRuntime {
       if (!session.recovery) this.reopenProductQuestion(session, answer);
     }
     delete session.run;
+    delete session.agent.awaitingSubagents;
     if (session.agent.canCancel !== undefined) session.agent.canCancel = false;
     for (const entry of session.stream.values()) {
       if (completed) delete entry.state;
@@ -1731,6 +1762,16 @@ export class WorkspaceRuntime {
       return;
     }
     if (!session?.run) return;
+    if (method === "turn/waiting") {
+      const { turnId, subagents } = params as typeof params & { subagents?: number };
+      if (!session.run.turn || turnId !== session.run.turn.id) return;
+      const count = typeof subagents === "number" && subagents > 0 ? subagents : undefined;
+      session.run.awaitingSubagents = count;
+      if (count) session.agent.awaitingSubagents = count;
+      else delete session.agent.awaitingSubagents;
+      this.publish(false);
+      return;
+    }
     if ((method === "turn/started" || method === "turn/completed") && params.threadId && params.turn &&
         (!session.run.turn || session.run.turn.id === params.turn.id)) {
       this.trackTurn(session, params.threadId, params.turn.id, session.run.message);

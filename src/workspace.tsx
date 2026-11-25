@@ -540,7 +540,7 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
             <button ref={archivedToggle} className="sw-map-action sw-archived-toggle" type="button" aria-expanded={archiveOpen}
               aria-label={`Archived (${archivedAgents.length})`} title={`Archived (${archivedAgents.length})`}
               onClick={() => setArchiveOpen(!archiveOpen)}><LuArchive aria-hidden="true" /></button>
-            {mode === "codex" && !blocked && <button className="sw-map-action" type="button"
+            {mode !== "demo" && !blocked && <button className="sw-map-action" type="button"
               aria-label="New session" title="New session" onClick={() => setNewTaskOpen(true)}>
               <LuPlus aria-hidden="true" />
             </button>}

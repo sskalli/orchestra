@@ -44,13 +44,13 @@ async function until<T>(read: () => T | undefined | false, label: string) {
   }
 }
 
-async function claudeWorkspace(t: TestContext, scripts: Script[]) {
+async function claudeWorkspace(t: TestContext, scripts: Script[], serverOptions: { wakeDelayMs?: number } = {}) {
   const root = mkdtempSync(join(tmpdir(), "orchestra-claude-"));
   const fake = fakeClaude(scripts);
   const store = workspaceStore(root, join(root, "state"), "engine:claude");
   let server!: ClaudeAppServer;
   const runtime = new WorkspaceRuntime({ cwd: root, engine: "claude", store,
-    createServer: () => (server = new ClaudeAppServer(store.claudeJournalPath, fake.query as any)) });
+    createServer: () => (server = new ClaudeAppServer(store.claudeJournalPath, fake.query as any, serverOptions)) });
   t.after(async () => {
     await runtime.close();
     rmSync(root, { recursive: true, force: true });
@@ -191,6 +191,130 @@ test("steering keeps the turn open until Claude answers every message sent to it
   await until(() => agent(agentId).status === "done", "the turn");
   assert.deepEqual(agent(agentId).messages.filter(({ role }) => role === "assistant").map(({ text }) => text),
     ["Answering the first message", "Answering the steer"]);
+});
+
+const backgroundAgent = (toolUseId: string, description: string) =>
+  ({ type: "system", subtype: "task_started", task_id: `task-${toolUseId}`, tool_use_id: toolUseId, description,
+    subagent_type: "general-purpose", is_backgrounded: true });
+const agentDone = (toolUseId: string, summary: string) =>
+  ({ type: "system", subtype: "task_notification", task_id: `task-${toolUseId}`, tool_use_id: toolUseId, status: "completed", summary });
+
+test("background subagents keep the turn open so the task can ask and hear answers while they run", async (t) => {
+  let server!: () => ClaudeAppServer;
+  let finishChild!: () => void;
+  const childMayFinish = new Promise<void>((resolve) => { finishChild = resolve; });
+  const workspace = await claudeWorkspace(t, [
+    async function* (io) {
+      const first = await io.nextUser();
+      assert.match(io.options.systemPrompt.append, /background subagents keep your turn open/);
+      yield { type: "system", subtype: "init" };
+      yield backgroundAgent("tool-1", "Implement map-shell");
+      yield* reply("m1", "The implementer is running. One question first.");
+      const threadId = [...(server() as any).toolDefinitions.keys()][0];
+      const decide = (server() as any).toolDefinitions.get(threadId).find(({ name }: { name: string }) => name === "raise_product_decision");
+      await decide.handler({ question: "Orchestra (2) or (2) Orchestra?" }, {});
+      // Claude ends its response here; in Orchestra the turn must survive with the subagent still running.
+      yield result([first.uuid]);
+      const answer = await io.nextUser();
+      assert.match(answer.message.content, /Answer: Orchestra \(2\)/);
+      yield* reply("m2", "Noted, I'll tell the implementer.");
+      yield result([answer.uuid]);
+      const status = await io.nextUser();
+      assert.equal(status.message.content, "How is it going?");
+      yield* reply("m3", "Still implementing.");
+      yield result([status.uuid]);
+      await childMayFinish;
+      yield { type: "assistant", parent_tool_use_id: "tool-1", message: { id: "c1", content: [{ type: "text", text: "Committed on exp1/map-shell." }] } };
+      yield agentDone("tool-1", "Committed");
+      // Claude Code resumes the parent on the task notification.
+      yield* reply("m4", "map-shell is ready for review.");
+      yield result([]);
+    },
+  ]);
+  server = workspace.server;
+  const { runtime, agent } = workspace;
+  const agentId = String(await runtime.command({ type: "createTask", name: "Backlog", projectIds: [] }));
+  await runtime.command({ type: "send", agentId, text: "Implement the backlog" });
+  await until(() => agent(agentId).awaitingSubagents === 1, "the turn to wait for its subagent");
+  assert.equal(agent(agentId).status, "working");
+  const child = () => runtime.snapshot().agents.find(({ parentId }) => parentId === agentId)!;
+  assert.equal(child().status, "working");
+
+  const question = agent(agentId).messages.find(({ productQuestion }) => productQuestion?.status === "pending")!;
+  await runtime.command({ type: "answerProductQuestion", agentId, questionId: question.id, text: "Orchestra (2)" });
+  await until(() => agent(agentId).messages.some(({ text }) => text === "Noted, I'll tell the implementer."), "the answer to reach Claude");
+  assert.equal(agent(agentId).messages.find(({ id }) => id === question.id)!.productQuestion!.status, "answered");
+  assert.equal(agent(agentId).queueDepth, 0);
+
+  await until(() => agent(agentId).awaitingSubagents === 1, "the turn to wait again");
+  await runtime.command({ type: "send", agentId, text: "How is it going?" });
+  await until(() => agent(agentId).messages.some(({ text }) => text === "Still implementing."), "the live reply");
+  assert.equal(agent(agentId).queueDepth, 0);
+  assert.equal(child().status, "working");
+
+  finishChild();
+  await until(() => agent(agentId).status === "done", "the turn to end after the subagent");
+  assert.equal(child().status, "done");
+  assert.equal(agent(agentId).awaitingSubagents, undefined);
+  assert.ok(agent(agentId).messages.some(({ text }) => text === "map-shell is ready for review."));
+});
+
+test("a task left idle after its last background subagent is prompted to continue", async (t) => {
+  const { runtime, agent } = await claudeWorkspace(t, [
+    async function* (io) {
+      const first = await io.nextUser();
+      yield backgroundAgent("tool-1", "Review the branch");
+      yield* reply("m1", "Reviewer started.");
+      yield result([first.uuid]);
+      yield agentDone("tool-1", "No issues found");
+      // This Claude Code does not resume the parent by itself.
+      const wake = await io.nextUser();
+      assert.match(wake.message.content, /background subagents have finished/);
+      yield* reply("m2", "The review found no issues.");
+      yield result([wake.uuid]);
+    },
+  ], { wakeDelayMs: 20 });
+  const agentId = String(await runtime.command({ type: "createTask", name: "Review", projectIds: [] }));
+  await runtime.command({ type: "send", agentId, text: "Review it" });
+  await until(() => agent(agentId).status === "done", "the turn");
+  assert.deepEqual(agent(agentId).messages.filter(({ role }) => role === "assistant").map(({ text }) => text),
+    ["Reviewer started.", "The review found no issues."]);
+});
+
+test("Claude reporting idle with no background subagents left ends a waiting turn", async (t) => {
+  const { runtime, agent } = await claudeWorkspace(t, [
+    async function* (io) {
+      const first = await io.nextUser();
+      yield backgroundAgent("tool-1", "Explore");
+      yield result([first.uuid]);
+      yield agentDone("tool-1", "Done");
+      yield { type: "system", subtype: "session_state_changed", state: "idle" };
+      await new Promise(() => {});
+    },
+  ], { wakeDelayMs: 60_000 });
+  const agentId = String(await runtime.command({ type: "createTask", name: "Idle", projectIds: [] }));
+  await runtime.command({ type: "send", agentId, text: "Go" });
+  await until(() => agent(agentId).status === "done", "the turn");
+});
+
+test("stopping a turn that waits for background subagents stops them too", async (t) => {
+  const { runtime, agent } = await claudeWorkspace(t, [
+    async function* (io) {
+      const first = await io.nextUser();
+      yield backgroundAgent("tool-1", "Long job");
+      yield result([first.uuid]);
+      // Closing the input ends Claude Code, as stopping does for the real CLI.
+      while (await io.nextUser()) { /* drain */ }
+    },
+  ]);
+  const agentId = String(await runtime.command({ type: "createTask", name: "Stop waiting", projectIds: [] }));
+  await runtime.command({ type: "send", agentId, text: "Go" });
+  await until(() => agent(agentId).awaitingSubagents === 1, "the waiting turn");
+  await runtime.command({ type: "cancel", agentId });
+  await until(() => agent(agentId).status !== "working", "the stopped turn");
+  assert.equal(agent(agentId).status, "idle");
+  const child = runtime.snapshot().agents.find(({ parentId }) => parentId === agentId)!;
+  assert.notEqual(child.status, "working");
 });
 
 test("a Claude turn left running by a stopped server is reported as interrupted", () => {

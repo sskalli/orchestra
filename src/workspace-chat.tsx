@@ -742,7 +742,9 @@ function Conversation({
         {agent.queueDepth > 0 || showWorkingIndicator ? (
           <div className="chat-queue" aria-live="polite">
             {showWorkingIndicator && <OrbitSpinner />}
-            {agent.queueDepth > 0 ? `${agent.queueDepth} queued${agent.queuePaused ? " · paused" : ""}` : steerAction ? "Agent is working — sending will steer the current turn." : "Agent is working — new messages will queue."}
+            {agent.queueDepth > 0 ? `${agent.queueDepth} queued${agent.queuePaused ? " · paused" : ""}`
+              : agent.awaitingSubagents ? `Waiting for ${agent.awaitingSubagents} subagent${agent.awaitingSubagents === 1 ? "" : "s"} — your messages reach the agent now.`
+              : steerAction ? "Agent is working — sending will steer the current turn." : "Agent is working — new messages will queue."}
             {agent.queuePaused && onResumeQueue && <button className="chat-steer" type="button"
               disabled={blocked || resumingQueue} onClick={() => void resumeQueue()}>Resume queue</button>}
           </div>
