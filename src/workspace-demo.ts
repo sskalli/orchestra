@@ -98,7 +98,13 @@ export function demoTasks(projectId: string): DemoTask[] {
       name: "Investigate slow search",
       status: "working",
       directTask: { projectIds: [], phase: "planning" },
-      messages: [{ id: "demo-investigation-request", role: "user", text: "Find out why filtering a large list feels slow." }],
+      messages: [
+        { id: "demo-investigation-request", role: "user", text: "Find out why filtering a large list feels slow. Save the profile under /demo/profiles." },
+        { id: "demo-investigation-access", role: "system", kind: "action", text: "Permission requested to run a command outside the sandbox.",
+          commandApproval: { status: "pending", kind: "command", command: "npm run profile -- --out /demo/profiles/search.json",
+            cwd: "/demo/app", reason: "Write the search profile to the folder you named.", writePaths: ["/demo/profiles"],
+            choices: ["approve", "approveForSession", "decline"] } },
+      ],
     },
     {
       id: "demo-search-trace",

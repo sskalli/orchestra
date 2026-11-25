@@ -98,7 +98,7 @@ test("a direct task without repositories starts in a single read-only thread", a
   const started = requests.findLast(({ method }) => method === "turn/start")?.params;
   assert.equal(started.threadId, task.threadId);
   assert.equal(started.sandboxPolicy.type, "readOnly");
-  assert.equal(started.approvalPolicy, "never");
+  assert.equal(started.approvalPolicy, "on-request");
   assert.equal((await call(task, "request_implementation", { summary: "Write a recipe." })).success, false);
   complete(task);
   await assert.rejects(runtime.command({ type: "approveImplementation", agentId, requestId: "missing" }));
@@ -124,7 +124,7 @@ test("one direct task plans and delivers an isolated cross-repo change in the sa
   const planning = requests.findLast(({ method }) => method === "turn/start")?.params;
   assert.equal(planning.threadId, task.threadId);
   assert.equal(planning.sandboxPolicy.type, "readOnly");
-  assert.equal(planning.approvalPolicy, "never");
+  assert.equal(planning.approvalPolicy, "on-request");
   assert.deepEqual(projects.map(({ path }) => git(path, "worktree", "list", "--porcelain")), initial);
   internal.onEvent({ method: "item/completed", params: {
     threadId: task.threadId, turnId: task.run.turn.id,
@@ -189,7 +189,7 @@ test("one direct task plans and delivers an isolated cross-repo change in the sa
   const followUp = requests.findLast(({ method }) => method === "turn/start")?.params;
   assert.equal(followUp.threadId, planning.threadId);
   assert.equal(followUp.sandboxPolicy.type, "readOnly");
-  assert.equal(followUp.approvalPolicy, "never");
+  assert.equal(followUp.approvalPolicy, "on-request");
   assert.equal((await call(task, "submit_check_result", { outcome: "passed", summary: "Unexpected read-only check." })).success, false);
   complete(task);
   assert.equal(getTask().directTask.phase, "ready-for-review");
@@ -256,7 +256,7 @@ test("implementation approval is tied to a pending request in its own conversati
   assert.equal(lastTurn(), implementation);
 });
 
-test("command approvals are one-time decisions bound to the active implementation turn and checkout", async (t) => {
+test("native Codex permission requests become one-time decisions in the task chat", async (t) => {
   const fixture = crossRepoFixture(t);
   if (!fixture) return;
   const { runtime, internal, projects, requests, call, complete } = fixture;
@@ -270,21 +270,73 @@ test("command approvals are one-time decisions bound to the active implementatio
     replies.set(id, [...(replies.get(id) ?? []), result]);
     originalReply(id, result);
   };
+  // Codex offers accept, an optional rule amendment, and cancel for a sandbox escalation. It never offers decline.
+  const escalation = ["accept", { acceptWithExecpolicyAmendment: { execpolicy_amendment: ["npm", "test"] } }, "cancel"];
   const requestCommand = (id: string, cwd: string, details: Record<string, unknown> = {}) =>
     internal.onRequest({ id, method: "item/commandExecution/requestApproval", params: {
       threadId: task.threadId, turnId: task.run.turn.id, itemId: id,
-      command: "npm test", cwd, reason: "Run the API verification.", ...details,
+      command: "npm test", cwd, reason: "Run the API verification.", availableDecisions: escalation, ...details,
     } });
   const getApprovals = () => runtime.snapshot().agents.find(({ id }) => id === agentId)!.messages.filter(({ commandApproval }) => commandApproval);
-  const resolve = (requestId: string, decision: "approve" | "decline", requester = agentId) =>
+  const resolve = (requestId: string, decision: "approve" | "approveForSession" | "decline", requester = agentId) =>
     runtime.command({ type: "resolveCommandApproval", agentId: requester, requestId, decision });
-  const declined = [{ decision: "decline" }];
 
-  await runtime.command({ type: "send", agentId, text: "Plan the API update." });
-  assert.equal(requests.findLast(({ method }) => method === "turn/start")?.params.approvalPolicy, "never");
-  await requestCommand("read-only-command", api.path);
-  assert.deepEqual(replies.get("read-only-command"), declined);
-  assert.equal(getApprovals().length, 0);
+  // Planning turns stay read-only but can ask for access, including outside the configured repositories.
+  await runtime.command({ type: "send", agentId, text: "Update the notes file in the other folder." });
+  assert.equal(requests.findLast(({ method }) => method === "turn/start")?.params.approvalPolicy, "on-request");
+  assert.equal(requests.findLast(({ method }) => method === "turn/start")?.params.sandboxPolicy.type, "readOnly");
+  await requestCommand("planning-escalation", other.path, { command: "touch notes.md" });
+  const planning = getApprovals().at(-1)!;
+  assert.equal(planning.commandApproval?.status, "pending");
+  assert.equal(planning.commandApproval?.cwd, other.path);
+  assert.deepEqual(planning.commandApproval?.choices, ["approve", "decline"]);
+  assert.equal(planning.commandApproval?.declineStopsTurn, true);
+  assert.equal(replies.has("planning-escalation"), false);
+  await assert.rejects(resolve(planning.id, "approveForSession"), /did not offer/);
+  await resolve(planning.id, "approve");
+  assert.deepEqual(replies.get("planning-escalation"), [{ decision: "accept" }]);
+  assert.equal(getApprovals().at(-1)?.commandApproval?.status, "approved");
+
+  internal.onEvent({ method: "item/started", params: { threadId: task.threadId, turnId: task.run.turn.id,
+    item: { id: "patch-1", type: "fileChange", changes: [{ path: join(other.path, "notes.md"), kind: { type: "update" }, diff: "" }] } } });
+  await internal.onRequest({ id: "file-approval", method: "item/fileChange/requestApproval", params: {
+    threadId: task.threadId, turnId: task.run.turn.id, itemId: "patch-1", reason: "Edit the requested notes.",
+  } });
+  const fileApproval = getApprovals().at(-1)!;
+  assert.equal(fileApproval.commandApproval?.kind, "fileChange");
+  assert.deepEqual(fileApproval.commandApproval?.files, [join(other.path, "notes.md")]);
+  assert.deepEqual(fileApproval.commandApproval?.choices, ["approve", "approveForSession", "decline"]);
+  await resolve(fileApproval.id, "approveForSession");
+  assert.deepEqual(replies.get("file-approval"), [{ decision: "acceptForSession" }]);
+  assert.equal(getApprovals().at(-1)?.commandApproval?.status, "approved-for-session");
+
+  const requested = { fileSystem: { write: [other.path], read: null }, network: null };
+  await internal.onRequest({ id: "permission-request", method: "item/permissions/requestApproval", params: {
+    threadId: task.threadId, turnId: task.run.turn.id, itemId: "permissions-1", cwd: api.path,
+    reason: "Write to the requested folder.", permissions: requested,
+  } });
+  const permission = getApprovals().at(-1)!;
+  assert.equal(permission.commandApproval?.kind, "permissions");
+  assert.deepEqual(permission.commandApproval?.writePaths, [other.path]);
+  await resolve(permission.id, "decline");
+  assert.deepEqual(replies.get("permission-request"), [{ permissions: {}, scope: "turn" }]);
+  await internal.onRequest({ id: "permission-granted", method: "item/permissions/requestApproval", params: {
+    threadId: task.threadId, turnId: task.run.turn.id, itemId: "permissions-2", cwd: api.path, reason: null, permissions: requested,
+  } });
+  await resolve(getApprovals().at(-1)!.id, "approve");
+  assert.deepEqual(replies.get("permission-granted"), [{ permissions: { fileSystem: requested.fileSystem }, scope: "turn" }]);
+  const hidden = getApprovals().length;
+  await internal.onRequest({ id: "permission-hidden", method: "item/permissions/requestApproval", params: {
+    threadId: task.threadId, turnId: task.run.turn.id, itemId: "permissions-3", cwd: api.path, reason: null,
+    permissions: { fileSystem: { write: [other.path, "/home/user/.ssh\u200b"] } },
+  } });
+  assert.deepEqual(replies.get("permission-hidden"), [{ permissions: {}, scope: "turn" }]);
+  await internal.onRequest({ id: "blind-file-approval", method: "item/fileChange/requestApproval", params: {
+    threadId: task.threadId, turnId: task.run.turn.id, itemId: "unknown-patch",
+  } });
+  assert.deepEqual(replies.get("blind-file-approval"), [{ decision: "decline" }]);
+  assert.equal(getApprovals().length, hidden);
+
   const implementation = await call(task, "request_implementation", {
     summary: "Update and verify the API.",
     targets: [{ projectId: "api", mode: "checkout" }],
@@ -295,34 +347,37 @@ test("command approvals are one-time decisions bound to the active implementatio
   await runtime.command({ type: "approveImplementation", agentId, requestId: JSON.parse(implementation.text).requestId });
   assert.equal(requests.findLast(({ method }) => method === "turn/start")?.params.approvalPolicy, "on-request");
 
+  const before = getApprovals().length;
   await requestCommand("wrong-turn", api.path, { turnId: planningTurn });
-  await requestCommand("wrong-project", other.path);
-  const alias = join(api.path, "outside");
-  symlinkSync(other.path, alias, "dir");
-  await requestCommand("outside-through-symlink", alias);
+  await requestCommand("relative-cwd", "api");
+  await requestCommand("hidden-text", api.path, { command: "npm test \u202e" });
   await requestCommand("stdin-approval", api.path, { kind: "writeStdin" });
-  await requestCommand("additional-permissions", api.path, { additionalPermissions: { fileSystem: {}, network: null } });
-  await requestCommand("network-approval", api.path, { networkApprovalContext: {} });
-  await requestCommand("session-only", api.path, { availableDecisions: ["acceptForSession", "decline"] });
-  await requestCommand("cancel-only-denial", api.path, { availableDecisions: ["accept", "cancel"] });
-  assert.deepEqual(replies.get("cancel-only-denial"), [{ decision: "cancel" }]);
-  await internal.onRequest({ id: "file-approval", method: "item/fileChange/requestApproval", params: {
-    threadId: task.threadId, turnId: task.run.turn.id, itemId: "file-edit",
-  } });
-  for (const id of ["wrong-turn", "wrong-project", "outside-through-symlink", "stdin-approval",
-    "additional-permissions", "network-approval", "session-only", "file-approval"]) {
-    assert.deepEqual(replies.get(id), declined);
+  await requestCommand("no-approval-offered", api.path, { availableDecisions: ["decline"] });
+  await requestCommand("hidden-extra-path", api.path, { availableDecisions: ["accept", "decline"],
+    additionalPermissions: { fileSystem: { write: ["/tmp/x\u202e"] } } });
+  assert.deepEqual(replies.get("hidden-extra-path"), [{ decision: "decline" }]);
+  for (const id of ["wrong-turn", "relative-cwd", "hidden-text", "stdin-approval"]) {
+    assert.deepEqual(replies.get(id), [{ decision: "cancel" }], id);
   }
-  assert.equal(getApprovals().length, 0);
+  assert.deepEqual(replies.get("no-approval-offered"), [{ decision: "decline" }]);
+  assert.equal(getApprovals().length, before);
+
+  await requestCommand("additional-permissions", api.path, { availableDecisions: ["accept", "decline"],
+    additionalPermissions: { fileSystem: { entries: [{ path: { type: "path", path: other.path }, access: "write" }] }, network: { enabled: true } } });
+  const extra = getApprovals().at(-1)!;
+  assert.deepEqual(extra.commandApproval?.writePaths, [other.path]);
+  assert.equal(extra.commandApproval?.network, "Network access");
+  assert.equal(extra.commandApproval?.declineStopsTurn, undefined);
+  await resolve(extra.id, "decline");
+  assert.deepEqual(replies.get("additional-permissions"), [{ decision: "decline" }]);
+  assert.equal(getApprovals().at(-1)?.commandApproval?.status, "declined");
 
   await requestCommand("approve-this-command", api.path);
   await requestCommand("approve-this-command", api.path);
-  assert.equal(getApprovals().length, 1);
   const approved = getApprovals().at(-1)!;
-  assert(approved);
+  assert.equal(getApprovals().filter(({ id }) => id === approved.id).length, 1);
   assert.equal(approved.commandApproval?.status, "pending");
   assert.equal(approved.commandApproval?.command, "npm test");
-  assert.equal(approved.commandApproval?.cwd, api.path);
   assert.equal(replies.has("approve-this-command"), false);
   await assert.rejects(resolve("not-a-request", "approve"));
   await assert.rejects(resolve(approved.id, "approve", unrelatedId));
@@ -336,7 +391,7 @@ test("command approvals are one-time decisions bound to the active implementatio
 
   await requestCommand("decline-this-command", api.path);
   await resolve(getApprovals().at(-1)!.id, "decline");
-  assert.deepEqual(replies.get("decline-this-command"), declined);
+  assert.deepEqual(replies.get("decline-this-command"), [{ decision: "cancel" }]);
 
   await requestCommand("failed-decision-handoff", api.path);
   const unconfirmed = getApprovals().at(-1)!;
@@ -372,7 +427,7 @@ test("command approvals are one-time decisions bound to the active implementatio
   await assert.rejects(resolve(pending.id, "approve"), /stopping/);
   assert.equal(replies.has("awaiting-at-turn-end"), false);
   await requestCommand("arrived-during-stop", api.path);
-  assert.deepEqual(replies.get("arrived-during-stop"), declined);
+  assert.deepEqual(replies.get("arrived-during-stop"), [{ decision: "cancel" }]);
   acknowledgeStop();
   await stopping;
   complete(task);
