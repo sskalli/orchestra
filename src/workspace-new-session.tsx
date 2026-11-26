@@ -1,6 +1,9 @@
 import { useEffect, useRef, useState } from "react";
 import { UnknownCommandOutcome } from "./workspace-commands.ts";
 import { useComposerAssist } from "./workspace-composer.tsx";
+import { ModelPicker } from "./workspace-model-picker.tsx";
+import type { ModelChange } from "./workspace-model-picker.tsx";
+import { chooseModelSettings } from "./workspace-models.ts";
 import "./workspace-new-session.css";
 
 type NewSessionComposerProps = {
@@ -8,7 +11,7 @@ type NewSessionComposerProps = {
   blocked: boolean;
   projects: readonly { id: string }[];
   onCancel: () => void;
-  onCreate: (name: string, projectIds: string[]) => Promise<string>;
+  onCreate: (name: string, projectIds: string[], choice: ModelChange) => Promise<string>;
   onSend: (agentId: string, text: string) => Promise<void>;
   onStarted: (agentId: string) => void;
 };
@@ -18,6 +21,7 @@ export function NewSessionComposer({ open, blocked, projects, onCancel, onCreate
   const [text, setText] = useState("");
   const [name, setName] = useState("");
   const [projectIds, setProjectIds] = useState<string[]>([]);
+  const [modelChoice, setModelChoice] = useState<ModelChange>({});
   const [createdId, setCreatedId] = useState<string>();
   const [pending, setPending] = useState(false);
   const [error, setError] = useState("");
@@ -32,6 +36,7 @@ export function NewSessionComposer({ open, blocked, projects, onCancel, onCreate
     setText("");
     setName("");
     setProjectIds([]);
+    setModelChoice({});
     setCreatedId(undefined);
     setError("");
     setUnknownOutcome(false);
@@ -52,7 +57,7 @@ export function NewSessionComposer({ open, blocked, projects, onCancel, onCreate
       let agentId = createdId;
       if (!agentId) {
         const title = name.trim() || firstMessage.split("\n", 1)[0].slice(0, 60).trimEnd();
-        agentId = await onCreate(title, projectIds);
+        agentId = await onCreate(title, projectIds, modelChoice);
         setCreatedId(agentId);
       }
       await onSend(agentId, firstMessage);
@@ -95,6 +100,11 @@ export function NewSessionComposer({ open, blocked, projects, onCancel, onCreate
         <input value={name} placeholder="Uses the first line of your message" maxLength={60}
           onChange={(event) => setName(event.target.value)} disabled={pending || Boolean(createdId)} />
       </label>
+      <div className="new-session-field" role="group" aria-label="Model">Model
+        <ModelPicker placement="below" disabled={pending || Boolean(createdId)}
+          settings={chooseModelSettings({ source: "provider-default" }, modelChoice)}
+          onChange={(change) => setModelChoice((current) => ({ ...current, ...change }))} />
+      </div>
       {projects.length > 0 && <fieldset disabled={pending || Boolean(createdId)}>
         <legend>Repositories</legend>
         <p>{projectIds.length ? `Selected: ${projectIds.join(", ")}` : "General chat · no repository access"}</p>

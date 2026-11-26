@@ -4,12 +4,20 @@ import { randomUUID } from "node:crypto";
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { createSdkMcpServer, query as claudeQuery, tool } from "@anthropic-ai/claude-agent-sdk";
-import type { CanUseTool, HookCallback, Options, PermissionResult, PermissionUpdate, Query, SDKMessage, SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
+import type { CanUseTool, EffortLevel, HookCallback, ModelInfo, Options, PermissionResult, PermissionUpdate, Query, SDKMessage, SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
 import type { Event, Id, ProviderServer } from "./app-server.ts";
 
 export const claudeProviderId = "claude-code";
 const toolServerName = "orchestra";
+const effortLevels = new Set<unknown>(["low", "medium", "high", "xhigh", "max"] satisfies EffortLevel[]);
+const modelListTimeoutMs = 60_000;
+
+/** Claude Code lists its default model as "default"; Orchestra then leaves the model unset. */
+function claudeModel(model: unknown) {
+  return typeof model === "string" && model && model !== "default" ? model : undefined;
+}
+
 const writeTools = new Set(["Edit", "Write", "MultiEdit", "NotebookEdit"]);
 
 type TurnStatus = "inProgress" | "completed" | "failed" | "interrupted";
@@ -21,7 +29,7 @@ type JournalThread = { id: string; started: boolean; parentThreadId?: string; pa
   turns: JournalTurn[]; total?: Tokens };
 type ToolSpec = { name: string; description: string; inputSchema: JsonSchema };
 type JsonSchema = { type?: string; enum?: string[]; items?: JsonSchema; properties?: Record<string, JsonSchema>; required?: string[] };
-type ThreadConfig = { cwd: string; roots: string[]; instructions: string; tools: ToolSpec[]; model?: string };
+type ThreadConfig = { cwd: string; roots: string[]; instructions: string; tools: ToolSpec[]; model?: string; effort?: EffortLevel };
 type Run = {
   threadId: string;
   turn: JournalTurn;
@@ -242,7 +250,38 @@ export class ClaudeAppServer implements ProviderServer {
       case "turn/steer": return this.steer(params) as T;
       case "turn/interrupt": return this.interrupt(params) as T;
       case "skills/list": return this.listSkills(params) as T;
+      case "model/list": return this.listModels() as T;
       default: throw new Error(`RPC -32601: ${method} is not supported by the Claude engine`);
+    }
+  }
+
+  /** Asks Claude Code for its models without sending a prompt, and answers in the App Server `model/list` shape. */
+  private async listModels() {
+    const input = new InputQueue();
+    const probe = this.query({ prompt: input, options: {
+      cwd: process.cwd(), env: this.claudeEnvironment(), settingSources: ["user"],
+      ...(process.env.CLAUDE_BIN ? { pathToClaudeCodeExecutable: process.env.CLAUDE_BIN } : {}),
+    } });
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const models = await Promise.race([
+        probe.supportedModels(),
+        new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error("Timed out listing Claude models")), modelListTimeoutMs); }),
+      ]);
+      return { data: models.map((model: ModelInfo) => ({
+        id: model.value,
+        model: claudeModel(model.value) ?? "",
+        displayName: model.displayName,
+        description: model.description,
+        isDefault: model.value === "default",
+        ...(model.resolvedModel ? { resolvedModel: model.resolvedModel } : {}),
+        supportedReasoningEfforts: (model.supportsEffort === false ? [] : model.supportedEffortLevels ?? [])
+          .map((reasoningEffort) => ({ reasoningEffort, description: "" })),
+      })), nextCursor: null };
+    } finally {
+      clearTimeout(timer);
+      input.close();
+      probe.close?.();
     }
   }
 
@@ -251,7 +290,8 @@ export class ClaudeAppServer implements ProviderServer {
     return {
       cwd: params.cwd, roots, instructions: params.developerInstructions ?? "",
       tools: Array.isArray(params.dynamicTools) ? params.dynamicTools : this.configs.get(params.threadId)?.tools ?? [],
-      model: params.model || undefined,
+      model: claudeModel(params.model),
+      effort: this.configs.get(params.threadId)?.effort,
     };
   }
 
@@ -297,7 +337,7 @@ export class ClaudeAppServer implements ProviderServer {
     this.threads.set(thread.id, thread);
     this.configs.set(thread.id, this.configure(params));
     this.save();
-    return { thread: { id: thread.id }, modelProvider: claudeProviderId, model: params.model || undefined };
+    return { thread: { id: thread.id }, modelProvider: claudeProviderId, model: claudeModel(params.model) };
   }
 
   private resumeThread(params: any) {
@@ -307,7 +347,7 @@ export class ClaudeAppServer implements ProviderServer {
     config.tools = this.configs.get(thread.id)?.tools ?? params.dynamicTools ?? [];
     this.configs.set(thread.id, config);
     return { thread: { id: thread.id, status: { type: this.runs.has(thread.id) ? "active" : "idle" }, turns: thread.turns },
-      initialTurnsPage: { data: thread.turns }, modelProvider: claudeProviderId, model: params.model || undefined };
+      initialTurnsPage: { data: thread.turns }, modelProvider: claudeProviderId, model: claudeModel(params.model) };
   }
 
   private readThread(threadId: string) {
@@ -351,6 +391,9 @@ export class ClaudeAppServer implements ProviderServer {
     const config = this.configs.get(params.threadId);
     if (!thread || !config) throw new Error("Claude has no open session for this task.");
     if (this.runs.has(thread.id)) throw new Error("A Claude turn is already running for this task.");
+    // A turn's model and effort stay with the session for later turns, as on Codex.
+    if (params.model !== undefined) config.model = claudeModel(params.model);
+    if (params.effort !== undefined) config.effort = effortLevels.has(params.effort) ? params.effort : undefined;
     const implementation = params.sandboxPolicy?.type === "workspaceWrite";
     const roots: string[] = Array.isArray(params.runtimeWorkspaceRoots) ? params.runtimeWorkspaceRoots : config.roots;
     const cwd: string = params.cwd ?? config.cwd;
@@ -366,6 +409,7 @@ export class ClaudeAppServer implements ProviderServer {
       ...(thread.started ? { resume: thread.id } : { sessionId: thread.id }),
       systemPrompt: { type: "preset", preset: "claude_code", append: config.instructions + backgroundSubagentInstructions },
       ...(config.model ? { model: config.model } : {}),
+      ...(config.effort ? { effort: config.effort } : {}),
       permissionMode: implementation ? "acceptEdits" : "default",
       canUseTool: this.permissionHandler(thread.id),
       mcpServers: { [toolServerName]: this.toolServer(thread.id, config.tools) },

@@ -3,7 +3,7 @@ import { needsUserInput } from "./workspace-status.ts";
 import { agentAppearance } from "./workspace-agent-appearance.ts";
 import { useComposerAssist } from "./workspace-composer.tsx";
 import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
-import type { FormEvent, KeyboardEvent, PointerEvent } from "react";
+import type { FormEvent, KeyboardEvent, PointerEvent, ReactNode } from "react";
 import Markdown from "react-markdown";
 import type { Components } from "react-markdown";
 import { LuArrowUp, LuCheck, LuCopy, LuEllipsis, LuSquare } from "react-icons/lu";
@@ -23,6 +23,8 @@ type ChatProps = {
   taskPhase?: NonNullable<WorkspaceAgent["directTask"]>["phase"];
   taskDetail?: string;
   modelLabel?: string;
+  /** The model and effort picker, shown first in the composer toolbar. */
+  modelPicker?: ReactNode;
   usageLabel?: string;
   draft: string;
   composerHeight?: number;
@@ -218,7 +220,7 @@ function MessageActions({ message }: { message: WorkspaceMessage }) {
 
 function Conversation({
   agent, projectLabel, repositoryScope, delivery, taskPhase, taskDetail, modelLabel, usageLabel, draft: initialDraft, composerHeight, onComposerHeightChange, onDraftInput, onDraftChange, onSend, onSteer, onCancel, onResumeQueue, onApproveImplementation, onClose,
-  disabled, disabledReason, focusMessageId, focusRequest, onOpenAgent, onLifecycle, onRename, onResolveCommandApproval,
+  disabled, disabledReason, focusMessageId, focusRequest, onOpenAgent, onLifecycle, onRename, onResolveCommandApproval, modelPicker,
 }: ChatProps) {
   const transcript = useRef<HTMLDivElement>(null);
   const actions = useRef<HTMLDivElement>(null);
@@ -767,6 +769,7 @@ function Conversation({
             {assist.menu}
           </div>
           <div className="chat-composer-actions">
+            {modelPicker}
             {onSteer && <label className="chat-steer-toggle">
               <input type="checkbox" role="switch" aria-label="Steer active turn" checked={steerEnabled}
                 onChange={(event) => setSteerEnabled(event.target.checked)} />

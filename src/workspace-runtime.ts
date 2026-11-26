@@ -11,8 +11,8 @@ import { ClaudeAppServer, claudeProviderId } from "./claude-app-server.ts";
 import type { Event, Id, Thread, Turn } from "./app-server.ts";
 import { createFeatureWorktree, removeFeatureWorktree } from "./workspace-worktree.ts";
 import { fingerprintCandidate, fingerprintCheckout, fingerprintMemberSnapshots, hasWorktreeChanges, pinApprovedCandidate, pinDirectCandidates, validateCandidateWorktree, type IntegrationMember } from "./workspace-integration.ts";
-import { recordReportedModel, selectModelSettings } from "./workspace-models.ts";
-import type { ModelSettings, ReportedModel } from "./workspace-models.ts";
+import { chooseModelSettings, modelOptions, recordReportedModel, selectModelSettings, turnModelParams } from "./workspace-models.ts";
+import type { ModelCatalog, ModelSettings, ProviderModel, ReportedModel } from "./workspace-models.ts";
 import type { SavedSession, workspaceStore } from "./workspace-store.ts";
 import { checkoutBaseline, createRequestedWorktree, removeRequestedWorktree, resolveWriteTargets, validateRequestedWorktree } from "./workspace-write-scope.ts";
 import type { WriteTarget } from "./workspace-write-scope.ts";
@@ -92,7 +92,8 @@ export type WorkspaceSnapshot = {
 };
 export type AgentSignal = { id: string; senderId: string; recipientId: string };
 export type WorkspaceCommand =
-  | { type: "createTask"; name: string; projectIds: string[] }
+  | { type: "createTask"; name: string; projectIds: string[]; model?: string | null; effort?: string | null }
+  | { type: "setModel"; agentId: string; model?: string | null; effort?: string | null }
   | { type: "answerProductQuestion"; agentId: string; questionId: string; text: string }
   | { type: "resolveCommandApproval"; agentId: string; requestId: string; decision: ApprovalChoice }
   | { type: "approveImplementation"; agentId: string; requestId: string }
@@ -150,6 +151,10 @@ const maxSkillCatalogs = 16;
 /** How long a Codex turn waits for an unloaded skill list before sending "/name" as plain text. */
 const skillLookupTimeoutMs = 5_000;
 const workspaceThreadConfig = { "features.multi_agent": true, "features.multi_agent_v2": true };
+const demoModelCatalog: ModelCatalog = { models: [
+  { id: "gpt-5.5", label: "GPT-5.5", efforts: ["low", "medium", "high", "xhigh"], defaultEffort: "medium", isDefault: true },
+  { id: "gpt-5.5-mini", label: "GPT-5.5 mini", efforts: ["low", "medium", "high"], defaultEffort: "medium" },
+] };
 const input = (text: string) => [{ type: "text", text, text_elements: [] }];
 const hasSubmittedMessage = (agent: WorkspaceAgent) =>
   agent.messages.some((entry) => entry.role === "user" && entry.state !== "queued");
@@ -277,6 +282,7 @@ function approvalSummary(kind: NonNullable<PermissionApproval["kind"]>) {
 export class WorkspaceRuntime {
   private readonly state: WorkspaceSnapshot;
   private readonly demo: boolean;
+  private modelCatalog?: ModelCatalog;
   private readonly providerId: string;
   private readonly projects: WorkspaceProject[];
   private readonly store?: ReturnType<typeof workspaceStore>;
@@ -526,7 +532,7 @@ export class WorkspaceRuntime {
 
   async command(command: WorkspaceCommand) {
     if (this.closed) throw new Error("The workspace is closed.");
-    if (command.type === "createTask") return this.createDirectTask(command.name, command.projectIds);
+    if (command.type === "createTask") return this.createDirectTask(command.name, command.projectIds, command);
     const session = this.sessions.get(command.agentId);
     if (!session) throw new Error("This conversation no longer exists.");
     if (session.agent.nativeChild) throw new Error(`Use the owning task to interact with this ${this.engineName} subagent.`);
@@ -539,6 +545,10 @@ export class WorkspaceRuntime {
       return;
     }
     if (!this.isActive(session)) throw new Error("Restore this archived conversation before messaging it.");
+    if (command.type === "setModel") {
+      this.setModel(session, command);
+      return;
+    }
     if (command.type === "resolveCommandApproval") {
       this.resolveCommandApproval(session, command.requestId, command.decision);
       return;
@@ -659,7 +669,41 @@ export class WorkspaceRuntime {
     this.publish(false);
   }
 
-  private async createDirectTask(name: string, projectIds: string[]) {
+  private setModel({ agent }: AgentSession, change: { model?: string | null; effort?: string | null }) {
+    if (agent.lifecycleBusy) throw new Error("Wait for the current task action to finish before changing the model.");
+    const previous = agent.modelSettings;
+    agent.modelSettings = chooseModelSettings(previous ?? this.selectModelSettings(), change);
+    if (!this.persist()) {
+      agent.modelSettings = previous;
+      this.publish(false);
+      throw new Error("Orchestra could not save the model choice.");
+    }
+    this.publish(false);
+  }
+
+  /** Lists the models and reasoning efforts the provider offers, for the picker. Successful lists are cached. */
+  async listModels(): Promise<ModelCatalog> {
+    if (this.demo) return demoModelCatalog;
+    if (this.modelCatalog) return this.modelCatalog;
+    if (!this.server || !this.available) return { models: [], error: `${this.engineName} is not connected.` };
+    try {
+      const models: ProviderModel[] = [];
+      let cursor: string | null | undefined;
+      for (let page = 0; page < 10; page += 1) {
+        const response = await this.server.call<{ data?: ProviderModel[]; nextCursor?: string | null }>("model/list",
+          { includeHidden: false, ...(cursor ? { cursor } : {}) });
+        models.push(...(Array.isArray(response?.data) ? response.data : []));
+        cursor = response?.nextCursor;
+        if (!cursor) break;
+      }
+      this.modelCatalog = { models: modelOptions(models) };
+      return this.modelCatalog;
+    } catch (error) {
+      return { models: [], error: `${this.engineName} did not list its models: ${errorText(error)}` };
+    }
+  }
+
+  private async createDirectTask(name: string, projectIds: string[], choice: { model?: string | null; effort?: string | null } = {}) {
     if (!this.available || this.demo || this.storageFailed) {
       throw new Error(`${this.engineName} must be ready to create a task.`);
     }
@@ -674,6 +718,9 @@ export class WorkspaceRuntime {
     const session = this.createAgent(randomUUID(), title, "worker");
     session.agent.projectId = projectIds[0];
     session.agent.directTask = { projectIds: [...projectIds], phase: "planning" };
+    if (choice.model !== undefined || choice.effort !== undefined) {
+      session.agent.modelSettings = chooseModelSettings(this.selectModelSettings(), choice);
+    }
     try {
       await this.attachThread(session);
       if (this.storageFailed) throw new Error("Orchestra could not save the new task.");
@@ -1525,6 +1572,7 @@ export class WorkspaceRuntime {
       const { turn } = await this.server!.call<{ turn: Turn }>("turn/start", {
         threadId: session.threadId,
         approvalPolicy: "on-request",
+        ...turnModelParams(session.agent.modelSettings),
         ...this.directTaskTurnScope(session, run.implementationRoots),
         input: turnInput,
         additionalContext: this.pendingQuestionContext(session, next, implementation !== undefined),

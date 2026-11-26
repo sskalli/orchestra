@@ -12,6 +12,7 @@ import { workspacePreferences } from "./workspace-preferences.ts";
 import { useDockResizing } from "./use-dock-resizing.tsx";
 import { TaskLifecycleDialog } from "./workspace-task-dialogs.tsx";
 import { NewSessionComposer } from "./workspace-new-session.tsx";
+import { ModelPicker } from "./workspace-model-picker.tsx";
 import type { AgentSignal, WorkspaceRuntime } from "./workspace-runtime.ts";
 import { createTask, send } from "./workspace-commands.ts";
 import "./workspace.css";
@@ -464,6 +465,9 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
         taskChecks: agent.integration.validationEvidence?.summary,
       } : undefined}
       modelLabel={modelLabel}
+      modelPicker={agent.nativeChild || agent.archivedAt !== undefined ? undefined : <ModelPicker settings={agent.modelSettings}
+        busy={agent.status === "working" || Boolean(agent.canCancel)} disabled={Boolean(agent.lifecycleBusy)}
+        onChange={(change) => send({ type: "setModel", agentId: agent.id, ...change })} />}
       usageLabel={usage}
       draft={drafts[agent.id] ?? ""}
       composerHeight={composerSizes.agent}

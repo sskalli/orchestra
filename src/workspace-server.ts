@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import { WorkspaceRuntime } from "./workspace-runtime.ts";
 import { safeError } from "./app-server.ts";
 import { workspaceStore } from "./workspace-store.ts";
+import { modelChoice } from "./workspace-models.ts";
 import { parseWorkspaceArgs } from "./workspace-options.ts";
 import { defaultProject, resolveProjects, workspaceIdentity } from "./workspace-projects.ts";
 
@@ -36,9 +37,14 @@ async function readCommand(request: IncomingMessage) {
   const command = JSON.parse(Buffer.concat(chunks).toString("utf8"));
   if (command?.type === "createTask" && typeof command.name === "string" &&
       Array.isArray(command.projectIds) && command.projectIds.every((id: unknown) => typeof id === "string")) {
-    return { type: "createTask" as const, name: command.name, projectIds: command.projectIds as string[] };
+    return { type: "createTask" as const, name: command.name, projectIds: command.projectIds as string[],
+      model: modelChoice(command.model, "model"), effort: modelChoice(command.effort, "reasoning effort") };
   }
   if (typeof command?.agentId !== "string") throw new Error("Invalid agent");
+  if (command.type === "setModel") {
+    return { type: "setModel" as const, agentId: command.agentId,
+      model: modelChoice(command.model, "model"), effort: modelChoice(command.effort, "reasoning effort") };
+  }
   if (command.type === "rename" && typeof command.name === "string") {
     return { type: "rename" as const, agentId: command.agentId, name: command.name };
   }
@@ -100,6 +106,11 @@ const server = createServer(async (request, response) => {
       response.writeHead(503, { "Content-Type": "application/json" })
         .end(JSON.stringify({ engine: engineName, error: error instanceof Error ? safeError(error.message) : "Skills could not be listed." }));
     }
+    return;
+  }
+  if (request.method === "GET" && path === "/api/models") {
+    const catalog = await runtime.listModels();
+    response.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(catalog));
     return;
   }
   if (request.method === "GET" && path === "/api/events") {

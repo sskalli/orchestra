@@ -52,7 +52,15 @@ createInterface({ input: process.stdin }).on("line", (line) => {
   if (method === "initialize") reply({});
   else if (method === "account/read") reply({ account: { type: "chatgpt" } });
   else if (method === "config/read") reply({ config: { model_provider: null } });
-  else if (method === "model/list") reply({ data: [] });
+  else if (method === "model/list") {
+    const effort = (reasoningEffort) => ({ reasoningEffort, description: "" });
+    reply(params.cursor === "page-2"
+      ? { data: [{ id: "fixture-hidden", model: "fixture-hidden", displayName: "Hidden", hidden: true, supportedReasoningEfforts: [] },
+          { id: "fixture-mini", model: "fixture-mini", displayName: "Fixture mini", hidden: false,
+            supportedReasoningEfforts: [effort("low")], defaultReasoningEffort: "low", isDefault: false }], nextCursor: null }
+      : { data: [{ id: "fixture-default", model: "fixture-default", displayName: "Fixture default", hidden: false,
+          supportedReasoningEfforts: [effort("low"), effort("high")], defaultReasoningEffort: "high", isDefault: true }], nextCursor: "page-2" });
+  }
   else if (method === "skills/list") {
     reply({ data: [{ cwd: params.cwds?.[0] ?? "", errors: [], skills: [
       { name: "release-notes", description: "Long description", interface: { shortDescription: "Draft release notes" },
