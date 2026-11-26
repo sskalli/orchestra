@@ -5,6 +5,8 @@ import type { CSSProperties, KeyboardEvent, PointerEvent, RefObject } from "reac
 import { LuCircleAlert, LuCircleCheck, LuInfo, LuTriangleAlert } from "react-icons/lu";
 import type { IconType } from "react-icons";
 import type { Camera } from "./workspace-preferences.ts";
+import { placeRoots, rootAngle } from "./workspace-map-layout.ts";
+import type { Point } from "./workspace-map-layout.ts";
 import type { AgentSignal } from "./workspace-runtime.ts";
 import "./workspace-canvas.css";
 
@@ -20,7 +22,6 @@ export type CanvasAgent = {
   activity?: string;
 };
 
-type Point = { x: number; y: number };
 type Node = Point & { agent: CanvasAgent; taskRoot: boolean };
 type Team = Point & { id: string; depth: number };
 type Layout = { nodes: Node[]; teams: Team[] };
@@ -35,24 +36,6 @@ const RING_START = 105;
 const RING_STEP = 62;
 const TAU = Math.PI * 2;
 const radiusAt = (depth: number) => RING_START + (depth - 1) * RING_STEP;
-
-function teamCenters(count: number): Point[] {
-  const centers = [{ x: 0, y: 0 }];
-  const spacing = 560;
-  const directions = [[1, 0], [1, -1], [0, -1], [-1, 0], [-1, 1], [0, 1]];
-  for (let ring = 1; centers.length < count; ring++) {
-    let q = -ring;
-    let r = ring;
-    for (const [dq, dr] of directions) {
-      for (let step = 0; step < ring && centers.length < count; step++) {
-        centers.push({ x: spacing * (q + r / 2), y: spacing * Math.sqrt(3) / 2 * r });
-        q += dq;
-        r += dr;
-      }
-    }
-  }
-  return centers;
-}
 
 export function radialLayout(agents: CanvasAgent[], taskPositions: ReadonlyMap<string, Point> = new Map()): Layout {
   const ids = new Set(agents.map((agent) => agent.id));
@@ -71,9 +54,9 @@ export function radialLayout(agents: CanvasAgent[], taskPositions: ReadonlyMap<s
   const nodes: Node[] = [];
   const teams: Team[] = [];
   const visited = new Set<string>();
-  const centers = teamCenters(roots.length);
-  roots.forEach((root, index) => {
-    const team = { ...(taskPositions.get(root.id) ?? centers[index]), id: root.id, depth: 0 };
+  const centers = placeRoots(roots.map(({ id }) => id), taskPositions);
+  roots.forEach((root) => {
+    const team = { ...centers.get(root.id)!, id: root.id, depth: 0 };
     const walk = (agent: CanvasAgent, depth: number, angle: number, sector: number) => {
       if (visited.has(agent.id)) return;
       visited.add(agent.id);
@@ -91,7 +74,7 @@ export function radialLayout(agents: CanvasAgent[], taskPositions: ReadonlyMap<s
         walk(child, depth + 1, angle + (sibling - (siblings.length - 1) / 2) * share, share);
       });
     };
-    walk(root, 0, index % 2 ? Math.PI / 7 : -Math.PI / 3, TAU);
+    walk(root, 0, rootAngle(root.id), TAU);
     teams.push(team);
   });
   return { nodes, teams };
@@ -224,6 +207,16 @@ export function WorkspaceCanvas({
   taskPositionsRef.current = taskPositions;
   const layout = useMemo(() => radialLayout(agents, taskPositions), [agents, taskPositions]);
   const taskDrag = useRef<TaskDrag | null>(null);
+  useEffect(() => {
+    // Keep each root where it first appeared, so archiving or adding tasks never moves the others.
+    const unsaved = layout.teams.filter(({ id }) => !taskPositionsRef.current.has(id));
+    if (!unsaved.length) return;
+    const next = new Map(taskPositionsRef.current);
+    for (const { id, x, y } of unsaved) next.set(id, { x, y });
+    taskPositionsRef.current = next;
+    setTaskPositions(next);
+    onTaskPositionsChange?.(Object.fromEntries(next));
+  }, [layout, onTaskPositionsChange]);
   const suppressTaskClick = useRef<string | null>(null);
   const viewport = useRef<HTMLDivElement>(null);
   const nodes = useRef(new Map<string, HTMLButtonElement>());

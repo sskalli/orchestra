@@ -1,4 +1,4 @@
-import { LuArchive, LuMessageSquare, LuMessageSquareDot, LuPlus } from "react-icons/lu";
+import { LuArchive, LuMessageSquare, LuMessageSquareDot, LuPlus, LuTriangleAlert } from "react-icons/lu";
 import { agentAppearance } from "./workspace-agent-appearance.ts";
 import { documentTitle, effectiveAgentStatus, needsUserInput } from "./workspace-status.ts";
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -287,6 +287,9 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
   const blocked = !connected || !["ready", "demo"].includes(provider.state);
   const blockedReason = !connected ? "Reconnecting to the local workspace…" : provider.message ?? providerLabel(provider);
   const projectName = project.name;
+  // Workspace-level detail (sign-in steps, save or load failures, usage limits) stays readable without hovering.
+  const providerDetail = blocked && connected && provider.message ? provider.message : undefined;
+  const storageMessage = "Browser storage is unavailable. Drafts and layout changes may not survive reload.";
 
   const inboxEvents = useMemo(() => flightLogEvents(agents), [agents]);
 
@@ -315,12 +318,15 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
 
   const agentIdKey = snapshot.agents.map(({ id }) => id).join("\n");
   const agentIds = useMemo(() => new Set(agentIdKey ? agentIdKey.split("\n") : []), [agentIdKey]);
+  // Saved tasks are loaded once the engine starts connecting; before that, or after a failed load, the list is empty.
+  const tasksLoaded = connected && !["connecting", "error"].includes(provider.state);
   useEffect(() => {
+    if (!tasksLoaded) return;
     // Drop saved positions of tasks that no longer exist.
     const stored = preferences.readNodePositions();
     const kept = nodePositions(stored, agentIds);
     if (Object.keys(kept).length !== Object.keys(stored).length) preferences.writeNodePositions(kept);
-  }, [preferences, agentIds]);
+  }, [preferences, agentIds, tasksLoaded]);
 
   const title = documentTitle(snapshot.agents);
   useEffect(() => { document.title = title; }, [title]);
@@ -530,10 +536,13 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
             {snapshot.projects.map((entry) => <div key={entry.id}><strong>{entry.id}</strong><span>{entry.path}</span></div>)}
           </div>}
         </div>
-        <div className={`sw-provider sw-provider--${connected ? provider.state : "connecting"}`} role="status"
-          title={blocked ? blockedReason : undefined}><span aria-hidden="true" />{connected ? providerLabel(provider) : "Reconnecting"}</div>
-        {storageUnavailable && <span className="sw-storage-issue" role="status"
-          title="Browser storage is unavailable. Drafts and layout changes may not survive reload.">Storage unavailable</span>}
+        <div className={`sw-provider sw-provider--${connected ? provider.state : "connecting"}`} role="status"><span aria-hidden="true" />{connected ? providerLabel(provider) : "Reconnecting"}</div>
+        {providerDetail && <details className="sw-provider-detail">
+          <summary title={providerDetail} aria-label={providerDetail}><LuTriangleAlert aria-hidden="true" /><span>{providerDetail}</span></summary>
+          <div className="sw-usage-details" role="note">{providerDetail}</div>
+        </details>}
+        {storageUnavailable && <span className="sw-storage-issue" role="status" aria-label={storageMessage} title={storageMessage}>
+          <LuTriangleAlert aria-hidden="true" /><span>Storage unavailable</span></span>}
         {snapshot.usage && <WorkspaceUsage usage={snapshot.usage} />}
       </header>
       <main ref={bodyRef} className={`sw-body ${chatOpen ? "is-agent-open" : ""} ${leftOpen ? "is-inbox-open" : ""} ${resizing ? "is-resizing" : ""}`}
@@ -562,7 +571,7 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
             </button>}
           </div>
           <WorkspaceCanvas agents={canvasAgents} signals={signals} selectedId={selectedId} onSelect={select} onStatus={handleStatus}
-            chatWindowRef={chatWindowRef} initialCamera={savedCamera} onCameraChange={preferences.writeCamera}
+            chatWindowRef={chatWindowRef} emptyMessage={blocked ? blockedReason : undefined} initialCamera={savedCamera} onCameraChange={preferences.writeCamera}
             initialTaskPositions={savedNodePositions} onTaskPositionsChange={(positions) =>
               preferences.writeNodePositions(nodePositions(positions, agentIds))} />
           {archiveOpen && <section className="sw-archive-list" aria-label="Archived agents" onKeyDown={(event) => {

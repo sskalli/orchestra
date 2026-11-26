@@ -52,3 +52,27 @@ test("node positions are validated, filtered by known ids, and stored per worksp
     else Reflect.deleteProperty(globalThis, "localStorage");
   }
 });
+
+test("task roots keep their positions when other roots come and go", async () => {
+  const { placeRoots, teamCenters } = await import("../src/workspace-map-layout.ts");
+  const [center, second, third] = teamCenters(3);
+  const first = placeRoots(["a", "b", "c"], new Map());
+  assert.deepEqual([...first.values()], [center, second, third]);
+
+  // Archiving "a" must not move "b" or "c" once their positions are known.
+  const afterArchive = placeRoots(["b", "c"], first);
+  assert.deepEqual(afterArchive.get("b"), second);
+  assert.deepEqual(afterArchive.get("c"), third);
+  // Restoring it brings it back to its own place.
+  assert.deepEqual(placeRoots(["a", "b", "c"], first).get("a"), center);
+
+  // A new root skips default slots that overlap an existing (e.g. dragged) root.
+  const known = new Map([["moved", { x: center.x + 20, y: center.y - 30 }], ["b", second]]);
+  const placed = placeRoots(["moved", "b", "new"], known);
+  assert.deepEqual(placed.get("new"), third);
+  for (const [id, point] of placed) {
+    for (const [other, otherPoint] of placed) {
+      if (id !== other) assert.ok(Math.hypot(point.x - otherPoint.x, point.y - otherPoint.y) > 400, `${id} overlaps ${other}`);
+    }
+  }
+});
