@@ -3,9 +3,9 @@ import { needsUserInput } from "./workspace-status.ts";
 import { agentAppearance } from "./workspace-agent-appearance.ts";
 import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { FormEvent, KeyboardEvent, PointerEvent } from "react";
-import Markdown from "react-markdown";
-import type { Components } from "react-markdown";
-import { LuArrowUp, LuCheck, LuCopy, LuEllipsis, LuSquare } from "react-icons/lu";
+import { LuArrowUp, LuEllipsis, LuSquare } from "react-icons/lu";
+import { CopyButton } from "./copy-button.tsx";
+import { ChatMarkdown } from "./workspace-markdown.tsx";
 import type { ApprovalChoice, PermissionApproval, SystemMessageKind, WorkspaceAgent, WorkspaceMessage } from "./workspace-runtime.ts";
 
 import "./workspace-chat.css";
@@ -60,15 +60,6 @@ const systemMessageLabels: Record<SystemMessageKind, string> = {
   warning: "Warning",
   notice: "Notice",
   success: "Success",
-};
-
-const markdownComponents: Components = {
-  a: ({ children, href }) => {
-    if (!href) return children;
-    const external = /^(?:https?:)?\/\//i.test(href);
-    return <a href={href} target={external ? "_blank" : undefined}
-      rel={external ? "noopener noreferrer" : undefined}>{children}</a>;
-  },
 };
 
 const messageTime = new Intl.DateTimeFormat(undefined, { hour: "numeric", minute: "2-digit" });
@@ -183,34 +174,12 @@ function CommandApprovalCard({ approval, requestId, blocked, onResolve }: {
 }
 
 function MessageActions({ message }: { message: WorkspaceMessage }) {
-  const [copyStatus, setCopyStatus] = useState<"copied" | "failed">();
-  const reset = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
-  useEffect(() => () => clearTimeout(reset.current), []);
-
-  async function copy() {
-    try {
-      await navigator.clipboard.writeText(message.commandApproval?.command ?? message.text);
-      setCopyStatus("copied");
-    } catch {
-      setCopyStatus("failed");
-    }
-    clearTimeout(reset.current);
-    reset.current = setTimeout(() => setCopyStatus(undefined), 2000);
-  }
-
   const time = message.createdAt === undefined ? undefined : new Date(message.createdAt);
-  const copyLabel = copyStatus === "copied" ? "Copied" : "Copy message";
   return (
     <footer className="chat-message-actions">
       {time && Number.isFinite(time.getTime()) &&
         <time dateTime={time.toISOString()} title={time.toLocaleString()}>{messageTime.format(time)}</time>}
-      <button type="button" className="chat-icon-button" aria-label={copyLabel}
-        title={copyLabel} onClick={() => void copy()}>
-        {copyStatus === "copied" ? <LuCheck aria-hidden="true" /> : <LuCopy aria-hidden="true" />}
-      </button>
-      <span role="status" className={copyStatus === "copied" ? "chat-copy-announcement" : undefined}>
-        {copyStatus === "failed" ? "Could not copy" : copyStatus === "copied" ? "Copied" : ""}
-      </span>
+      <CopyButton text={message.commandApproval?.command ?? message.text} label="Copy message" />
     </footer>
   );
 }
@@ -264,6 +233,19 @@ function Conversation({
   const composerLimits = useRef({ min: 0, max: 0 });
   const messages = useRef(new Map<string, HTMLElement>());
   const pinToBottom = useRef(true);
+  // Images and diagrams grow after they load; keep a pinned transcript at the bottom when any message resizes.
+  const messageResizes = useRef<ResizeObserver | null>(null);
+  useEffect(() => {
+    const observer = new ResizeObserver(() => {
+      if (pinToBottom.current && transcript.current) transcript.current.scrollTop = transcript.current.scrollHeight;
+    });
+    messageResizes.current = observer;
+    for (const element of messages.current.values()) observer.observe(element);
+    return () => {
+      observer.disconnect();
+      messageResizes.current = null;
+    };
+  }, []);
   const [showJumpToLatest, setShowJumpToLatest] = useState(false);
   const [draft, setDraft] = useState(initialDraft);
   const draftRef = useRef(initialDraft);
@@ -458,8 +440,12 @@ function Conversation({
     }
   }, [agent.messages]);
 
+  const lastScrollTop = useRef(0);
   function syncPinState(element: HTMLDivElement) {
-    const pinned = element.scrollHeight - element.scrollTop - element.clientHeight < 36;
+    // Scroll events arrive a frame late, so content that grew meanwhile (images, diagrams) must not read as scrolling up.
+    const movedUp = element.scrollTop < lastScrollTop.current - 1;
+    lastScrollTop.current = element.scrollTop;
+    const pinned = element.scrollHeight - element.scrollTop - element.clientHeight < 36 || (pinToBottom.current && !movedUp);
     pinToBottom.current = pinned;
     setShowJumpToLatest(!pinned);
   }
@@ -574,8 +560,12 @@ function Conversation({
           return (
             <article key={message.id} tabIndex={-1} className={`chat-message chat-message--${message.role}${systemKind ? ` chat-message--${systemKind}` : ""}`}
               ref={(element) => {
-                if (element) messages.current.set(message.id, element);
-                else messages.current.delete(message.id);
+                const previous = messages.current.get(message.id);
+                if (previous && previous !== element) messageResizes.current?.unobserve(previous);
+                if (element) {
+                  messages.current.set(message.id, element);
+                  messageResizes.current?.observe(element);
+                } else messages.current.delete(message.id);
               }}>
               <div className="chat-message-content">
                 <div className="chat-message-header">
@@ -597,7 +587,8 @@ function Conversation({
                 ) : <div className="chat-markdown">
                   {implementationRequest
                     ? <p className="chat-implementation-summary">{message.text}</p>
-                    : <Markdown skipHtml disallowedElements={["img"]} components={markdownComponents}>{message.text}</Markdown>}
+                    : <ChatMarkdown text={message.text} agentId={agent.id} idPrefix={message.id}
+                      streaming={message.state === "streaming"} />}
                   {message.state === "streaming" ? <span className="chat-stream-cursor" aria-label="Responding" /> : null}
                 </div>}
                 {implementationRequest && !!repositoryScope?.length &&
@@ -613,7 +604,7 @@ function Conversation({
               <MessageActions message={message} />
             </article>
           );
-        }), [agent.messages, agent.canCancel, agent.queueDepth, approveImplementation, approvingImplementation, archived, blocked, hiddenMessages, onApproveImplementation, onResolveCommandApproval, repositoryScope]);
+        }), [agent.id, agent.messages, agent.canCancel, agent.queueDepth, approveImplementation, approvingImplementation, archived, blocked, hiddenMessages, onApproveImplementation, onResolveCommandApproval, repositoryScope]);
 
   const headerStatus = archived ? "Archived" : agent.lifecycleBusy ? "Updating…" : statusLabels[agent.status];
   const headerTone = archived || agent.lifecycleBusy ? "idle" : agent.status;

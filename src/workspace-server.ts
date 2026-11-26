@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import { WorkspaceRuntime } from "./workspace-runtime.ts";
 import { workspaceStore } from "./workspace-store.ts";
 import { parseWorkspaceArgs } from "./workspace-options.ts";
+import { resolveLocalImage } from "./workspace-images.ts";
 import { defaultProject, resolveProjects, workspaceIdentity } from "./workspace-projects.ts";
 
 const { live, projectPath, projects: specifiedProjects, provider: modelProvider, engine } = parseWorkspaceArgs(process.argv.slice(2));
@@ -85,6 +86,26 @@ const server = createServer(async (request, response) => {
     }
     response.writeHead(200, { "Content-Type": "application/json", "Content-Disposition": 'attachment; filename="orchestra-usage.json"' })
       .end(JSON.stringify(usage, null, 2));
+    return;
+  }
+  if (request.method === "GET" && path === "/api/image") {
+    const query = new URL(request.url ?? "", origin).searchParams;
+    const image = await resolveLocalImage(query.get("path") ?? "", runtime.imageRoots(query.get("agent") ?? undefined));
+    if (!("path" in image)) {
+      response.writeHead(image.status, { "Content-Type": "text/plain; charset=utf-8" }).end(image.reason);
+      return;
+    }
+    try {
+      const body = await readFile(image.path);
+      // A sandboxed, script-free policy keeps an SVG opened in its own tab from acting on the workspace origin.
+      response.writeHead(200, {
+        "Content-Type": image.type,
+        "Content-Security-Policy": "default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline'; sandbox; frame-ancestors 'none'",
+        "Cache-Control": "private, max-age=60",
+      }).end(body);
+    } catch {
+      response.writeHead(404).end();
+    }
     return;
   }
   if (request.method === "GET" && path === "/api/events") {

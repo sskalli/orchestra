@@ -345,6 +345,19 @@ export class WorkspaceRuntime {
     return { version: 1, modelProvider: this.providerId, ...this.usage.snapshot() };
   }
 
+  /** Directories the chat may show local images from: the agent's own task worktrees and repositories first, then every other configured repository and task worktree. */
+  imageRoots(agentId?: string) {
+    const agents = this.state.agents;
+    const worktrees = (agent: WorkspaceAgent) => [agent.candidate?.path, ...(agent.directCandidates ?? []).map(({ path }) => path),
+      ...(agent.scopedWorktrees ?? []).map(({ path }) => path), agent.integration?.path];
+    let owner = agents.find(({ id }) => id === agentId);
+    for (let depth = 0; owner?.parentId && depth < 16; depth++) owner = agents.find(({ id }) => id === owner!.parentId) ?? owner;
+    const own = owner ? [...worktrees(owner),
+      ...(owner.directTask?.projectIds ?? []).map((id) => this.projects.find((project) => project.id === id)?.path)] : [];
+    return [...new Set([...own, ...this.projects.map(({ path }) => path), ...agents.flatMap(worktrees)]
+      .filter((path): path is string => typeof path === "string" && path.length > 0))];
+  }
+
   private trackUsage(update: (usage: WorkspaceUsage) => void) {
     if (!this.usage) return;
     try {

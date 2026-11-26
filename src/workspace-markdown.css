@@ -1,0 +1,108 @@
+/* Shared copy shortcut status: the result is announced, and only a failure is shown as text. */
+.chat-copy-announcement { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+.chat-copy-failure { color: var(--text-secondary); }
+
+/* Fenced code blocks: language on the left, copy on the right. */
+.chat-markdown .chat-code-block {
+  position: relative;
+  max-width: 100%;
+  margin: .85em 0;
+  border: 1px solid var(--sw-line);
+  border-radius: 8px;
+  background: var(--sw-inset);
+}
+.chat-markdown .chat-code-block > pre { margin: 0; border: 0; border-radius: 0 0 8px 8px; background: transparent; padding-top: .2em; }
+.chat-code-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-height: 24px;
+  padding: 2px 4px 0 1em;
+  color: var(--text-secondary);
+  font-size: .59rem;
+  line-height: 1.4;
+}
+.chat-code-language { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-transform: lowercase; }
+.chat-code-header .chat-icon-button { width: 20px; height: 20px; flex: 0 0 20px; color: var(--text-secondary); }
+.chat-code-header .chat-icon-button > svg { width: 11px; height: 11px; }
+.chat-code-header .chat-copy-failure { margin-left: auto; }
+
+/* Inline code: the copy button sits just after the code without moving surrounding text. */
+.chat-code-inline { position: relative; }
+.chat-code-inline > .chat-icon-button {
+  position: absolute;
+  z-index: 1;
+  top: 50%;
+  left: 100%;
+  width: 18px;
+  height: 18px;
+  margin-left: 2px;
+  border: 1px solid var(--sw-line);
+  background: var(--sw-popover-bg);
+  color: var(--text-secondary);
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(-50%);
+}
+.chat-code-inline > .chat-icon-button > svg { width: 10px; height: 10px; }
+.chat-code-inline:is(:hover, :focus-within) > .chat-icon-button,
+.chat-code-inline > .chat-icon-button[data-copy-status] { opacity: 1; pointer-events: auto; }
+.chat-code-inline > [role="status"] { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+@media (hover: none) {
+  .chat-code-inline > .chat-icon-button { display: none; }
+}
+
+/* Tables scroll sideways instead of stretching the chat. */
+.chat-markdown .chat-table-wrap { max-width: 100%; margin: .85em 0; overflow-x: auto; border: 1px solid var(--sw-line); border-radius: 6px; }
+.chat-markdown .chat-table-wrap:focus-visible { outline: 1px solid #b3b3b3; outline-offset: 2px; }
+.chat-markdown table { width: max-content; min-width: 100%; border-collapse: collapse; font-size: .95em; line-height: 1.5; overflow-wrap: normal; }
+.chat-markdown :is(th, td) { max-width: 36em; padding: .35em .7em; border-bottom: 1px solid var(--sw-line); text-align: left; vertical-align: top; }
+.chat-markdown :is(th, td) + :is(th, td) { border-left: 1px solid var(--sw-line); }
+.chat-markdown tr:last-child > td { border-bottom: 0; }
+.chat-markdown th { background: var(--sw-surface); color: var(--text-primary); font-weight: 600; }
+.chat-markdown :is(th, td)[align="center"] { text-align: center; }
+.chat-markdown :is(th, td)[align="right"] { text-align: right; }
+
+/* Task lists, strikethrough, nested blocks. */
+.chat-markdown .contains-task-list { padding-left: 1.2em; }
+.chat-markdown .task-list-item { list-style: none; }
+.chat-markdown .task-list-item > input[type="checkbox"] { margin: 0 .5em 0 -1.2em; vertical-align: -.1em; accent-color: var(--accent-mint, #6fcf97); }
+.chat-markdown .contains-task-list .contains-task-list { padding-left: 1.6em; }
+.chat-markdown del { color: var(--text-secondary); }
+.chat-markdown li > :is(p, ul, ol, .chat-code-block, .chat-table-wrap, blockquote) { margin-block: .35em; }
+.chat-markdown li > p:first-child { margin-top: 0; }
+.chat-markdown :is(ol, ul) :is(ol, ul) { margin: .3em 0; }
+.chat-markdown h6 { color: var(--text-secondary); }
+
+/* Footnotes. */
+.chat-markdown .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+.chat-markdown section.footnotes { margin-top: 1em; padding-top: .4em; border-top: 1px solid var(--sw-line); color: var(--text-secondary); font-size: .92em; }
+.chat-markdown sup a { text-decoration: none; }
+
+/* Images. */
+.chat-markdown .chat-image-link { display: inline-block; max-width: 100%; vertical-align: middle; text-decoration: none; }
+.chat-markdown .chat-image { display: block; max-width: 100%; height: auto; border-radius: 8px; }
+.chat-markdown .chat-image-link:focus-visible { outline: 1px solid #b3b3b3; outline-offset: 2px; border-radius: 8px; }
+.chat-markdown .chat-image-blocked {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px;
+  max-width: 100%;
+  padding: 4px 8px;
+  border: 1px dashed var(--sw-line);
+  border-radius: 8px;
+  color: var(--text-secondary);
+  font-size: .92em;
+}
+.chat-markdown .chat-image-blocked code { overflow-wrap: anywhere; }
+
+/* Mermaid diagrams. */
+.chat-mermaid-diagram { overflow-x: auto; padding: .4em 1em .9em; }
+.chat-mermaid-diagram svg { display: block; max-width: 100%; height: auto; margin: 0 auto; }
+.chat-markdown p.chat-mermaid-error { margin: 0; padding: 0 1em .7em; color: #efcd43; font-size: .9em; }
+
+/* User messages sit on the surface color that inline code and table headers otherwise use. */
+.chat-message--user .chat-markdown :not(pre) > code,
+.chat-message--user .chat-markdown th { background: var(--sw-inset); }
