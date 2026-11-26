@@ -146,6 +146,9 @@ const legacyImplementationRequestPrefix = "Request implementation: ";
 const legacyQuestionResolutionPrefix = "Resolve product question: ";
 const unresolvedSubagentPrefix = "Subagent activity is unresolved. ";
 const legacyUnresolvedSubagentPrefix = "Codex subagent activity is unresolved. ";
+const maxSkillCatalogs = 16;
+/** How long a Codex turn waits for an unloaded skill list before sending "/name" as plain text. */
+const skillLookupTimeoutMs = 5_000;
 const workspaceThreadConfig = { "features.multi_agent": true, "features.multi_agent_v2": true };
 const input = (text: string) => [{ type: "text", text, text_elements: [] }];
 const hasSubmittedMessage = (agent: WorkspaceAgent) =>
@@ -345,19 +348,25 @@ export class WorkspaceRuntime {
 
   /** Turns run in the task's repositories, or a temporary directory for a general chat, so project skills follow that scope. */
   private skillCatalog(projectIds: readonly string[]) {
-    const cwds = projectIds.map((id) => {
-      const project = this.projects.find((entry) => entry.id === id);
-      if (!project) throw new Error("Unknown repository.");
-      return project.path;
-    });
+    const ids = [...new Set(projectIds)];
+    const paths = new Map(this.projects.map(({ id, path }) => [id, path]));
+    if (ids.some((id) => !paths.has(id))) throw new Error("Unknown repository.");
+    // Claude Code loads project skills only from its working directory, the task's first repository;
+    // Codex loads them from every directory, so any order of the same repositories shares one list.
+    const scope = this.engine === "claude" ? ids.slice(0, 1) : ids.sort();
+    const cwds = scope.map((id) => paths.get(id)!);
     if (!cwds.length) cwds.push(tmpdir());
     const key = cwds.join("\n");
     let catalog = this.skillCatalogs.get(key);
-    if (!catalog) {
+    if (catalog) {
+      // Keep recently used scopes last so the least recently used one is evicted first.
+      this.skillCatalogs.delete(key);
+    } else {
       catalog = new SkillCatalog(async () => normalizeSkills(
         await this.server!.call<ProviderSkillsResponse>("skills/list", { cwds }, 30_000)));
-      this.skillCatalogs.set(key, catalog);
+      if (this.skillCatalogs.size >= maxSkillCatalogs) this.skillCatalogs.delete(this.skillCatalogs.keys().next().value!);
     }
+    this.skillCatalogs.set(key, catalog);
     return catalog;
   }
 
@@ -369,9 +378,17 @@ export class WorkspaceRuntime {
   }
 
   /** Message input; Codex also gets the skill item for a leading "/skill", since it does not parse slash names itself. */
-  private userInput(session: AgentSession, text: string, message: string) {
-    if (this.engine !== "codex") return input(text);
-    return [...input(text), ...skillInputFor(message, this.skillCatalog(session.agent.directTask?.projectIds ?? []).known)];
+  private async userInput(session: AgentSession, text: string, message: string) {
+    if (this.engine !== "codex" || !message.startsWith("/")) return input(text);
+    const catalog = this.skillCatalog(session.agent.directTask?.projectIds ?? []);
+    // A scope nobody opened the menu for has no list yet; load it rather than silently dropping the skill.
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const skills = catalog.known ?? await Promise.race([
+      catalog.list().catch(() => undefined),
+      new Promise<undefined>((resolve) => { timer = setTimeout(resolve, skillLookupTimeoutMs); }),
+    ]);
+    clearTimeout(timer);
+    return [...input(text), ...skillInputFor(message, skills)];
   }
 
   usageExport() {
@@ -611,7 +628,8 @@ export class WorkspaceRuntime {
     const run = session.run;
     if (!run?.turn || !this.acceptsLiveMessages(session)) return false;
     try {
-      await this.server!.call("turn/steer", { threadId: session.threadId, expectedTurnId: run.turn.id, input: this.userInput(session, text, entry.text) });
+      const steerInput = await this.userInput(session, text, entry.text);
+      await this.server!.call("turn/steer", { threadId: session.threadId, expectedTurnId: run.turn.id, input: steerInput });
     } catch {
       return false;
     }
@@ -1501,11 +1519,14 @@ export class WorkspaceRuntime {
       return;
     }
     try {
+      const turnInput = await this.userInput(session, implementation
+        ? this.implementationInput(next.text, implementation.summary, implementation.roots) : this.answerInput(session, next), next.text);
+      if (session.run !== run) return;
       const { turn } = await this.server!.call<{ turn: Turn }>("turn/start", {
         threadId: session.threadId,
         approvalPolicy: "on-request",
         ...this.directTaskTurnScope(session, run.implementationRoots),
-        input: this.userInput(session, implementation ? this.implementationInput(next.text, implementation.summary, implementation.roots) : this.answerInput(session, next), next.text),
+        input: turnInput,
         additionalContext: this.pendingQuestionContext(session, next, implementation !== undefined),
       });
       session.freshThread = false;
@@ -1554,10 +1575,12 @@ export class WorkspaceRuntime {
     }
     if (!this.demo) {
       try {
+        const expectedTurnId = session.run!.turn!.id;
+        const steerInput = await this.userInput(session, text, text);
         await this.server!.call("turn/steer", {
         threadId: session.threadId,
-        expectedTurnId: session.run!.turn!.id,
-        input: this.userInput(session, text, text),
+        expectedTurnId,
+        input: steerInput,
         });
       } catch (error) {
         if (errorText(error) === "Timed out calling turn/steer") {

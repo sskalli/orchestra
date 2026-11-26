@@ -1,20 +1,20 @@
 // Shared prompt-composer behaviour: list continuation and indentation, plus "/" skill autocomplete.
 import { useEffect, useId, useLayoutEffect, useState } from "react";
 import type { CSSProperties, KeyboardEvent, RefObject } from "react";
-import { completeSkill, continueList, filterSkills, indentList, slashToken } from "./workspace-composer-text.ts";
+import { completeSkill, continueList, indentList, rankSkills, slashKeyAction, slashToken } from "./workspace-composer-text.ts";
 import type { TextEdit } from "./workspace-composer-text.ts";
 import "./workspace-composer.css";
 
 type Skill = { name: string; description: string; argumentHint?: string };
 type SkillState = { status: "loading" | "ready" | "error"; skills: Skill[]; engine?: string; error?: string; scope?: string };
 
-const skillCacheMs = 60_000;
-const skillRequests = new Map<string, { at: number; promise: Promise<SkillState> }>();
+// The server caches lists and drops them when skill files change, so the browser only shares a request in flight.
+const skillRequests = new Map<string, Promise<SkillState>>();
 
 /** Project skills apply only to tasks with that repository, so lists are loaded per repository scope. */
 function loadSkills(scope: string): Promise<SkillState> {
-  const cached = skillRequests.get(scope);
-  if (cached && Date.now() - cached.at < skillCacheMs) return cached.promise;
+  const pending = skillRequests.get(scope);
+  if (pending) return pending;
   const promise = fetch(`/api/skills${scope ? `?projects=${encodeURIComponent(scope)}` : ""}`).then(async (response) => {
     const body = await response.json().catch(() => ({})) as { engine?: string; skills?: Skill[]; error?: string };
     if (!response.ok || !Array.isArray(body.skills)) {
@@ -22,10 +22,8 @@ function loadSkills(scope: string): Promise<SkillState> {
     }
     return { status: "ready" as const, skills: body.skills, engine: body.engine };
   }, () => ({ status: "error" as const, skills: [], error: "Skills could not be loaded." }));
-  const request = { at: Date.now(), promise };
-  skillRequests.set(scope, request);
-  // Retry a failed load the next time the menu opens.
-  void promise.then((state) => { if (state.status === "error" && skillRequests.get(scope) === request) skillRequests.delete(scope); });
+  skillRequests.set(scope, promise);
+  void promise.then(() => { if (skillRequests.get(scope) === promise) skillRequests.delete(scope); });
   return promise;
 }
 
@@ -68,24 +66,33 @@ export function useComposerAssist({ textarea, anchor, value, projectIds, disable
   const [caret, setCaret] = useState<number>();
   const [dismissedAt, setDismissedAt] = useState<number>();
   const [active, setActive] = useState(0);
+  /** Whether the user picked the active row with the arrow keys or the pointer, rather than it being the first match. */
+  const [navigated, setNavigated] = useState(false);
   const [skills, setSkills] = useState<SkillState>();
   const [position, setPosition] = useState<CSSProperties>();
 
   const token = caret === undefined || disabled ? undefined : slashToken(value, caret);
   const open = Boolean(token) && dismissedAt !== token!.start;
-  const matches = open && skills ? filterSkills(skills.skills, token!.query) : [];
+  const ranked = open && skills ? rankSkills(skills.skills, token!.query) : [];
+  const matches = ranked.map(({ skill }) => skill);
   const activeIndex = Math.min(active, Math.max(matches.length - 1, 0));
-  const activeId = open && matches.length ? `${listId}-${activeIndex}` : undefined;
+  // Highlight a row only when Enter or Tab would complete it; a substring match needs an explicit choice.
+  const actionable = navigated || (ranked[activeIndex]?.kind ?? "substring") !== "substring";
+  const activeId = open && matches.length && actionable ? `${listId}-${activeIndex}` : undefined;
 
   useEffect(() => {
     if (!token) setDismissedAt(undefined);
   }, [token?.start]);
 
-  useEffect(() => setActive(0), [token?.query, open]);
+  useEffect(() => {
+    setActive(0);
+    setNavigated(false);
+  }, [token?.query, open]);
 
   useEffect(() => {
     if (!open) return;
     let current = true;
+    // Keep showing the previous list for this scope while it refreshes.
     if (!skills || skills.status === "error" || skills.scope !== scope) setSkills({ status: "loading", skills: [], scope });
     void loadSkills(scope).then((state) => { if (current) setSkills({ ...state, scope }); });
     return () => { current = false; };
@@ -139,10 +146,13 @@ export function useComposerAssist({ textarea, anchor, value, projectIds, disable
       if ((event.key === "ArrowDown" || event.key === "ArrowUp") && matches.length) {
         event.preventDefault();
         const step = event.key === "ArrowDown" ? 1 : -1;
-        setActive((activeIndex + step + matches.length) % matches.length);
+        // The first arrow press from an unhighlighted list selects its first or last row.
+        setActive(actionable ? (activeIndex + step + matches.length) % matches.length : step > 0 ? 0 : matches.length - 1);
+        setNavigated(true);
         return true;
       }
-      if ((event.key === "Enter" && !event.shiftKey || event.key === "Tab" && !event.shiftKey) && matches.length) {
+      if ((event.key === "Enter" || event.key === "Tab") && !event.shiftKey &&
+          slashKeyAction(ranked[activeIndex], token!.query, event.key, navigated) === "complete") {
         event.preventDefault();
         choose(matches[activeIndex]);
         return true;
@@ -165,7 +175,7 @@ export function useComposerAssist({ textarea, anchor, value, projectIds, disable
       const edit = indentList(element.value, element.selectionStart, element.selectionEnd, event.shiftKey);
       if (!edit) return false;
       event.preventDefault();
-      if (edit.text !== element.value.slice(edit.start, edit.end)) applyTextEdit(element, edit);
+      applyTextEdit(element, edit);
       return true;
     }
     return false;
@@ -180,8 +190,8 @@ export function useComposerAssist({ textarea, anchor, value, projectIds, disable
     onMouseDown={(event) => event.preventDefault()}>
     <ul id={listId} role="listbox" aria-label="Skills">
       {matches.map((skill, index) => <li key={skill.name} id={`${listId}-${index}`} role="option"
-        aria-selected={index === activeIndex} title={skill.description || undefined}
-        onMouseEnter={() => setActive(index)} onClick={() => choose(skill)}>
+        aria-selected={index === activeIndex && actionable} title={skill.description || undefined}
+        onMouseEnter={() => { setActive(index); setNavigated(true); }} onClick={() => choose(skill)}>
         <span className="chat-slash-name">/{skill.name}{skill.argumentHint ? <span> {skill.argumentHint}</span> : null}</span>
         {skill.description ? <span className="chat-slash-description">{skill.description}</span> : null}
       </li>)}

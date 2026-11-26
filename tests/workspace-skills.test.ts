@@ -68,13 +68,12 @@ test("Codex skills come from skills/list and a typed /skill message carries its 
   assert.deepEqual(await runtime.skills(), [{ name: "release-notes", description: "Draft release notes", path: "/skills/release-notes/SKILL.md" }]);
   const trace = () => readFileSync(tracePath, "utf8").trim().split("\n").map((line) => JSON.parse(line));
   const projectId = runtime.snapshot().projects[0].id;
-  await runtime.skills([projectId]);
-  assert.deepEqual(trace().filter(({ method }) => method === "skills/list").map(({ params }) => params), [
-    { cwds: [tmpdir()] }, { cwds: [runtime.snapshot().project.path] },
-  ], "general chats list skills from their temporary directory, repository tasks from their repositories");
+  const listCalls = () => trace().filter(({ method }) => method === "skills/list").map(({ params }) => params);
+  assert.deepEqual(listCalls(), [{ cwds: [tmpdir()] }], "only the general scope is listed at startup");
   await assert.rejects(runtime.skills(["missing"]), /Unknown repository/);
 
-  const taskId = String(await runtime.command({ type: "createTask", name: "Skills", projectIds: [] }));
+  // Nobody opened the menu for this repository, so the first "/skill" message loads that scope's list.
+  const taskId = String(await runtime.command({ type: "createTask", name: "Skills", projectIds: [projectId] }));
   const replies = () => runtime.snapshot().agents.find(({ id }) => id === taskId)!.messages.filter(({ text }) => text === "Received the answer.").length;
   const waitForReplies = async (count: number) => {
     const deadline = Date.now() + 5_000;
@@ -85,8 +84,12 @@ test("Codex skills come from skills/list and a typed /skill message carries its 
   };
   await runtime.command({ type: "send", agentId: taskId, text: "/release-notes v2.1" });
   await waitForReplies(1);
+  assert.deepEqual(listCalls(), [{ cwds: [tmpdir()] }, { cwds: [runtime.snapshot().project.path] }],
+    "a repository task lists skills from its repository");
   await runtime.command({ type: "send", agentId: taskId, text: "Use /release-notes later" });
   await waitForReplies(2);
+  await runtime.skills([projectId, projectId]);
+  assert.equal(listCalls().length, 2, "duplicate repository IDs share the cached list, and plain messages list nothing");
   const inputs = trace().filter(({ method }) => method === "turn/start").map(({ params }) => params.input);
   assert.deepEqual(inputs[0], [
     { type: "text", text: "/release-notes v2.1", text_elements: [] },
@@ -137,4 +140,34 @@ test("the demo workspace offers sample skills", async () => {
   const runtime = new WorkspaceRuntime({ cwd: process.cwd(), demo: true });
   assert.ok((await runtime.skills()).some(({ name }) => name === "code-review"));
   await runtime.close();
+});
+
+test("skill lists are cached per repository set, in any order, and the cache is bounded", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "orchestra-skill-scopes-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const projects = Array.from({ length: 20 }, (_, index) => ({ id: `repo-${String(index).padStart(2, "0")}`, path: join(root, `repo-${index}`) }));
+  const calls: string[][] = [];
+  const server = {
+    call: async (method: string, params: any) => {
+      if (method === "skills/list") calls.push(params.cwds);
+      return { data: [] };
+    },
+    notify() {}, reply() {}, reject() {}, close: async () => {},
+  };
+  for (const engine of ["codex", "claude"] as const) {
+    calls.length = 0;
+    const runtime = new WorkspaceRuntime({ cwd: root, projects, engine }) as any;
+    runtime.server = server;
+    await runtime.skills(["repo-02", "repo-01"]);
+    await runtime.skills(["repo-01", "repo-02", "repo-01"]);
+    if (engine === "codex") {
+      assert.deepEqual(calls, [[projects[1].path, projects[2].path]], "Codex lists every repository, keyed by the sorted set");
+    } else {
+      // Claude Code loads project skills only from its working directory, the task's first repository.
+      assert.deepEqual(calls, [[projects[2].path], [projects[1].path]]);
+    }
+    for (const { id } of projects) await runtime.skills([id]);
+    assert.equal(runtime.skillCatalogs.size, 16);
+    await runtime.close();
+  }
 });

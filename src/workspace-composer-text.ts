@@ -3,7 +3,7 @@
 /** Replace value[start, end) with text, then select [selectionStart, selectionEnd). */
 export type TextEdit = { start: number; end: number; text: string; selectionStart: number; selectionEnd: number };
 
-const listItem = /^([ \t]*)([-*]|\d{1,9}\.)( +)/;
+const listItem = /^([ \t]*)([-*]|\d{1,9}\.)( +)(\[[ xX]\] +)?/;
 const indentUnit = "  ";
 
 function lineStart(value: string, index: number) {
@@ -15,16 +15,22 @@ function lineEnd(value: string, index: number) {
   return end === -1 ? value.length : end;
 }
 
+/** Whether the line starting at `start` lies inside a ``` code block. */
+function inCodeBlock(value: string, start: number) {
+  return value.slice(0, start).split("\n").filter((line) => /^\s*```/.test(line)).length % 2 === 1;
+}
+
 /**
- * Shift+Enter inside a "- ", "* " or "N. " item starts the next item with the same indent (numbers increment).
- * On an item with no content it removes the marker, ending the list. Returns undefined for a plain newline.
+ * Shift+Enter inside a "- ", "* " or "N. " item starts the next item with the same indent (numbers increment,
+ * task items start unchecked). On an item with no content it removes the marker, ending the list.
+ * Returns undefined for a plain newline, including inside a code block.
  */
 export function continueList(value: string, selectionStart: number, selectionEnd: number): TextEdit | undefined {
   const start = lineStart(value, selectionStart);
   const end = lineEnd(value, selectionStart);
   const match = listItem.exec(value.slice(start, end));
-  if (!match) return undefined;
-  const [prefix, indent, marker, spacing] = match;
+  if (!match || inCodeBlock(value, start)) return undefined;
+  const [prefix, indent, marker, spacing, task] = match;
   // A caret inside the indent or marker is an ordinary newline.
   if (selectionStart < start + prefix.length) return undefined;
   const rest = value.slice(start + prefix.length, end);
@@ -32,15 +38,18 @@ export function continueList(value: string, selectionStart: number, selectionEnd
     return { start, end, text: "", selectionStart: start, selectionEnd: start };
   }
   const nextMarker = marker === "-" || marker === "*" ? marker : `${Number(marker.slice(0, -1)) + 1}.`;
-  const text = `\n${indent}${nextMarker}${spacing}`;
+  const text = `\n${indent}${nextMarker}${spacing}${task ? "[ ] " : ""}`;
   const caret = selectionStart + text.length;
-  return { start: selectionStart, end: selectionEnd, text, selectionStart: caret, selectionEnd: caret };
+  // Text moved to the new item drops its leading spaces, which the marker already provides.
+  let replaceEnd = selectionEnd;
+  while (replaceEnd < end && value[replaceEnd] === " ") replaceEnd++;
+  return { start: selectionStart, end: replaceEnd, text, selectionStart: caret, selectionEnd: caret };
 }
 
 /**
  * Tab and Shift+Tab indent or outdent list items by two spaces when the caret or selection touches one.
- * Returns undefined when no selected line is a list item, so Tab keeps moving focus.
- * An edit with unchanged text means the item is already at the outer level; the key is still consumed.
+ * Returns undefined when nothing would change (no list line, an outer item on Shift+Tab, or a code block),
+ * so Tab and Shift+Tab keep moving focus.
  */
 export function indentList(value: string, selectionStart: number, selectionEnd: number, outdent: boolean): TextEdit | undefined {
   const start = lineStart(value, selectionStart);
@@ -48,7 +57,7 @@ export function indentList(value: string, selectionStart: number, selectionEnd: 
   const lastIndex = selectionEnd > selectionStart && value[selectionEnd - 1] === "\n" ? selectionEnd - 1 : selectionEnd;
   const end = lineEnd(value, Math.max(lastIndex, start));
   const lines = value.slice(start, end).split("\n");
-  if (!lines.some((line) => listItem.test(line))) return undefined;
+  if (!lines.some((line) => listItem.test(line)) || inCodeBlock(value, start)) return undefined;
   const shifts: { at: number; delta: number }[] = [];
   let offset = start;
   const changed = lines.map((line) => {
@@ -67,6 +76,7 @@ export function indentList(value: string, selectionStart: number, selectionEnd: 
   const map = (position: number, keepLineStart: boolean) => shifts.reduce((mapped, { at, delta }) =>
     delta > 0 ? mapped + (position > at || position === at && !keepLineStart ? delta : 0)
       : mapped - Math.max(0, Math.min(position - at, -delta)), position);
+  if (!shifts.length) return undefined;
   const collapsed = selectionStart === selectionEnd;
   return { start, end, text: changed.join("\n"),
     selectionStart: map(selectionStart, !collapsed), selectionEnd: map(selectionEnd, false) };
@@ -92,19 +102,39 @@ export function completeSkill(value: string, token: { start: number; end: number
   return { start: token.start, end, text, selectionStart: caret, selectionEnd: caret };
 }
 
-/** Prefix matches first (including the part after a "plugin:" namespace), then substring matches, in list order. */
-export function filterSkills<T extends { name: string }>(skills: readonly T[], query: string): T[] {
+export type SkillMatch<T> = { skill: T; kind: "exact" | "prefix" | "substring" };
+
+/**
+ * Exact matches first, then prefix matches (including the part after a "plugin:" namespace),
+ * then substring matches, each in list order. An empty query lists every skill as a prefix match.
+ */
+export function rankSkills<T extends { name: string }>(skills: readonly T[], query: string): SkillMatch<T>[] {
   const needle = query.toLowerCase();
-  if (!needle) return [...skills];
-  const prefix: T[] = [];
-  const substring: T[] = [];
+  const ranked: Record<SkillMatch<T>["kind"], SkillMatch<T>[]> = { exact: [], prefix: [], substring: [] };
   for (const skill of skills) {
     const name = skill.name.toLowerCase();
     const local = name.slice(name.lastIndexOf(":") + 1);
-    if (name.startsWith(needle) || local.startsWith(needle)) prefix.push(skill);
-    else if (name.includes(needle)) substring.push(skill);
+    const kind = needle && (name === needle || local === needle) ? "exact"
+      : name.startsWith(needle) || local.startsWith(needle) ? "prefix"
+      : name.includes(needle) ? "substring" : undefined;
+    if (kind) ranked[kind].push({ skill, kind });
   }
-  return [...prefix, ...substring];
+  return [...ranked.exact, ...ranked.prefix, ...ranked.substring];
+}
+
+export function filterSkills<T extends { name: string }>(skills: readonly T[], query: string): T[] {
+  return rankSkills(skills, query).map(({ skill }) => skill);
+}
+
+/**
+ * What Enter or Tab does with the menu open: complete the active skill only when it is a prefix match
+ * or the user chose it with the arrow keys; a query that already names a skill exactly sends on Enter.
+ */
+export function slashKeyAction(match: SkillMatch<unknown> | undefined, query: string, key: "Enter" | "Tab", navigated: boolean) {
+  if (!match) return "pass" as const;
+  if (navigated) return "complete" as const;
+  if (match.kind === "exact" && key === "Enter" && (match.skill as { name: string }).name.toLowerCase() === query.toLowerCase()) return "pass" as const;
+  return match.kind === "substring" ? "pass" as const : "complete" as const;
 }
 
 export function applyEdit(value: string, edit: TextEdit) {

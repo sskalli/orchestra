@@ -14,8 +14,10 @@
   line-height: 1.45;
 }
 
+/* About eight rows are visible; the rest scroll. */
 .chat-slash-menu ul {
   min-height: 0;
+  max-height: calc(8 * (1.45em + 10px));
   margin: 0;
   padding: 0;
   overflow-y: auto;
