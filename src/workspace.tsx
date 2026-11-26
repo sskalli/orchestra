@@ -283,7 +283,10 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
 
   const selected = agents.find((agent) => agent.id === selectedId);
   const dockAgent = agents.find((agent) => agent.id === dockId);
-  const blocked = !connected || !["ready", "demo"].includes(provider.state);
+  // A usage limit is reported in each chat with a way to try again; it never disables sending.
+  const blocked = !connected || !["ready", "demo", "usage-limit"].includes(provider.state);
+  const providerNotice = connected && provider.state === "usage-limit"
+    ? provider.message ?? providerLabel(provider) : undefined;
   const blockedReason = !connected ? "Reconnecting to the local workspace…" : provider.message ?? providerLabel(provider);
   const projectName = project.name;
 
@@ -484,7 +487,8 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
       onResumeQueue={() => send({ type: "resumeQueue", agentId: agent.id })}
       onClose={() => closeAgent(true)}
       disabled={blocked || Boolean(agent.unavailableReason) || Boolean(agent.archivedAt) || Boolean(agent.lifecycleBusy)}
-      disabledReason={agent.unavailableReason ?? (blocked && !(connected && provider.state === "usage-limit") ? blockedReason : undefined)}
+      disabledReason={agent.unavailableReason ?? (blocked ? blockedReason : undefined)}
+      providerNotice={providerNotice}
       focusMessageId={focus.id}
       focusRequest={focus.count}
     />;

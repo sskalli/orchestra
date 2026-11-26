@@ -18,6 +18,7 @@ import { checkoutBaseline, createRequestedWorktree, removeRequestedWorktree, res
 import type { WriteTarget } from "./workspace-write-scope.ts";
 import { defaultProject, workspaceIdentity } from "./workspace-projects.ts";
 import type { WorkspaceProject } from "./workspace-projects.ts";
+import { implementationApprovalText, messageLengthProblem } from "./workspace-chat-recovery.ts";
 
 export type AgentStatus = "idle" | "working" | "attention" | "awaiting-confirmation" | "done" | "error" | "notice";
 export type AgentRole = "worker";
@@ -215,6 +216,20 @@ function errorText(error: unknown) {
   return safeError(error instanceof Error ? error.message : error);
 }
 
+/**
+ * Recognizes rate and usage limits. Codex reports an HTTP 429 from a provider as
+ * "exceeded retry limit, last status: 429 Too Many Requests" with structured codexErrorInfo.
+ */
+function limitDetail(engineName: string, detail: string, error: unknown) {
+  const info = (error as { codexErrorInfo?: unknown } | undefined)?.codexErrorInfo;
+  const structured = info === "usageLimitExceeded" || (!!info && typeof info === "object" &&
+    Object.entries(info).some(([kind, value]) => kind === "usageLimitExceeded" ||
+      (value as { httpStatusCode?: unknown } | null)?.httpStatusCode === 429));
+  if (!structured && !/usage.?limit|rate.?limit|quota|\b429\b|too many requests/i.test(detail)) return undefined;
+  if (/usage.?limit|rate.?limit|quota/i.test(detail)) return detail;
+  return `${engineName} hit a rate or usage limit. ${detail}`;
+}
+
 // Characters that can hide or reorder what the user reviews on an approval card.
 const unsafeDisplayText = /[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u061c\u200b-\u200f\u2028-\u202e\u2060-\u2069\ufeff]/;
 
@@ -278,6 +293,8 @@ export class WorkspaceRuntime {
   private storageFailed = false;
   private releaseWorkspaceState?: () => void;
   private storageReady = false;
+  /** Set while a turn-level provider retry, not startup, holds the provider in "connecting". */
+  private turnRetrying = false;
   private readonly sessions = new Map<string, AgentSession>();
   private readonly threadSessions = new Map<string, AgentSession>();
   private readonly listeners = new Set<(snapshot: WorkspaceSnapshot) => void>();
@@ -516,7 +533,9 @@ export class WorkspaceRuntime {
       throw new Error("Unknown workspace command.");
     }
     const text = typeof command.text === "string" ? command.text.trim() : "";
-    if (!text || text.length > 24_000) throw new Error("Enter a message of 1–24,000 characters.");
+    if (!text) throw new Error("Enter a message.");
+    const tooLong = messageLengthProblem(text);
+    if (tooLong) throw new Error(tooLong);
     if (command.type === "steer") {
       await this.steer(session, text);
       return;
@@ -674,7 +693,7 @@ export class WorkspaceRuntime {
     const previousTask = { ...task };
     const previousStatus = agent.status;
     const previousIntegration = agent.integration;
-    const assignment = message("user", "I approve the requested implementation.");
+    const assignment = message("user", implementationApprovalText);
     const reservation = checkoutDirectories.length
       ? { id: assignment.id, pid: process.pid, directories: checkoutDirectories } : undefined;
     const automatic = roots.every(({ mode }) => mode === "automatic");
@@ -1022,7 +1041,9 @@ export class WorkspaceRuntime {
   }
 
   private get available() {
-    return this.state.provider.state === "ready" || this.state.provider.state === "demo";
+    // A usage limit is reported per turn. Sending again is how the user retries, so it does not block.
+    const { state } = this.state.provider;
+    return state === "ready" || state === "demo" || state === "usage-limit";
   }
 
   private persist() {
@@ -1568,6 +1589,7 @@ export class WorkspaceRuntime {
       session.agent.status = "error";
     }
     if (detail) session.agent.messages.push(message("system", detail, completed || cancelled ? "notice" : "error"));
+    if (!completed && session.queue.length) session.agent.queuePaused = true;
     this.releaseSettledCheckouts(session);
     if (!completed || !this.drain(session)) this.update(session);
     return completed;
@@ -1751,10 +1773,14 @@ export class WorkspaceRuntime {
     }
     if (method === "error") {
       const detail = errorText(params.error?.message ?? params.message ?? `${this.engineName} reported an error.`);
-      if (/usage.?limit|rate.?limit|quota/i.test(detail)) {
-        this.setProvider("usage-limit", detail);
-        for (const session of this.sessions.values()) session.agent.canSteer = false;
-      } else if (params.willRetry && /reconnect/i.test(detail)) {
+      const limit = limitDetail(this.engineName, detail, params.error);
+      if (limit) {
+        // Keep the reason visible; the workspace stays usable and recovers on the next successful turn.
+        this.turnRetrying = false;
+        this.setProvider("usage-limit", limit);
+      } else if (params.willRetry && /reconnect/i.test(detail) &&
+          (this.state.provider.state === "ready" || this.state.provider.state === "usage-limit" || this.turnRetrying)) {
+        this.turnRetrying = true;
         this.setProvider("connecting", detail);
         for (const session of this.sessions.values()) session.agent.canSteer = false;
       }
@@ -1784,8 +1810,13 @@ export class WorkspaceRuntime {
     if (method === "turn/completed" && params.turn && (!session.run.turn || params.turn.id === session.run.turn.id)) {
       const completed = params.turn.status === "completed";
       const cancelled = params.turn.status === "interrupted";
-      if (completed && this.state.provider.state === "connecting") this.setProvider("ready");
-      else if (!completed && this.state.provider.state === "connecting") {
+      const provider = this.state.provider.state;
+      if (provider === "connecting" && this.turnRetrying) {
+        // The App Server is still connected. A failed retry is reported in the task chat, not as a dead workspace.
+        this.turnRetrying = false;
+        this.setProvider("ready");
+      } else if (completed && (provider === "connecting" || provider === "usage-limit")) this.setProvider("ready");
+      else if (!completed && provider === "connecting") {
         this.setProvider("error", errorText(params.turn.error?.message ?? `${this.engineName} connection failed.`));
       }
       if (cancelled) session.agent.queuePaused = session.queue.length > 0;

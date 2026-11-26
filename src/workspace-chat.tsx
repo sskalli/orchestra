@@ -1,12 +1,13 @@
 import { OrbitSpinner } from "./workspace-orbit-spinner.tsx";
 import { needsUserInput } from "./workspace-status.ts";
 import { agentAppearance } from "./workspace-agent-appearance.ts";
-import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { FormEvent, KeyboardEvent, PointerEvent } from "react";
 import Markdown from "react-markdown";
 import type { Components } from "react-markdown";
 import { LuArrowUp, LuCheck, LuCopy, LuEllipsis, LuSquare } from "react-icons/lu";
 import type { ApprovalChoice, PermissionApproval, SystemMessageKind, WorkspaceAgent, WorkspaceMessage } from "./workspace-runtime.ts";
+import { messageLengthProblem, retryableMessageId } from "./workspace-chat-recovery.ts";
 
 import "./workspace-chat.css";
 
@@ -40,6 +41,8 @@ type ChatProps = {
   onLifecycle?: (action: "archive" | "restore" | "delete") => void;
   disabled?: boolean;
   disabledReason?: string;
+  /** A provider problem that does not block sending, such as a usage limit. */
+  providerNotice?: string;
   focusMessageId?: string;
   focusRequest?: number;
 };
@@ -182,7 +185,14 @@ function CommandApprovalCard({ approval, requestId, blocked, onResolve }: {
   );
 }
 
-function MessageActions({ message }: { message: WorkspaceMessage }) {
+// Snapshots replace every message object, so unchanged text skips Markdown parsing, which is slow for long pastes.
+const MessageMarkdown = memo(function MessageMarkdown({ text }: { text: string }) {
+  return <Markdown skipHtml disallowedElements={["img"]} components={markdownComponents}>{text}</Markdown>;
+});
+
+function MessageActions({ message, onRetry, retrying, retryDisabled }: {
+  message: WorkspaceMessage; onRetry?: () => void; retrying?: boolean; retryDisabled?: boolean;
+}) {
   const [copyStatus, setCopyStatus] = useState<"copied" | "failed">();
   const reset = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   useEffect(() => () => clearTimeout(reset.current), []);
@@ -201,7 +211,9 @@ function MessageActions({ message }: { message: WorkspaceMessage }) {
   const time = message.createdAt === undefined ? undefined : new Date(message.createdAt);
   const copyLabel = copyStatus === "copied" ? "Copied" : "Copy message";
   return (
-    <footer className="chat-message-actions">
+    <footer className={`chat-message-actions${onRetry ? " chat-message-actions--retry" : ""}`}>
+      {onRetry && <button type="button" className="chat-steer" disabled={retryDisabled || retrying}
+        onClick={onRetry}>{retrying ? "Retrying…" : "Retry"}</button>}
       {time && Number.isFinite(time.getTime()) &&
         <time dateTime={time.toISOString()} title={time.toLocaleString()}>{messageTime.format(time)}</time>}
       <button type="button" className="chat-icon-button" aria-label={copyLabel}
@@ -217,7 +229,7 @@ function MessageActions({ message }: { message: WorkspaceMessage }) {
 
 function Conversation({
   agent, projectLabel, repositoryScope, delivery, taskPhase, taskDetail, modelLabel, usageLabel, draft: initialDraft, composerHeight, onComposerHeightChange, onDraftInput, onDraftChange, onSend, onSteer, onCancel, onResumeQueue, onApproveImplementation, onClose,
-  disabled, disabledReason, focusMessageId, focusRequest, onOpenAgent, onLifecycle, onRename, onResolveCommandApproval,
+  disabled, disabledReason, providerNotice, focusMessageId, focusRequest, onOpenAgent, onLifecycle, onRename, onResolveCommandApproval,
 }: ChatProps) {
   const transcript = useRef<HTMLDivElement>(null);
   const actions = useRef<HTMLDivElement>(null);
@@ -274,6 +286,7 @@ function Conversation({
   draftChangeRef.current = onDraftChange;
   const [steerEnabled, setSteerEnabled] = useState(false);
   const [sending, setSending] = useState(false);
+  const [retrying, setRetrying] = useState(false);
   const [cancelling, setCancelling] = useState(false);
   const [resumingQueue, setResumingQueue] = useState(false);
   const [approvingImplementation, setApprovingImplementation] = useState(false);
@@ -489,6 +502,11 @@ function Conversation({
   async function send(action: (text: string) => Promise<void> | void) {
     if (!readyToSend) return;
     const submitted = draft;
+    const tooLong = messageLengthProblem(submitted.trim());
+    if (tooLong) {
+      setError(tooLong);
+      return;
+    }
     const revision = draftRevision.current;
     flushDraft();
     setSending(true);
@@ -510,6 +528,22 @@ function Conversation({
   }
 
   const steerAction = steerEnabled && agent.canSteer ? onSteer : undefined;
+  const retryId = retryableMessageId(agent.messages);
+  const retryDisabled = blocked || sending || Boolean(agent.canCancel) || agent.queueDepth > 0 || agent.status === "working";
+
+  // Resends the failed message's text as a new message. The draft is left untouched.
+  const retry = useCallback(async (text: string) => {
+    if (retryDisabled || retrying) return;
+    setRetrying(true);
+    setError("");
+    try {
+      await onSend(text);
+    } catch (failure) {
+      setError(failure instanceof Error ? failure.message : "Message could not be sent.");
+    } finally {
+      if (mounted.current) setRetrying(false);
+    }
+  }, [onSend, retryDisabled, retrying]);
 
   function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -597,7 +631,7 @@ function Conversation({
                 ) : <div className="chat-markdown">
                   {implementationRequest
                     ? <p className="chat-implementation-summary">{message.text}</p>
-                    : <Markdown skipHtml disallowedElements={["img"]} components={markdownComponents}>{message.text}</Markdown>}
+                    : <MessageMarkdown text={message.text} />}
                   {message.state === "streaming" ? <span className="chat-stream-cursor" aria-label="Responding" /> : null}
                 </div>}
                 {implementationRequest && !!repositoryScope?.length &&
@@ -610,10 +644,11 @@ function Conversation({
                   </button>
                 )}
               </div>
-              <MessageActions message={message} />
+              <MessageActions message={message} retrying={retrying} retryDisabled={retryDisabled}
+                onRetry={message.id === retryId ? () => void retry(message.text) : undefined} />
             </article>
           );
-        }), [agent.messages, agent.canCancel, agent.queueDepth, approveImplementation, approvingImplementation, archived, blocked, hiddenMessages, onApproveImplementation, onResolveCommandApproval, repositoryScope]);
+        }), [retry, retryDisabled, retryId, retrying, agent.messages, agent.canCancel, agent.queueDepth, approveImplementation, approvingImplementation, archived, blocked, hiddenMessages, onApproveImplementation, onResolveCommandApproval, repositoryScope]);
 
   const headerStatus = archived ? "Archived" : agent.lifecycleBusy ? "Updating…" : statusLabels[agent.status];
   const headerTone = archived || agent.lifecycleBusy ? "idle" : agent.status;
@@ -750,6 +785,12 @@ function Conversation({
           </div>
         ) : null}
         {blocked && disabledReason && !shownInConversation(disabledReason) ? <p className="chat-disabled">{disabledReason}</p> : null}
+        {!blocked && providerNotice ? <p className="chat-disabled chat-provider-notice" role="status">{providerNotice}
+          {retryId && <button type="button" className="chat-steer" disabled={retryDisabled || retrying}
+            onClick={() => {
+              const failed = agent.messages.find(({ id }) => id === retryId);
+              if (failed) void retry(failed.text);
+            }}>{retrying ? "Trying again…" : "Try again"}</button>}</p> : null}
         {error && !shownInConversation(error) ? <p className="chat-error" role="alert">{error}</p> : null}
         <div className="chat-composer-box">
           <div className="chat-composer-input">

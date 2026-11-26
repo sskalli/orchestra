@@ -4,6 +4,7 @@ import { extname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { WorkspaceRuntime } from "./workspace-runtime.ts";
 import { workspaceStore } from "./workspace-store.ts";
+import { messageCharacterLimit } from "./workspace-chat-recovery.ts";
 import { parseWorkspaceArgs } from "./workspace-options.ts";
 import { defaultProject, resolveProjects, workspaceIdentity } from "./workspace-projects.ts";
 
@@ -24,13 +25,19 @@ let origin = `http://${host}`;
 const dist = fileURLToPath(new URL("../dist/", import.meta.url));
 let runtime: WorkspaceRuntime;
 
+// Fits the longest message Codex accepts even when every character is JSON-escaped.
+const commandByteLimit = messageCharacterLimit * 6 + 64 * 1024;
+
 async function readCommand(request: IncomingMessage) {
   const chunks: Buffer[] = [];
   let size = 0;
   for await (const chunk of request) {
     size += chunk.length;
-    if (size > 64 * 1024) throw new Error("Message exceeds the workspace limit");
-    chunks.push(chunk);
+    // Keep reading so the client receives the error instead of a reset connection.
+    if (size <= commandByteLimit) chunks.push(chunk);
+  }
+  if (size > commandByteLimit) {
+    throw new Error(`Message is too long (more than ${messageCharacterLimit.toLocaleString("en-US")} characters).`);
   }
   const command = JSON.parse(Buffer.concat(chunks).toString("utf8"));
   if (command?.type === "createTask" && typeof command.name === "string" &&

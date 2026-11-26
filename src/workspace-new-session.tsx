@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { UnknownCommandOutcome } from "./workspace-commands.ts";
+import { messageLengthProblem } from "./workspace-chat-recovery.ts";
 import "./workspace-new-session.css";
 
 type NewSessionComposerProps = {
@@ -44,6 +45,11 @@ export function NewSessionComposer({ open, blocked, projects, onCancel, onCreate
   async function submit() {
     const firstMessage = text.trim();
     if (pending || blocked || unknownOutcome || !firstMessage) return;
+    const tooLong = messageLengthProblem(firstMessage);
+    if (tooLong) {
+      setError(tooLong);
+      return;
+    }
     setPending(true);
     setError("");
     try {
@@ -81,7 +87,7 @@ export function NewSessionComposer({ open, blocked, projects, onCancel, onCreate
     <form onSubmit={(event) => { event.preventDefault(); void submit(); }}>
       <label className="new-session-field">First message
         <textarea ref={prompt} rows={6} placeholder="What would you like to work on?"
-          value={text} maxLength={24000} onChange={(event) => setText(event.target.value)} disabled={pending} required />
+          value={text} onChange={(event) => setText(event.target.value)} disabled={pending} required />
       </label>
       <label className="new-session-field">Session name <span>(optional)</span>
         <input value={name} placeholder="Uses the first line of your message" maxLength={60}

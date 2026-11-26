@@ -272,6 +272,9 @@
   pointer-events: auto;
 }
 
+/* Retry on the latest failed message stays visible without hovering. */
+.chat-message-actions--retry { height: auto; opacity: 1; pointer-events: auto; }
+.chat-message-actions .chat-steer { margin: 4px 0 0; }
 .chat-message-actions .chat-icon-button { width: 18px; height: 16px; flex: 0 0 18px; }
 .chat-message-actions .chat-icon-button > svg { width: 11px; height: 11px; }
 .chat-message-actions [role="status"] { order: -1; }
