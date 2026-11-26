@@ -30,7 +30,7 @@ For a separately configured Codex provider, define it in Codex's configuration a
 
 ### Claude sessions
 
-Claude tasks load your Claude Code settings and the repository's `CLAUDE.md`, as `claude` does in a terminal. Planning turns ask before edits and before commands that aren't read-only. During an approved implementation turn, Claude edits the approved worktrees directly and runs sandboxed commands without asking. Anything outside those destinations still comes to the chat for approval. Claude subagents appear as children of their task on the map. If Orchestra stops during a Claude turn, that turn is reported as interrupted after restart, because Claude Code runs as a child of the Orchestra server.
+Claude tasks load your Claude Code settings and the repository's `CLAUDE.md`, as `claude` does in a terminal. Planning turns ask before edits and before commands that aren't read-only. During an approved implementation turn, Claude edits the approved worktrees directly and runs sandboxed commands without asking. Anything outside those destinations still comes to the chat for approval. Claude subagents appear as children of their task on the map. A task that starts background subagents keeps its turn open until they finish: it can end its reply, ask you a product question, and take your answers and messages right away while the subagents keep working. The composer shows how many subagents it is waiting for. Stopping the turn stops its subagents too. If Orchestra stops during a Claude turn, that turn is reported as interrupted after restart, because Claude Code runs as a child of the Orchestra server.
 
 ## Task flow
 

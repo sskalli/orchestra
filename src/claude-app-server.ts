@@ -36,6 +36,9 @@ type Run = {
   children: Map<string, { threadId: string; turn: JournalTurn }>;
   requests: Set<Id>;
   finished: boolean;
+  /** Claude ended its response while background subagents still run; the query stays open so they keep running. */
+  waiting: boolean;
+  wakeTimer?: ReturnType<typeof setTimeout>;
 };
 type QueryFunction = (params: { prompt: AsyncIterable<SDKUserMessage>; options?: Options }) => Query;
 
@@ -115,6 +118,16 @@ export function claudeErrorText(kind: string | undefined, fallback: string) {
   return fallback;
 }
 
+/** Tells Claude how Orchestra keeps a turn open around background subagents. */
+const backgroundSubagentInstructions = "\n\nIn Orchestra, background subagents keep your turn open. " +
+  "You may end your response while they run, for example to ask the user a product question. " +
+  "Each finished subagent resumes you, and user replies reach you as new messages in the same turn. " +
+  "Only say subagents are running if you started them in this turn and have not seen them finish.";
+
+/** How long to wait for Claude Code to resume the parent after its last background subagent finishes. */
+const defaultWakeDelayMs = 20_000;
+const wakePrompt = "All of your background subagents have finished. Review their results and continue the task.";
+
 export class ClaudeAppServer implements ProviderServer {
   onEvent?: (event: Event) => void;
   onRequest?: (request: Event & { id: Id }) => Promise<void>;
@@ -129,10 +142,12 @@ export class ClaudeAppServer implements ProviderServer {
 
   private readonly journalPath?: string;
   private readonly query: QueryFunction;
+  private readonly wakeDelayMs: number;
 
-  constructor(journalPath?: string, query: QueryFunction = claudeQuery) {
+  constructor(journalPath?: string, query: QueryFunction = claudeQuery, options: { wakeDelayMs?: number } = {}) {
     this.journalPath = journalPath;
     this.query = query;
+    this.wakeDelayMs = options.wakeDelayMs ?? defaultWakeDelayMs;
     this.load();
   }
 
@@ -303,7 +318,7 @@ export class ClaudeAppServer implements ProviderServer {
       cwd,
       additionalDirectories: roots.filter((root) => root !== cwd),
       ...(thread.started ? { resume: thread.id } : { sessionId: thread.id }),
-      systemPrompt: { type: "preset", preset: "claude_code", append: config.instructions },
+      systemPrompt: { type: "preset", preset: "claude_code", append: config.instructions + backgroundSubagentInstructions },
       ...(config.model ? { model: config.model } : {}),
       permissionMode: implementation ? "acceptEdits" : "default",
       canUseTool: this.permissionHandler(thread.id),
@@ -324,7 +339,7 @@ export class ClaudeAppServer implements ProviderServer {
     const run: Run = {
       threadId: thread.id, turn, query: this.query({ prompt: input, options }), input, abort,
       unanswered: new Set([first.uuid!]), interrupted: false, streamItems: new Map(), blockItems: new Map(),
-      children: new Map(), requests: new Set(), finished: false,
+      children: new Map(), requests: new Set(), finished: false, waiting: false,
     };
     this.runs.set(thread.id, run);
     thread.turns = [...thread.turns.slice(-7), turn];
@@ -343,6 +358,7 @@ export class ClaudeAppServer implements ProviderServer {
     if (!run || run.turn.id !== params.expectedTurnId || run.finished) throw new Error("There is no active Claude turn to steer.");
     const next = this.userMessage(this.promptText(params), "now");
     run.unanswered.add(next.uuid!);
+    this.resume(run);
     run.input.push(next);
     return {};
   }
@@ -423,8 +439,46 @@ export class ClaudeAppServer implements ProviderServer {
     }
   }
 
+  private runningChildren(run: Run) {
+    return [...run.children.values()].filter(({ turn }) => turn.status === "inProgress").length;
+  }
+
+  /** Keeps the turn open while background subagents run, and tells Orchestra the parent is waiting for them. */
+  private wait(run: Run) {
+    run.waiting = true;
+    this.emit("turn/waiting", { threadId: run.threadId, turnId: run.turn.id, subagents: this.runningChildren(run) } as Event["params"]);
+  }
+
+  private resume(run: Run) {
+    if (run.wakeTimer) clearTimeout(run.wakeTimer);
+    run.wakeTimer = undefined;
+    if (!run.waiting) return;
+    run.waiting = false;
+    this.emit("turn/waiting", { threadId: run.threadId, turnId: run.turn.id, subagents: 0 } as Event["params"]);
+  }
+
+  /** Claude Code normally resumes the parent when a background subagent finishes; if it stays idle, prompt it once. */
+  private scheduleWake(run: Run) {
+    if (run.wakeTimer) clearTimeout(run.wakeTimer);
+    run.wakeTimer = setTimeout(() => {
+      run.wakeTimer = undefined;
+      if (run.finished || !run.waiting || this.runningChildren(run)) return;
+      const wake = this.userMessage(wakePrompt);
+      run.unanswered.add(wake.uuid!);
+      this.resume(run);
+      run.input.push(wake);
+    }, this.wakeDelayMs);
+    run.wakeTimer.unref?.();
+  }
+
   private handle(run: Run, message: any) {
     const thread = this.threads.get(run.threadId)!;
+    if ((message.type === "stream_event" || message.type === "assistant") && !message.parent_tool_use_id) this.resume(run);
+    if (message.type === "system" && message.subtype === "session_state_changed") {
+      // Claude Code reports idle once every result is out and no background agent remains.
+      if (message.state === "idle" && run.waiting && !this.runningChildren(run) && !run.unanswered.size) this.finishTurn(run, "completed");
+      return;
+    }
     if (message.type === "system" && message.subtype === "init") {
       if (!thread.started) {
         thread.started = true;
@@ -454,6 +508,10 @@ export class ClaudeAppServer implements ProviderServer {
       if (message.summary && !child.turn.items.length) this.completeText(run, child.threadId, child.turn, randomUUID(), message.summary);
       this.save();
       this.emit("turn/completed", { threadId: child.threadId, turn: { id: child.turn.id, rootTurnId: child.turn.id, status: child.turn.status } });
+      if (run.waiting) {
+        if (this.runningChildren(run)) this.wait(run);
+        else this.scheduleWake(run);
+      }
       return;
     }
     if (message.type === "stream_event" && !message.parent_tool_use_id) {
@@ -506,6 +564,7 @@ export class ClaudeAppServer implements ProviderServer {
       for (const id of answered) run.unanswered.delete(id);
       if (run.unanswered.size && !run.interrupted) return;
       if (run.interrupted) this.finishTurn(run, "interrupted", "The turn was interrupted.");
+      else if (message.subtype === "success" && !message.is_error && this.runningChildren(run)) this.wait(run);
       else if (message.subtype === "success" && !message.is_error) this.finishTurn(run, "completed");
       else {
         const detail = (message.errors ?? []).join(" ") || (typeof message.result === "string" ? message.result : "") || run.error || "Claude could not complete the turn.";
@@ -517,6 +576,7 @@ export class ClaudeAppServer implements ProviderServer {
   private finishTurn(run: Run, status: Exclude<TurnStatus, "inProgress">, error?: string) {
     if (run.finished) return;
     run.finished = true;
+    if (run.wakeTimer) clearTimeout(run.wakeTimer);
     run.input.close();
     this.runs.delete(run.threadId);
     this.toolDefinitions.delete(run.threadId);
