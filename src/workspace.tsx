@@ -1,6 +1,6 @@
 import { LuArchive, LuMessageSquare, LuMessageSquareDot, LuPlus } from "react-icons/lu";
 import { agentAppearance } from "./workspace-agent-appearance.ts";
-import { effectiveAgentStatus, needsUserInput } from "./workspace-status.ts";
+import { documentTitle, effectiveAgentStatus, needsUserInput } from "./workspace-status.ts";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { WorkspaceCanvas } from "./workspace-canvas.tsx";
@@ -8,7 +8,7 @@ import { WorkspaceChat } from "./workspace-chat.tsx";
 import { WorkspaceInbox } from "./workspace-inbox.tsx";
 import type { InboxEvent } from "./workspace-inbox.tsx";
 import { clearFlightLog, recordFlightLog } from "./workspace-flight-log.ts";
-import { workspacePreferences } from "./workspace-preferences.ts";
+import { nodePositions, workspacePreferences } from "./workspace-preferences.ts";
 import { useDockResizing } from "./use-dock-resizing.tsx";
 import { TaskLifecycleDialog } from "./workspace-task-dialogs.tsx";
 import { NewSessionComposer } from "./workspace-new-session.tsx";
@@ -184,6 +184,7 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
   const [preferences] = useState(() => workspacePreferences(snapshot.workspaceKey, mode, snapshot.modelProvider));
   const [saved] = useState(preferences.readView);
   const [savedCamera] = useState(preferences.readCamera);
+  const [savedNodePositions] = useState(preferences.readNodePositions);
   const [composerSizes, setComposerSizes] = useState(preferences.readComposers);
   const composerSizesRef = useRef(composerSizes);
   const [leftOpen, setLeftOpen] = useState(saved.leftOpen);
@@ -311,6 +312,18 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
     activeConversations.has(event.agentId) && !pendingQuestionIds.has(event.id));
 
   useEffect(() => preferences.subscribeFlightLog(setFlightLog), [preferences]);
+
+  const agentIdKey = snapshot.agents.map(({ id }) => id).join("\n");
+  const agentIds = useMemo(() => new Set(agentIdKey ? agentIdKey.split("\n") : []), [agentIdKey]);
+  useEffect(() => {
+    // Drop saved positions of tasks that no longer exist.
+    const stored = preferences.readNodePositions();
+    const kept = nodePositions(stored, agentIds);
+    if (Object.keys(kept).length !== Object.keys(stored).length) preferences.writeNodePositions(kept);
+  }, [preferences, agentIds]);
+
+  const title = documentTitle(snapshot.agents);
+  useEffect(() => { document.title = title; }, [title]);
 
   useEffect(() => {
     if (!connected || provider.state === "connecting" || (provider.state === "error" && !agents.length)) return;
@@ -517,7 +530,10 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
             {snapshot.projects.map((entry) => <div key={entry.id}><strong>{entry.id}</strong><span>{entry.path}</span></div>)}
           </div>}
         </div>
-        <div className={`sw-provider sw-provider--${connected ? provider.state : "connecting"}`} role="status"><span aria-hidden="true" />{connected ? providerLabel(provider) : "Reconnecting"}</div>
+        <div className={`sw-provider sw-provider--${connected ? provider.state : "connecting"}`} role="status"
+          title={blocked ? blockedReason : undefined}><span aria-hidden="true" />{connected ? providerLabel(provider) : "Reconnecting"}</div>
+        {storageUnavailable && <span className="sw-storage-issue" role="status"
+          title="Browser storage is unavailable. Drafts and layout changes may not survive reload.">Storage unavailable</span>}
         {snapshot.usage && <WorkspaceUsage usage={snapshot.usage} />}
       </header>
       <main ref={bodyRef} className={`sw-body ${chatOpen ? "is-agent-open" : ""} ${leftOpen ? "is-inbox-open" : ""} ${resizing ? "is-resizing" : ""}`}
@@ -545,9 +561,10 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
               <LuPlus aria-hidden="true" />
             </button>}
           </div>
-          {(blocked || storageUnavailable) && <div className="sw-banner" role="status">{blocked ? blockedReason : "Browser storage is unavailable. Drafts and layout changes may not survive reload."}</div>}
           <WorkspaceCanvas agents={canvasAgents} signals={signals} selectedId={selectedId} onSelect={select} onStatus={handleStatus}
-            chatWindowRef={chatWindowRef} initialCamera={savedCamera} onCameraChange={preferences.writeCamera} />
+            chatWindowRef={chatWindowRef} initialCamera={savedCamera} onCameraChange={preferences.writeCamera}
+            initialTaskPositions={savedNodePositions} onTaskPositionsChange={(positions) =>
+              preferences.writeNodePositions(nodePositions(positions, agentIds))} />
           {archiveOpen && <section className="sw-archive-list" aria-label="Archived agents" onKeyDown={(event) => {
             if (event.key === "Escape") { event.stopPropagation(); setArchiveOpen(false); archivedToggle.current?.focus(); }
           }}>

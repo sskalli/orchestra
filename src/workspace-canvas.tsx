@@ -204,6 +204,8 @@ export function WorkspaceCanvas({
   emptyMessage = "Select + to start a session.",
   initialCamera,
   onCameraChange,
+  initialTaskPositions,
+  onTaskPositionsChange,
 }: {
   agents: CanvasAgent[];
   signals: AgentSignal[];
@@ -214,8 +216,12 @@ export function WorkspaceCanvas({
   emptyMessage?: string;
   initialCamera?: Camera;
   onCameraChange?: (camera: Camera) => void;
+  initialTaskPositions?: Record<string, Point>;
+  onTaskPositionsChange?: (positions: Record<string, Point>) => void;
 }) {
-  const [taskPositions, setTaskPositions] = useState(() => new Map<string, Point>());
+  const [taskPositions, setTaskPositions] = useState(() => new Map(Object.entries(initialTaskPositions ?? {})));
+  const taskPositionsRef = useRef(taskPositions);
+  taskPositionsRef.current = taskPositions;
   const layout = useMemo(() => radialLayout(agents, taskPositions), [agents, taskPositions]);
   const taskDrag = useRef<TaskDrag | null>(null);
   const suppressTaskClick = useRef<string | null>(null);
@@ -437,14 +443,18 @@ export function WorkspaceCanvas({
     takeCameraControl();
     drag.moved = true;
     suppressTaskClick.current = drag.id;
-    setTaskPositions((previous) => new Map(previous).set(drag.id, {
+    const next = new Map(taskPositionsRef.current).set(drag.id, {
       x: drag.center.x + dx / drag.scale,
       y: drag.center.y + dy / drag.scale,
-    }));
+    });
+    taskPositionsRef.current = next;
+    setTaskPositions(next);
   }
 
   function taskPointerEnd(event: PointerEvent<HTMLButtonElement>) {
-    if (taskDrag.current?.pointerId === event.pointerId) taskDrag.current = null;
+    if (taskDrag.current?.pointerId !== event.pointerId) return;
+    if (taskDrag.current.moved) onTaskPositionsChange?.(Object.fromEntries(taskPositionsRef.current));
+    taskDrag.current = null;
   }
 
   function pointerDown(event: PointerEvent<HTMLDivElement>) {
