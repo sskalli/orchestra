@@ -128,6 +128,15 @@ const backgroundSubagentInstructions = "\n\nIn Orchestra, background subagents k
 const defaultWakeDelayMs = 20_000;
 const wakePrompt = "All of your background subagents have finished. Review their results and continue the task.";
 
+/**
+ * Slash commands that change the Claude Code session or terminal Orchestra owns. They still run when typed,
+ * but autocomplete does not offer them: /clear and /rename diverge from the task Orchestra tracks, model
+ * settings belong to the task, and the rest only affect a terminal.
+ */
+const hiddenCommands = new Set(["clear", "rename", "resume", "exit", "model", "effort", "fast",
+  "color", "focus", "heapdump", "statusline", "terminal-setup", "vim", "doctor", "reload-plugins", "workflow-launch-exec"]);
+const skillListTimeoutMs = 30_000;
+
 export class ClaudeAppServer implements ProviderServer {
   onEvent?: (event: Event) => void;
   onRequest?: (request: Event & { id: Id }) => Promise<void>;
@@ -139,6 +148,8 @@ export class ClaudeAppServer implements ProviderServer {
   private readonly pending = new Map<Id, (result: unknown) => void>();
   private nextRequest = 1;
   private closed = false;
+  /** Commands the latest session reported as bound to a local terminal. */
+  private terminalCommands = new Set<string>();
 
   private readonly journalPath?: string;
   private readonly query: QueryFunction;
@@ -230,6 +241,7 @@ export class ClaudeAppServer implements ProviderServer {
       case "turn/start": return this.startTurn(params) as T;
       case "turn/steer": return this.steer(params) as T;
       case "turn/interrupt": return this.interrupt(params) as T;
+      case "skills/list": return this.listSkills(params) as T;
       default: throw new Error(`RPC -32601: ${method} is not supported by the Claude engine`);
     }
   }
@@ -241,6 +253,43 @@ export class ClaudeAppServer implements ProviderServer {
       tools: Array.isArray(params.dynamicTools) ? params.dynamicTools : this.configs.get(params.threadId)?.tools ?? [],
       model: params.model || undefined,
     };
+  }
+
+  private claudeEnvironment() {
+    const env = { ...process.env };
+    // Use the Claude Code sign-in (the user's plan) rather than an API key from the shell.
+    delete env.ANTHROPIC_API_KEY;
+    delete env.ANTHROPIC_AUTH_TOKEN;
+    return env;
+  }
+
+  /** Lists skills and slash commands from a short-lived Claude Code process that never receives a prompt. */
+  private async listSkills(params: any) {
+    const cwds: string[] = Array.isArray(params?.cwds) && params.cwds.length ? params.cwds : [process.cwd()];
+    const input = new InputQueue();
+    const abort = new AbortController();
+    const query = this.query({ prompt: input, options: {
+      cwd: cwds[0],
+      additionalDirectories: cwds.slice(1),
+      settingSources: ["user", "project", "local"],
+      ...(process.env.CLAUDE_BIN ? { pathToClaudeCodeExecutable: process.env.CLAUDE_BIN } : {}),
+      abortController: abort,
+      env: this.claudeEnvironment(),
+    } });
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const commands = await Promise.race([
+        query.supportedCommands(),
+        new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error("Claude did not list its skills in time.")), skillListTimeoutMs); }),
+      ]);
+      const skills = commands.filter(({ name }) => !name.startsWith("_") && !hiddenCommands.has(name) && !this.terminalCommands.has(name))
+        .map(({ name, description, argumentHint }) => ({ name, description, argumentHint, enabled: true }));
+      return { data: [{ cwd: cwds[0], skills, errors: [] }] };
+    } finally {
+      clearTimeout(timer);
+      input.close();
+      abort.abort();
+    }
   }
 
   private startThread(params: any) {
@@ -310,10 +359,7 @@ export class ClaudeAppServer implements ProviderServer {
     input.push(first);
     const abort = new AbortController();
     const turn: JournalTurn = { id: randomUUID(), status: "inProgress", items: [] };
-    const env = { ...process.env };
-    // Use the Claude Code sign-in (the user's plan) rather than an API key from the shell.
-    delete env.ANTHROPIC_API_KEY;
-    delete env.ANTHROPIC_AUTH_TOKEN;
+    const env = this.claudeEnvironment();
     const options: Options = {
       cwd,
       additionalDirectories: roots.filter((root) => root !== cwd),
@@ -480,6 +526,7 @@ export class ClaudeAppServer implements ProviderServer {
       return;
     }
     if (message.type === "system" && message.subtype === "init") {
+      if (Array.isArray(message.terminal_slash_commands)) this.terminalCommands = new Set(message.terminal_slash_commands);
       if (!thread.started) {
         thread.started = true;
         this.save();

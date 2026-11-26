@@ -17,6 +17,8 @@ import type { SavedSession, workspaceStore } from "./workspace-store.ts";
 import { checkoutBaseline, createRequestedWorktree, removeRequestedWorktree, resolveWriteTargets, validateRequestedWorktree } from "./workspace-write-scope.ts";
 import type { WriteTarget } from "./workspace-write-scope.ts";
 import { defaultProject, workspaceIdentity } from "./workspace-projects.ts";
+import { SkillCatalog, demoSkills, normalizeSkills, skillInputFor } from "./workspace-skills.ts";
+import type { ProviderSkillsResponse, WorkspaceSkill } from "./workspace-skills.ts";
 import type { WorkspaceProject } from "./workspace-projects.ts";
 
 export type AgentStatus = "idle" | "working" | "attention" | "awaiting-confirmation" | "done" | "error" | "notice";
@@ -291,6 +293,7 @@ export class WorkspaceRuntime {
   private closed = false;
 
   private readonly createServer?: () => ProviderServer;
+  private readonly skillCatalogs = new Map<string, SkillCatalog>();
 
   constructor({ cwd, projects = [defaultProject(cwd)], demo = false, modelProvider = "openai", engine = "codex", store, createServer }: {
     cwd: string;
@@ -338,6 +341,37 @@ export class WorkspaceRuntime {
     return structuredClone({
       ...state, usage: { total, byAgent, unattributedTokens, issue: this.usageIssue },
     });
+  }
+
+  /** Turns run in the task's repositories, or a temporary directory for a general chat, so project skills follow that scope. */
+  private skillCatalog(projectIds: readonly string[]) {
+    const cwds = projectIds.map((id) => {
+      const project = this.projects.find((entry) => entry.id === id);
+      if (!project) throw new Error("Unknown repository.");
+      return project.path;
+    });
+    if (!cwds.length) cwds.push(tmpdir());
+    const key = cwds.join("\n");
+    let catalog = this.skillCatalogs.get(key);
+    if (!catalog) {
+      catalog = new SkillCatalog(async () => normalizeSkills(
+        await this.server!.call<ProviderSkillsResponse>("skills/list", { cwds }, 30_000)));
+      this.skillCatalogs.set(key, catalog);
+    }
+    return catalog;
+  }
+
+  /** The skills and slash commands the engine offers for "/" autocomplete in a task with these repositories. */
+  async skills(projectIds: readonly string[] = []): Promise<WorkspaceSkill[]> {
+    if (this.demo) return demoSkills;
+    if (!this.server || this.closed) throw new Error(`${this.engineName} is still starting.`);
+    return this.skillCatalog(projectIds).list();
+  }
+
+  /** Message input; Codex also gets the skill item for a leading "/skill", since it does not parse slash names itself. */
+  private userInput(session: AgentSession, text: string, message: string) {
+    if (this.engine !== "codex") return input(text);
+    return [...input(text), ...skillInputFor(message, this.skillCatalog(session.agent.directTask?.projectIds ?? []).known)];
   }
 
   usageExport() {
@@ -449,6 +483,8 @@ export class WorkspaceRuntime {
       if (!this.storageFailed && !this.closed) {
         this.setProvider("ready");
         this.releaseSettledCheckouts();
+        // Listing Codex skills is cheap; knowing them lets a typed "/skill" message carry its skill item.
+        if (this.engine === "codex") void this.skills().catch(() => {});
       }
     } catch (error) {
       this.setProvider("error", errorText(error));
@@ -575,7 +611,7 @@ export class WorkspaceRuntime {
     const run = session.run;
     if (!run?.turn || !this.acceptsLiveMessages(session)) return false;
     try {
-      await this.server!.call("turn/steer", { threadId: session.threadId, expectedTurnId: run.turn.id, input: input(text) });
+      await this.server!.call("turn/steer", { threadId: session.threadId, expectedTurnId: run.turn.id, input: this.userInput(session, text, entry.text) });
     } catch {
       return false;
     }
@@ -1469,7 +1505,7 @@ export class WorkspaceRuntime {
         threadId: session.threadId,
         approvalPolicy: "on-request",
         ...this.directTaskTurnScope(session, run.implementationRoots),
-        input: input(implementation ? this.implementationInput(next.text, implementation.summary, implementation.roots) : this.answerInput(session, next)),
+        input: this.userInput(session, implementation ? this.implementationInput(next.text, implementation.summary, implementation.roots) : this.answerInput(session, next), next.text),
         additionalContext: this.pendingQuestionContext(session, next, implementation !== undefined),
       });
       session.freshThread = false;
@@ -1521,7 +1557,7 @@ export class WorkspaceRuntime {
         await this.server!.call("turn/steer", {
         threadId: session.threadId,
         expectedTurnId: session.run!.turn!.id,
-        input: input(text),
+        input: this.userInput(session, text, text),
         });
       } catch (error) {
         if (errorText(error) === "Timed out calling turn/steer") {
@@ -1715,6 +1751,10 @@ export class WorkspaceRuntime {
   }
 
   private onEvent({ method, params }: Event) {
+    if (method === "skills/changed") {
+      for (const catalog of this.skillCatalogs.values()) catalog.invalidate();
+      return;
+    }
     const session = params.threadId ? this.threadSessions.get(params.threadId) : undefined;
     if (method === "serverRequest/resolved" && session?.run && params.requestId !== undefined) {
       const approval = session.run.commandApprovals?.get(params.requestId)?.message.commandApproval;

@@ -1,6 +1,7 @@
 import { OrbitSpinner } from "./workspace-orbit-spinner.tsx";
 import { needsUserInput } from "./workspace-status.ts";
 import { agentAppearance } from "./workspace-agent-appearance.ts";
+import { useComposerAssist } from "./workspace-composer.tsx";
 import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { FormEvent, KeyboardEvent, PointerEvent } from "react";
 import Markdown from "react-markdown";
@@ -258,6 +259,8 @@ function Conversation({
   const composer = useRef<HTMLFormElement>(null);
   const divider = useRef<HTMLDivElement>(null);
   const composerId = useId();
+  const composerInput = useRef<HTMLTextAreaElement>(null);
+  const composerBox = useRef<HTMLDivElement>(null);
   const resizeDrag = useRef<{ pointerId: number; start: number; height: number } | null>(null);
   const resizeFrame = useRef<number | null>(null);
   const pendingHeight = useRef<number | null>(null);
@@ -324,6 +327,8 @@ function Conversation({
   const archived = agent.archivedAt !== undefined;
   const blocked = Boolean(disabled || archived || agent.lifecycleBusy || agent.nativeChild);
   const readyToSend = !blocked && !sending && Boolean(draft.trim());
+  const assist = useComposerAssist({ textarea: composerInput, anchor: composerBox, value: draft,
+    projectIds: repositoryScope?.map(({ id }) => id) ?? [], disabled: Boolean(agent.lifecycleBusy) });
   const hasFocusMessage = agent.messages.some((message) => message.id === focusMessageId);
   const shownInConversation = (detail: string) => agent.messages.some((message) =>
     message.role === "system" && Boolean(message.text) && (message.text.includes(detail) || detail.includes(message.text)));
@@ -543,6 +548,7 @@ function Conversation({
   }
 
   function handleComposerKey(event: KeyboardEvent<HTMLTextAreaElement>) {
+    if (assist.handleKey(event)) return;
     if (event.key !== "Enter" || event.shiftKey || event.nativeEvent.isComposing) return;
     event.preventDefault();
     void send(steerAction ?? onSend);
@@ -751,13 +757,14 @@ function Conversation({
         ) : null}
         {blocked && disabledReason && !shownInConversation(disabledReason) ? <p className="chat-disabled">{disabledReason}</p> : null}
         {error && !shownInConversation(error) ? <p className="chat-error" role="alert">{error}</p> : null}
-        <div className="chat-composer-box">
+        <div ref={composerBox} className="chat-composer-box">
           <div className="chat-composer-input">
             <span className="chat-input-prompt" aria-hidden="true">&gt;</span>
-            <textarea aria-label={`Message ${recipient}`} enterKeyHint="send"
+            <textarea ref={composerInput} aria-label={`Message ${recipient}`} enterKeyHint="send" {...assist.inputProps}
               placeholder={repositoryScope?.length ? "Ask a question or describe a change" : "Message the agent"} rows={2}
               disabled={Boolean(agent.lifecycleBusy)} value={draft}
-              onChange={(event) => updateDraft(event.target.value)} onBlur={flushDraft} onKeyDown={handleComposerKey} />
+              onChange={(event) => updateDraft(event.target.value)} onBlur={() => { assist.onBlur(); flushDraft(); }} onKeyDown={handleComposerKey} />
+            {assist.menu}
           </div>
           <div className="chat-composer-actions">
             {onSteer && <label className="chat-steer-toggle">

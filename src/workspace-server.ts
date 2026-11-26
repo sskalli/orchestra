@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import { extname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { WorkspaceRuntime } from "./workspace-runtime.ts";
+import { safeError } from "./app-server.ts";
 import { workspaceStore } from "./workspace-store.ts";
 import { parseWorkspaceArgs } from "./workspace-options.ts";
 import { defaultProject, resolveProjects, workspaceIdentity } from "./workspace-projects.ts";
@@ -85,6 +86,20 @@ const server = createServer(async (request, response) => {
     }
     response.writeHead(200, { "Content-Type": "application/json", "Content-Disposition": 'attachment; filename="orchestra-usage.json"' })
       .end(JSON.stringify(usage, null, 2));
+    return;
+  }
+  if (request.method === "GET" && path === "/api/skills") {
+    const engineName = runtime.snapshot().provider.name === "claude" ? "Claude" : "Codex";
+    try {
+      const projects = new URL(request.url ?? "/", origin).searchParams.get("projects");
+      // Skill file paths stay on the server; the composer only needs names and descriptions.
+      const skills = (await runtime.skills(projects ? projects.split(",") : []))
+        .map(({ name, description, argumentHint }) => ({ name, description, argumentHint }));
+      response.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({ engine: engineName, skills }));
+    } catch (error) {
+      response.writeHead(503, { "Content-Type": "application/json" })
+        .end(JSON.stringify({ engine: engineName, error: error instanceof Error ? safeError(error.message) : "Skills could not be listed." }));
+    }
     return;
   }
   if (request.method === "GET" && path === "/api/events") {
