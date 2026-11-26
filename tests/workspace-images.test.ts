@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, truncateSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, truncateSync, utimesSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
 import { pathToFileURL } from "node:url";
-import { maxLocalImageBytes, resolveLocalImage } from "../src/workspace-images.ts";
+import { loadLocalImage, maxLocalImageBytes, resolveLocalImage } from "../src/workspace-images.ts";
 
 const base = mkdtempSync(join(tmpdir(), "orchestra-images-"));
 after(() => rmSync(base, { recursive: true, force: true }));
@@ -94,4 +95,34 @@ test("the runtime allows images from its configured repositories", async () => {
   } finally {
     await runtime.close();
   }
+});
+
+test("loading reads the file through its handle and versions it by size and modification time", async () => {
+  const path = join(repository, "versioned.png");
+  writeFileSync(path, "first");
+  utimesSync(path, 1_700_000_000, 1_700_000_000);
+  const first = await loadLocalImage("versioned.png", roots);
+  assert.ok("body" in first);
+  assert.equal(first.body.toString(), "first");
+  assert.equal(first.type, "image/png");
+  writeFileSync(path, "second");
+  utimesSync(path, 1_700_000_100, 1_700_000_100);
+  const second = await loadLocalImage("versioned.png", roots);
+  assert.ok("body" in second);
+  assert.equal(second.body.toString(), "second");
+  assert.notEqual(second.etag, first.etag);
+});
+
+test("loading refuses what resolution refuses, and FIFOs without hanging", async () => {
+  assert.equal((await loadLocalImage("../outside/secret.png", roots)).status, 403);
+  assert.equal((await loadLocalImage("escape.png", [repository])).status, 403);
+  assert.equal((await loadLocalImage("notes.md", roots)).status, 415);
+  const fifo = join(repository, "pipe.png");
+  try {
+    execFileSync("mkfifo", [fifo]);
+  } catch {
+    return;
+  }
+  assert.equal((await resolveLocalImage("pipe.png", roots)).status, 404);
+  assert.equal((await loadLocalImage("pipe.png", roots)).status, 404);
 });

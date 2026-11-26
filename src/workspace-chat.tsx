@@ -5,7 +5,7 @@ import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useSta
 import type { FormEvent, KeyboardEvent, PointerEvent } from "react";
 import { LuArrowUp, LuEllipsis, LuSquare } from "react-icons/lu";
 import { CopyButton } from "./copy-button.tsx";
-import { ChatMarkdown } from "./workspace-markdown.tsx";
+import { ChatMarkdown, InlineCodeCopy } from "./workspace-markdown.tsx";
 import type { ApprovalChoice, PermissionApproval, SystemMessageKind, WorkspaceAgent, WorkspaceMessage } from "./workspace-runtime.ts";
 
 import "./workspace-chat.css";
@@ -246,6 +246,26 @@ function Conversation({
       messageResizes.current = null;
     };
   }, []);
+  // One stable ref callback per message, so re-rendering a streaming message does not re-register every article.
+  const messageRefs = useRef(new Map<string, (element: HTMLElement | null) => void>());
+  function messageRef(id: string) {
+    let callback = messageRefs.current.get(id);
+    if (!callback) {
+      callback = (element) => {
+        const previous = messages.current.get(id);
+        if (previous && previous !== element) messageResizes.current?.unobserve(previous);
+        if (element) {
+          messages.current.set(id, element);
+          messageResizes.current?.observe(element);
+        } else {
+          messages.current.delete(id);
+          messageRefs.current.delete(id);
+        }
+      };
+      messageRefs.current.set(id, callback);
+    }
+    return callback;
+  }
   const [showJumpToLatest, setShowJumpToLatest] = useState(false);
   const [draft, setDraft] = useState(initialDraft);
   const draftRef = useRef(initialDraft);
@@ -559,14 +579,7 @@ function Conversation({
             : undefined;
           return (
             <article key={message.id} tabIndex={-1} className={`chat-message chat-message--${message.role}${systemKind ? ` chat-message--${systemKind}` : ""}`}
-              ref={(element) => {
-                const previous = messages.current.get(message.id);
-                if (previous && previous !== element) messageResizes.current?.unobserve(previous);
-                if (element) {
-                  messages.current.set(message.id, element);
-                  messageResizes.current?.observe(element);
-                } else messages.current.delete(message.id);
-              }}>
+              ref={messageRef(message.id)}>
               <div className="chat-message-content">
                 <div className="chat-message-header">
                   <strong><span aria-hidden="true">&gt; </span>{sender}:</strong>
@@ -718,6 +731,7 @@ function Conversation({
             <p>Review and merge each repository separately.</p>
           </details>}
         </div>
+        <InlineCodeCopy transcript={transcript} />
         {showJumpToLatest && <button className="chat-jump-latest" type="button" onClick={scrollToLatest}
           aria-label="Jump to latest message" title="Jump to latest message">
           <span aria-hidden="true">↓</span>

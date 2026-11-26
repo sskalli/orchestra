@@ -1,4 +1,5 @@
-import { realpath, stat } from "node:fs/promises";
+import { constants } from "node:fs";
+import { open, readlink, realpath, stat } from "node:fs/promises";
 import { extname, isAbsolute, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -19,6 +20,7 @@ export const localImageTypes: Readonly<Record<string, string>> = {
 export const maxLocalImageBytes = 25 * 1024 * 1024;
 
 export type LocalImage = { path: string; type: string; size: number };
+export type LoadedImage = LocalImage & { body: Buffer; etag: string };
 export type LocalImageRefusal = { status: 400 | 403 | 404 | 413 | 415; reason: string };
 
 function imageType(path: string) {
@@ -74,4 +76,39 @@ export async function resolveLocalImage(requested: string, roots: readonly strin
     return { path: real, type, size: info.size };
   }
   return outside ? { status: 403, reason: "Image is outside the configured repositories" } : { status: 404, reason: "Image not found" };
+}
+
+async function realRootPaths(roots: readonly string[]) {
+  return (await Promise.all(roots.filter((root) => isAbsolute(root)).map((root) => realpath(root).catch(() => undefined))))
+    .filter((root): root is string => root !== undefined);
+}
+
+/**
+ * Resolves and reads a local image. The file is opened without following a final symlink and without blocking
+ * (a FIFO is refused instead of hanging), then checked and read through the same handle, so it cannot be swapped
+ * between the check and the read. On Linux the opened file's real location is checked against the roots again.
+ */
+export async function loadLocalImage(requested: string, roots: readonly string[]): Promise<LoadedImage | LocalImageRefusal> {
+  const image = await resolveLocalImage(requested, roots);
+  if (!("path" in image)) return image;
+  let handle;
+  try {
+    handle = await open(image.path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0));
+  } catch {
+    return { status: 404, reason: "Image not found" };
+  }
+  try {
+    const info = await handle.stat();
+    if (!info.isFile()) return { status: 404, reason: "Image not found" };
+    if (info.size > maxLocalImageBytes) return { status: 413, reason: "Image is too large" };
+    const opened = await readlink(`/proc/self/fd/${handle.fd}`).catch(() => undefined);
+    if (opened !== undefined && (!imageType(opened) || !(await realRootPaths(roots)).some((root) => inside(root, opened)))) {
+      return { status: 403, reason: "Image is outside the configured repositories" };
+    }
+    const body = await handle.readFile();
+    if (body.length > maxLocalImageBytes) return { status: 413, reason: "Image is too large" };
+    return { ...image, size: body.length, body, etag: `W/"${body.length.toString(16)}-${Math.trunc(info.mtimeMs).toString(16)}"` };
+  } finally {
+    await handle.close();
+  }
 }

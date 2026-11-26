@@ -1,11 +1,11 @@
-import { createContext, useContext, useEffect, useState } from "react";
-import type { ReactNode } from "react";
+import { createContext, useContext, useEffect, useRef, useState } from "react";
+import type { ReactNode, RefObject } from "react";
 import Markdown, { defaultUrlTransform } from "react-markdown";
 import type { Components, UrlTransform } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { Element, ElementContent } from "hast";
 import { CopyButton } from "./copy-button.tsx";
-import { chatImageSource, isWebLink } from "./workspace-markdown-links.ts";
+import { chatImageSource, isWebLink, pathLinkText, rehypeFootnoteLabelPrefix } from "./workspace-markdown-links.ts";
 
 import "./workspace-markdown.css";
 
@@ -26,14 +26,93 @@ function contains(node: Element | ElementContent | undefined, tagName: string): 
 
 const shortLabel = (text: string) => text.length > 40 ? `${text.slice(0, 39)}…` : text;
 
+/** Inline code is marked copyable; one shared floating button (InlineCodeCopy) offers the copy, so the text never moves. */
 function InlineCode({ text, title }: { text: string; title?: string }) {
   const insideLink = useContext(InsideLink);
   if (insideLink || !text.trim()) return <code title={title}>{text}</code>;
+  return <code className="chat-code-inline" data-copy={text} title={title}>{text}</code>;
+}
+
+/**
+ * The copy chip for inline code: a single button floating just above the hovered (or tapped) code, positioned in the
+ * transcript's wrapper so scroll containers such as table wrappers never clip it. Render it once beside the transcript.
+ */
+export function InlineCodeCopy({ transcript }: { transcript: RefObject<HTMLElement | null> }) {
+  const [target, setTarget] = useState<{ text: string; top: number; left: number; key: number }>();
+  const hideTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const chip = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const element = transcript.current;
+    const wrapper = element?.parentElement;
+    if (!element || !wrapper) return;
+    let count = 0;
+    const cancelHide = () => clearTimeout(hideTimer.current);
+    const hideSoon = () => {
+      cancelHide();
+      hideTimer.current = setTimeout(() => {
+        if (!chip.current?.contains(document.activeElement)) setTarget(undefined);
+      }, 300);
+    };
+    const show = (code: HTMLElement) => {
+      cancelHide();
+      const box = code.getBoundingClientRect();
+      const frame = wrapper.getBoundingClientRect();
+      const above = box.top - frame.top - 22;
+      setTarget((previous) => previous?.text === code.dataset.copy && previous.left === Math.round(box.right - frame.left) ? previous : {
+        text: code.dataset.copy ?? "",
+        top: Math.round(above >= 0 ? above : box.bottom - frame.top + 2),
+        left: Math.round(box.right - frame.left),
+        key: ++count,
+      });
+    };
+    const copyable = (event: Event) => event.target instanceof Element
+      ? event.target.closest<HTMLElement>("code[data-copy]") : null;
+    const over = (event: PointerEvent) => {
+      const code = copyable(event);
+      if (code && event.pointerType !== "touch") show(code);
+    };
+    const out = (event: PointerEvent) => {
+      if (copyable(event) && !(event.relatedTarget instanceof Node && chip.current?.contains(event.relatedTarget))) hideSoon();
+    };
+    // Touch has no hover: a tap on inline code shows the chip.
+    const click = (event: MouseEvent) => {
+      const code = copyable(event);
+      if (code) show(code);
+      else hideSoon();
+    };
+    const hide = () => {
+      cancelHide();
+      setTarget(undefined);
+    };
+    element.addEventListener("pointerover", over);
+    element.addEventListener("pointerout", out);
+    element.addEventListener("click", click);
+    element.addEventListener("scroll", hide, { passive: true });
+    return () => {
+      cancelHide();
+      element.removeEventListener("pointerover", over);
+      element.removeEventListener("pointerout", out);
+      element.removeEventListener("click", click);
+      element.removeEventListener("scroll", hide);
+    };
+  }, [transcript]);
+
   return (
-    <span className="chat-code-inline">
-      <code title={title}>{text}</code>
-      <CopyButton text={text} label={`Copy \`${shortLabel(text)}\``} className="chat-code-copy" />
-    </span>
+    <div ref={chip} className="chat-inline-copy" hidden={!target}
+      style={target ? { top: target.top, left: target.left } : undefined}
+      onPointerEnter={() => clearTimeout(hideTimer.current)}
+      onPointerLeave={() => {
+        clearTimeout(hideTimer.current);
+        hideTimer.current = setTimeout(() => setTarget(undefined), 300);
+      }}
+      onKeyDown={(event) => {
+        if (event.key !== "Escape") return;
+        event.stopPropagation();
+        setTarget(undefined);
+      }}>
+      {target && <CopyButton key={target.key} text={target.text} label={`Copy \`${shortLabel(target.text)}\``} />}
+    </div>
   );
 }
 
@@ -128,7 +207,7 @@ function ChatImage({ src, alt, title }: { src?: string; alt?: string; title?: st
 }
 
 const components: Components = {
-  a: ({ href, children, node }) => {
+  a: ({ href, children, node, ...attributes }) => {
     if (href && isWebLink(href)) {
       return <InsideLink.Provider value>
         <a href={href} target="_blank" rel="noopener noreferrer">{children}</a>
@@ -136,12 +215,13 @@ const components: Components = {
     }
     // GFM footnote references and back references point within the message.
     if (href?.startsWith("#") && (node?.properties?.dataFootnoteRef !== undefined || node?.properties?.dataFootnoteBackref !== undefined)) {
-      return <a href={href}>{children}</a>;
+      return <a href={href} {...attributes}>{children}</a>;
     }
     // Images keep their own link to the full image.
     if (contains(node, "img")) return <>{children}</>;
-    // Paths and other non-web targets are shown as plain code rather than links that would not open.
-    return <InlineCode text={textOf(node) || href || ""} title={href || undefined} />;
+    // Paths and other non-web targets are shown as plain code of the target rather than links that would not open.
+    const { text, title } = pathLinkText(href, textOf(node));
+    return <InlineCode text={text} title={title} />;
   },
   img: ({ src, alt, title }) => <ChatImage src={typeof src === "string" ? src : undefined} alt={alt} title={title} />,
   code: ({ node }) => <InlineCode text={textOf(node)} />,
@@ -174,6 +254,7 @@ export function ChatMarkdown({ text, agentId, streaming = false, idPrefix }: {
   return (
     <MarkdownContext.Provider value={{ agentId, streaming }}>
       <Markdown skipHtml remarkPlugins={remarkPlugins} components={components} urlTransform={urlTransform}
+        rehypePlugins={idPrefix ? [[rehypeFootnoteLabelPrefix, `${idPrefix}-`]] : undefined}
         remarkRehypeOptions={idPrefix ? { clobberPrefix: `${idPrefix}-` } : undefined}>{text}</Markdown>
     </MarkdownContext.Provider>
   );

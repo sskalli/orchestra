@@ -26,3 +26,45 @@ export function chatImageSource(src: string, agentId?: string) {
   if (agentId) query.set("agent", agentId);
   return `/api/image?${query}`;
 }
+
+/**
+ * Text shown for a link whose target is not a web address: the target path itself, which is what the reader wants
+ * to read or copy, with the link label as a tooltip when it says something else.
+ */
+export function pathLinkText(href: string | undefined, label: string) {
+  let target = href?.trim() ?? "";
+  if (/^file:\/\//i.test(target)) target = target.replace(/^file:\/\/(?:localhost)?/i, "");
+  try {
+    target = decodeURI(target);
+  } catch {
+    // Keep the encoded form when it is not valid percent-encoding.
+  }
+  if (!target) return { text: label, title: undefined };
+  return { text: target, title: label.trim() && label.trim() !== target ? label.trim() : undefined };
+}
+
+type HastNode = { type: string; properties?: Record<string, unknown>; children?: HastNode[] };
+
+/**
+ * GFM footnotes always label their section with the id "footnote-label", even with a clobber prefix.
+ * This rehype plugin prefixes that id and the references that point at it, so several messages can show footnotes.
+ */
+export function rehypeFootnoteLabelPrefix(prefix?: string) {
+  return (tree: HastNode) => {
+    if (!prefix) return;
+    const label = `${prefix}footnote-label`;
+    const visit = (node: HastNode) => {
+      const properties = node.properties;
+      if (properties) {
+        if (properties.id === "footnote-label") properties.id = label;
+        for (const key of ["ariaDescribedBy", "ariaLabelledBy"]) {
+          const value = properties[key];
+          if (Array.isArray(value)) properties[key] = value.map((entry) => entry === "footnote-label" ? label : entry);
+          else if (value === "footnote-label") properties[key] = label;
+        }
+      }
+      node.children?.forEach(visit);
+    };
+    visit(tree);
+  };
+}

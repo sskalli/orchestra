@@ -28,30 +28,22 @@
 .chat-code-header .chat-icon-button > svg { width: 11px; height: 11px; }
 .chat-code-header .chat-copy-failure { margin-left: auto; }
 
-/* Inline code: the copy button sits just after the code without moving surrounding text. */
-.chat-code-inline { position: relative; }
-.chat-code-inline > .chat-icon-button {
+/* Inline code copy: one chip floats just above the hovered or tapped code, outside any scroll container. */
+.chat-markdown code.chat-code-inline { cursor: text; }
+.chat-inline-copy {
   position: absolute;
-  z-index: 1;
-  top: 50%;
-  left: 100%;
-  width: 18px;
-  height: 18px;
-  margin-left: 2px;
+  z-index: 5;
+  display: flex;
+  transform: translateX(-100%);
   border: 1px solid var(--sw-line);
+  border-radius: 5px;
   background: var(--sw-popover-bg);
-  color: var(--text-secondary);
-  opacity: 0;
-  pointer-events: none;
-  transform: translateY(-50%);
+  box-shadow: 0 4px 10px #0006;
 }
-.chat-code-inline > .chat-icon-button > svg { width: 10px; height: 10px; }
-.chat-code-inline:is(:hover, :focus-within) > .chat-icon-button,
-.chat-code-inline > .chat-icon-button[data-copy-status] { opacity: 1; pointer-events: auto; }
-.chat-code-inline > [role="status"] { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
-@media (hover: none) {
-  .chat-code-inline > .chat-icon-button { display: none; }
-}
+.chat-inline-copy[hidden] { display: none; }
+.chat-inline-copy > .chat-icon-button { width: 20px; height: 18px; flex: 0 0 20px; color: var(--text-secondary); }
+.chat-inline-copy > .chat-icon-button > svg { width: 10px; height: 10px; }
+.chat-inline-copy > [role="status"] { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 
 /* Tables scroll sideways instead of stretching the chat. */
 .chat-markdown .chat-table-wrap { max-width: 100%; margin: .85em 0; overflow-x: auto; border: 1px solid var(--sw-line); border-radius: 6px; }
