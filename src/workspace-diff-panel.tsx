@@ -1,7 +1,8 @@
-import { LuChevronDown, LuChevronRight, LuFileDiff, LuRefreshCw, LuX } from "react-icons/lu";
+import { LuChevronDown, LuChevronRight, LuFileDiff, LuX } from "react-icons/lu";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties, KeyboardEvent, PointerEvent, ReactNode, RefObject } from "react";
 import type { DiffFile, DiffGroup, TaskDiff } from "./workspace-diff.ts";
+import { buildFileTree, treeFiles, type FileTreeNode } from "./workspace-diff-tree.ts";
 import type { WorkspaceAgent } from "./workspace-runtime.ts";
 import "./workspace-diff-panel.css";
 
@@ -193,18 +194,48 @@ function FileDiff({ group, file, id }: { group: DiffGroup; file: DiffFile; id: s
   </section>;
 }
 
-type TreeItem = { key: string; level: 1 | 2; group: DiffGroup; file?: DiffFile };
+type TreeItem = {
+  key: string; level: number; parent?: string; setSize: number; position: number;
+  kind: "repo" | "dir" | "file"; name: string; group: DiffGroup; file?: DiffFile;
+  additions: number; deletions: number; expandable: boolean;
+};
 
-function FileTree({ groups, multiple, collapsed, onToggleGroup, selected, onSelect }: {
-  groups: DiffGroup[]; multiple: boolean; collapsed: Set<string>; onToggleGroup: (key: string) => void;
+function groupTree(group: DiffGroup) {
+  return buildFileTree(group.files, (file) => fileKey(group, file), groupKey(group));
+}
+
+/** Visible rows of the repository and folder tree, flattened for rendering and keyboard navigation. */
+function visibleItems(groups: DiffGroup[], collapsed: Set<string>) {
+  const items: TreeItem[] = [];
+  const walk = (nodes: FileTreeNode<DiffFile>[], group: DiffGroup, level: number, parent: string) => {
+    nodes.forEach((node, index) => {
+      const base = { level, parent, setSize: nodes.length, position: index + 1, group, name: node.name };
+      if (node.kind === "file") {
+        items.push({ ...base, key: node.key, kind: "file", file: node.file,
+          additions: node.file.additions, deletions: node.file.deletions, expandable: false });
+        return;
+      }
+      items.push({ ...base, key: node.key, kind: "dir", additions: node.additions, deletions: node.deletions, expandable: true });
+      if (!collapsed.has(node.key)) walk(node.children, group, level + 1, node.key);
+    });
+  };
+  groups.forEach((group, index) => {
+    const key = groupKey(group);
+    items.push({ key, level: 1, setSize: groups.length, position: index + 1, kind: "repo", name: group.projectId, group,
+      additions: group.files.reduce((sum, file) => sum + file.additions, 0),
+      deletions: group.files.reduce((sum, file) => sum + file.deletions, 0), expandable: true });
+    if (!collapsed.has(key)) walk(groupTree(group), group, 2, key);
+  });
+  return items;
+}
+
+function FileTree({ groups, multiple, collapsed, onToggle, selected, onSelect }: {
+  groups: DiffGroup[]; multiple: boolean; collapsed: Set<string>; onToggle: (key: string) => void;
   selected?: string; onSelect: (key: string) => void;
 }) {
   const [focused, setFocused] = useState<string>();
   const tree = useRef<HTMLUListElement>(null);
-  const items = useMemo(() => groups.flatMap((group): TreeItem[] => [
-    { key: groupKey(group), level: 1, group },
-    ...(collapsed.has(groupKey(group)) ? [] : group.files.map((file) => ({ key: fileKey(group, file), level: 2 as const, group, file }))),
-  ]), [collapsed, groups]);
+  const items = useMemo(() => visibleItems(groups, collapsed), [collapsed, groups]);
   const active = items.some(({ key }) => key === focused) ? focused : selected && items.some(({ key }) => key === selected) ? selected : items[0]?.key;
 
   const pendingFocus = useRef<string>(undefined);
@@ -223,70 +254,58 @@ function FileTree({ groups, multiple, collapsed, onToggleGroup, selected, onSele
     setFocusRequest((count) => count + 1);
   }
 
+  function activate(item: TreeItem) {
+    setFocused(item.key);
+    if (item.expandable) onToggle(item.key);
+    else onSelect(item.key);
+  }
+
   function keyDown(event: KeyboardEvent<HTMLUListElement>) {
     const index = items.findIndex(({ key }) => key === active);
     const item = items[index];
     if (!item) return;
     const handled = () => { event.preventDefault(); event.stopPropagation(); };
+    const open = item.expandable && !collapsed.has(item.key);
     if (event.key === "ArrowDown") { handled(); move(items[Math.min(items.length - 1, index + 1)]?.key); }
     else if (event.key === "ArrowUp") { handled(); move(items[Math.max(0, index - 1)]?.key); }
     else if (event.key === "Home") { handled(); move(items[0]?.key); }
     else if (event.key === "End") { handled(); move(items.at(-1)?.key); }
     else if (event.key === "ArrowRight") {
       handled();
-      if (item.level === 1 && collapsed.has(item.key)) onToggleGroup(item.key);
-      else if (item.level === 1) move(items[index + 1]?.level === 2 ? items[index + 1].key : undefined);
+      if (item.expandable && !open) onToggle(item.key);
+      else if (open && items[index + 1]?.parent === item.key) move(items[index + 1].key);
     } else if (event.key === "ArrowLeft") {
       handled();
-      if (item.level === 2) move(groupKey(item.group));
-      else if (!collapsed.has(item.key)) onToggleGroup(item.key);
+      if (open) onToggle(item.key);
+      else move(item.parent);
     } else if (event.key === "Enter" || event.key === " ") {
       handled();
-      if (item.level === 1) onToggleGroup(item.key);
-      else onSelect(item.key);
+      activate(item);
     }
   }
 
   return <ul ref={tree} className="sw-diff-tree" role="tree" aria-label="Changed files" onKeyDown={keyDown}>
-    {groups.map((group) => {
-      const key = groupKey(group);
-      const expanded = !collapsed.has(key);
-      const additions = group.files.reduce((sum, file) => sum + file.additions, 0);
-      const deletions = group.files.reduce((sum, file) => sum + file.deletions, 0);
+    {items.map((item) => {
+      const expanded = item.expandable ? !collapsed.has(item.key) : undefined;
       const Chevron = expanded ? LuChevronDown : LuChevronRight;
-      return <li key={key} role="treeitem" aria-expanded={expanded} aria-level={1} aria-selected={false}
-        data-key={key} tabIndex={active === key ? 0 : -1}
-        onFocus={(event) => { if (event.target === event.currentTarget) setFocused(key); }}
-        onClick={(event) => {
-          if ((event.target as Element).closest("[role=group]")) return;
-          setFocused(key);
-          onToggleGroup(key);
-        }}>
-        <div className="sw-diff-tree-row sw-diff-tree-repo">
-          <Chevron aria-hidden="true" />
-          <strong>{group.projectId}</strong>
-          {multiple && <span className="sw-diff-dir">{modeNames[group.mode]}</span>}
-          <span className="sw-diff-tree-meta">{group.error ? "Failed" : <Counts additions={additions} deletions={deletions} />}</span>
+      const file = item.file;
+      const label = item.kind === "repo" ? `${item.name}${multiple ? `, ${modeNames[item.group.mode]}` : ""}, ${item.additions} added, ${item.deletions} removed`
+        : item.kind === "dir" ? `Folder ${item.name}, ${item.additions} added, ${item.deletions} removed`
+        : `${statusNames[file!.status]} ${file!.path}, ${file!.binary ? "binary" : `${file!.additions} added, ${file!.deletions} removed`}`;
+      return <li key={item.key} role="treeitem" aria-level={item.level} aria-setsize={item.setSize} aria-posinset={item.position}
+        aria-expanded={expanded} aria-selected={item.kind === "file" ? selected === item.key : undefined}
+        aria-label={label} data-key={item.key} data-kind={item.kind} tabIndex={active === item.key ? 0 : -1}
+        onFocus={() => setFocused(item.key)} onClick={() => activate(item)}>
+        <div className="sw-diff-tree-row" style={{ paddingLeft: 12 + (item.level - 1) * 14 }}
+          title={file ? (file.oldPath ? `${file.oldPath} → ${file.path}` : file.path) : undefined}>
+          {item.expandable ? <Chevron className="sw-diff-chevron" aria-hidden="true" />
+            : <span className="sw-diff-status" data-status={file!.status} aria-hidden="true">{file!.status}</span>}
+          {item.kind === "repo" ? <><strong>{item.name}</strong>{multiple && <span className="sw-diff-dir">{modeNames[item.group.mode]}</span>}</>
+            : <span className={`sw-diff-file-path${item.kind === "dir" ? " sw-diff-folder" : ""}`}>{item.name}</span>}
+          <span className="sw-diff-tree-meta" aria-hidden="true">
+            {file?.binary ? <span className="sw-diff-dir">bin</span> : <Counts additions={item.additions} deletions={item.deletions} />}
+          </span>
         </div>
-        {expanded && <ul role="group">
-          {group.files.map((file) => {
-            const itemKey = fileKey(group, file);
-            const { name, directory } = splitPath(file.path);
-            return <li key={itemKey} role="treeitem" aria-level={2} aria-selected={selected === itemKey}
-              data-key={itemKey} tabIndex={active === itemKey ? 0 : -1}
-              aria-label={`${statusNames[file.status]} ${file.path}, ${file.binary ? "binary" : `${file.additions} added, ${file.deletions} removed`}`}
-              onFocus={() => setFocused(itemKey)}
-              onClick={(event) => { event.stopPropagation(); setFocused(itemKey); onSelect(itemKey); }}>
-              <div className="sw-diff-tree-row" title={file.oldPath ? `${file.oldPath} → ${file.path}` : file.path}>
-                <span className="sw-diff-status" data-status={file.status} aria-hidden="true">{file.status}</span>
-                <span className="sw-diff-file-path"><span className="sw-diff-dir">{directory}</span>{name}</span>
-                <span className="sw-diff-tree-meta" aria-hidden="true">
-                  {file.binary ? <span className="sw-diff-dir">bin</span> : <Counts additions={file.additions} deletions={file.deletions} />}
-                </span>
-              </div>
-            </li>;
-          })}
-        </ul>}
       </li>;
     })}
   </ul>;
@@ -384,7 +403,7 @@ export function DiffPanel({ agent, open, layout, resizing, resizeHandle, onClose
       tree = <FileTree groups={groups.filter((group) => group.files.length)}
         multiple={new Set(groups.map(({ projectId }) => projectId)).size !== groups.length}
         collapsed={collapsed} selected={selected} onSelect={select}
-        onToggleGroup={(key) => setCollapsed((current) => {
+        onToggle={(key) => setCollapsed((current) => {
           const next = new Set(current);
           if (!next.delete(key)) next.add(key);
           return next;
@@ -401,7 +420,7 @@ export function DiffPanel({ agent, open, layout, resizing, resizeHandle, onClose
           {group.projectId} <span className="sw-diff-dir">· {modeNames[group.mode]} · base <code>{shortRevision(group.base)}</code></span>
         </h3>}
         {group.mode === "checkout" && <p className="sw-diff-note">Edits in the local checkout. Uncommitted changes that were already there are included.</p>}
-        {group.files.map((file) => {
+        {treeFiles(groupTree(group)).map((file) => {
           const key = fileKey(group, file);
           return <div key={key} data-file-key={key}><FileDiff group={group} file={file} id={`diff-${key}`} /></div>;
         })}
@@ -429,10 +448,6 @@ export function DiffPanel({ agent, open, layout, resizing, resizeHandle, onClose
             <Counts additions={additions} deletions={deletions} /> · {files.length} {files.length === 1 ? "file" : "files"}
           </span>}
         </div>
-        <button type="button" className="interface-icon-button" aria-label="Refresh changes" title="Refresh changes"
-          disabled={!agentId || refreshing} data-busy={refreshing || undefined} onClick={() => void load(false)}>
-          <LuRefreshCw aria-hidden="true" strokeWidth={1.5} />
-        </button>
         <button type="button" className="interface-icon-button" aria-label="Close changes" title="Close changes"
           onClick={() => onClose(true)}>
           <LuX aria-hidden="true" strokeWidth={1.5} />

@@ -97,7 +97,7 @@ export function radialLayout(agents: CanvasAgent[], taskPositions: ReadonlyMap<s
   return { nodes, teams };
 }
 
-/** A floating changes panel left of the chat also covers the map. */
+/** A floating changes panel beside the chat also covers the map. */
 function besideChatPanel(chatWindow?: HTMLElement | null) {
   return chatWindow?.parentElement?.querySelector<HTMLElement>(".sw-diff[data-layout='floating']:not([hidden])");
 }

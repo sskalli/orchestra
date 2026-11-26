@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { diffLimits, diffSource, parseNameStatus, parseNumstat, parsePatch, taskDiff } from "../src/workspace-diff.ts";
+import { buildFileTree, treeFiles } from "../src/workspace-diff-tree.ts";
 import { WorkspaceRuntime } from "../src/workspace-runtime.ts";
 
 function git(cwd: string, ...args: string[]) {
@@ -62,6 +63,23 @@ test("parsers read name-status, numstat and patch output", () => {
   ]);
   assert.equal(binary.binary, true);
   assert.deepEqual(binary.lines, []);
+});
+
+test("changed files form a folder tree with compacted single-child folders and totals", () => {
+  const file = (path: string, additions = 1, deletions = 0) => ({ path, additions, deletions });
+  const files = [file("src/components/ui/Button.tsx", 3, 1), file("src/components/ui/Card.tsx", 2), file("README.md"),
+    file("src/index.ts", 0, 4), file("docs/guide/setup/intro.md", 5)];
+  const tree = buildFileTree(files, (entry) => entry.path, "repo");
+  const shape = (nodes: typeof tree): unknown[] => nodes.map((node) =>
+    node.kind === "dir" ? [node.name, node.additions, node.deletions, shape(node.children)] : node.name);
+  assert.deepEqual(shape(tree), [
+    ["docs/guide/setup", 5, 0, ["intro.md"]],
+    ["src", 5, 5, [["components/ui", 5, 1, ["Button.tsx", "Card.tsx"]], "index.ts"]],
+    "README.md",
+  ]);
+  assert.equal(tree[1].kind === "dir" && tree[1].children[0].key, "repo\0dir\0src/components/ui");
+  assert.deepEqual(treeFiles(tree).map(({ path }) => path), ["docs/guide/setup/intro.md", "src/components/ui/Button.tsx",
+    "src/components/ui/Card.tsx", "src/index.ts", "README.md"]);
 });
 
 test("an isolated worktree diff includes commits, uncommitted and untracked files without touching Git state", async (t) => {
@@ -131,6 +149,17 @@ test("a configured checkout diff shows edits in place against the recorded base"
     [["README.md", "M", 1, 0], ["notes.txt", "A", 1, 0]]);
   assert.equal(group.mode, "checkout");
   assert.equal(git(fixture.path, "status", "--porcelain"), "?? notes.txt");
+});
+
+test("a same-size edit right after the index was written is still reported", async (t) => {
+  const fixture = repository(t, { "a.txt": "one\n" });
+  if (!fixture) return;
+  git(fixture.path, "status", "--porcelain");
+  writeFileSync(join(fixture.path, "a.txt"), "two\n");
+  // Git compares whole seconds; the copy of the index must be made in a later second than the edit.
+  await new Promise((resolve) => setTimeout(resolve, 1100));
+  const group = await diffSource({ projectId: "app", mode: "checkout", path: fixture.path, base: fixture.base });
+  assert.deepEqual(group.files.map(({ path, status }) => [path, status]), [["a.txt", "M"]]);
 });
 
 test("large diffs are truncated per file and omitted past the byte limit", async (t) => {

@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { copyFile, mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, mkdtemp, realpath, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -223,7 +223,10 @@ export async function diffSource(source: DiffSource): Promise<DiffGroup> {
     const index = resolve(root, (await text(["rev-parse", "--git-path", "index"])).trim());
     try {
       // Starting from the real index keeps Git's stat cache, so unchanged files are not hashed again.
+      // Keep the index's own timestamp so Git still re-checks racily clean entries.
+      const { atime, mtime } = await stat(index);
       await copyFile(index, join(temporary, "index"));
+      await utimes(join(temporary, "index"), atime, mtime);
       await text(["add", "-A", "--", "."], env);
     } catch {
       await rm(join(temporary, "index"), { force: true });
