@@ -97,10 +97,16 @@ export function radialLayout(agents: CanvasAgent[], taskPositions: ReadonlyMap<s
   return { nodes, teams };
 }
 
+/** A floating changes panel left of the chat also covers the map. */
+function besideChatPanel(chatWindow?: HTMLElement | null) {
+  return chatWindow?.parentElement?.querySelector<HTMLElement>(".sw-diff[data-layout='floating']:not([hidden])");
+}
+
 function visibleMapFrame(rect: DOMRect, chatWindow?: HTMLElement | null) {
   const chat = chatWindow?.getBoundingClientRect();
   if (!chat) return { width: rect.width, height: rect.height };
-  const left = chat.left - rect.left;
+  const panel = besideChatPanel(chatWindow)?.getBoundingClientRect();
+  const left = Math.min(chat.left, panel?.width ? panel.left : Infinity) - rect.left;
   const above = chat.top - rect.top;
   if (left >= 96) return { width: Math.min(rect.width, left), height: rect.height };
   if (above >= 96) return { width: rect.width, height: Math.min(rect.height, above) };
@@ -332,6 +338,8 @@ export function WorkspaceCanvas({
     const observer = new ResizeObserver(frame);
     observer.observe(element);
     if (chatWindow) observer.observe(chatWindow);
+    const panel = chatWindow?.parentElement?.querySelector(".sw-diff");
+    if (panel) observer.observe(panel);
     return () => observer.disconnect();
   }, [chatWindowRef, setCamera, taskId, taskX, taskY, taskDepth]);
 

@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import { extname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { WorkspaceRuntime } from "./workspace-runtime.ts";
+import { taskDiff } from "./workspace-diff.ts";
 import { workspaceStore } from "./workspace-store.ts";
 import { parseWorkspaceArgs } from "./workspace-options.ts";
 import { defaultProject, resolveProjects, workspaceIdentity } from "./workspace-projects.ts";
@@ -85,6 +86,21 @@ const server = createServer(async (request, response) => {
     }
     response.writeHead(200, { "Content-Type": "application/json", "Content-Disposition": 'attachment; filename="orchestra-usage.json"' })
       .end(JSON.stringify(usage, null, 2));
+    return;
+  }
+  if (request.method === "GET" && path === "/api/diff") {
+    const agentId = new URL(request.url ?? "", origin).searchParams.get("agentId");
+    const sources = agentId ? runtime.diffSources(agentId) : undefined;
+    if (!sources) {
+      response.writeHead(404, { "Content-Type": "application/json" }).end(JSON.stringify({ error: "This task is unavailable." }));
+      return;
+    }
+    try {
+      response.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(await taskDiff(sources)));
+    } catch (error) {
+      response.writeHead(500, { "Content-Type": "application/json" })
+        .end(JSON.stringify({ error: error instanceof Error ? error.message : "Orchestra could not compute the changes." }));
+    }
     return;
   }
   if (request.method === "GET" && path === "/api/events") {

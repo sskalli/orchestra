@@ -92,5 +92,10 @@ export function workspacePreferences(projectPath: string, mode: "demo" | "codex"
           Number.isFinite(value.scale) && value.scale >= 0.3 && value.scale <= 2.5) return value;
     },
     writeCamera: (camera: Camera) => write("camera", camera),
+    readDiffWidth(): number | undefined {
+      const value = read("diff-width");
+      return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : undefined;
+    },
+    writeDiffWidth: (width: number) => { write("diff-width", width); },
   };
 }

@@ -12,6 +12,7 @@ import { workspacePreferences } from "./workspace-preferences.ts";
 import { useDockResizing } from "./use-dock-resizing.tsx";
 import { TaskLifecycleDialog } from "./workspace-task-dialogs.tsx";
 import { NewSessionComposer } from "./workspace-new-session.tsx";
+import { DiffPanel, DiffToggle, useDiffPanel } from "./workspace-diff-panel.tsx";
 import type { AgentSignal, WorkspaceRuntime } from "./workspace-runtime.ts";
 import { createTask, send } from "./workspace-commands.ts";
 import "./workspace.css";
@@ -205,6 +206,7 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
   const [newTaskId, setNewTaskId] = useState<string>();
   const [lifecycle, setLifecycle] = useState<{ action: "archive" | "restore" | "delete"; agentId: string }>();
   const chatWindowRef = useRef<HTMLElement>(null);
+  const diff = useDiffPanel(preferences, chatWindowRef, !newTaskOpen && agents.some((agent) => agent.id === selectedId), leftOpen);
   const archivedToggle = useRef<HTMLButtonElement>(null);
 
   useEffect(() => {
@@ -356,6 +358,11 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
     node?.focus({ preventScroll: true });
   }
 
+  function closeDiff(restoreFocus: boolean) {
+    diff.setOpen(false);
+    if (restoreFocus) document.querySelector<HTMLButtonElement>(".sw-right .sw-diff-toggle")?.focus();
+  }
+
   function handleStatus(id: string) {
     const events = activityFor(agents, id);
     if (events.length > 1) {
@@ -449,6 +456,7 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
       onOpenAgent={(id) => select(id)}
       onRename={agent.nativeChild ? undefined : (name) => send({ type: "rename", agentId: agent.id, name })}
       onLifecycle={agent.nativeChild ? undefined : (action) => requestLifecycle(action, agent.id)}
+      headerActions={<DiffToggle open={diff.open} onToggle={diff.toggle} />}
       onApproveImplementation={agent.directTask?.projectIds.length
         ? (requestId) => send({ type: "approveImplementation", agentId: agent.id, requestId })
         : undefined}
@@ -521,7 +529,7 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
         {snapshot.usage && <WorkspaceUsage usage={snapshot.usage} />}
       </header>
       <main ref={bodyRef} className={`sw-body ${chatOpen ? "is-agent-open" : ""} ${leftOpen ? "is-inbox-open" : ""} ${resizing ? "is-resizing" : ""}`}
-        style={dockStyle}>
+        style={{ ...dockStyle, ...diff.style }} data-diff-layout={diff.open ? diff.layout : undefined}>
         {!leftOpen && inboxToggle}
         <aside id="workspace-inbox-window" className="sw-dock sw-left" aria-label="Inbox window" hidden={!leftOpen}>
           <div className="sw-dock-inner">
@@ -576,7 +584,8 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
           inert={!selected && !newTaskOpen} onKeyDown={(event) => {
             if (event.key !== "Escape") return;
             event.stopPropagation();
-            if (!newTaskOpen) closeAgent(true);
+            if (diff.open) closeDiff(true);
+            else if (!newTaskOpen) closeAgent(true);
           }}>
           <div className="sw-dock-inner">
             <div className="sw-conversation" hidden={newTaskOpen}>{dockAgent && renderChat(dockAgent)}</div>
@@ -587,6 +596,8 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
           </div>
           {(selected || newTaskOpen) && resizeHandle("right")}
         </aside>
+        <DiffPanel agent={dockAgent} open={diff.open} layout={diff.layout} resizing={diff.resizing}
+          resizeHandle={diff.resizeHandle} onClose={closeDiff} />
       </main>
       <TaskLifecycleDialog action={lifecycle?.action}
         agentName={lifecycleAgent && agentAppearance(lifecycleAgent).displayName}

@@ -2,7 +2,7 @@ import { OrbitSpinner } from "./workspace-orbit-spinner.tsx";
 import { needsUserInput } from "./workspace-status.ts";
 import { agentAppearance } from "./workspace-agent-appearance.ts";
 import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
-import type { FormEvent, KeyboardEvent, PointerEvent } from "react";
+import type { FormEvent, KeyboardEvent, PointerEvent, ReactNode } from "react";
 import Markdown from "react-markdown";
 import type { Components } from "react-markdown";
 import { LuArrowUp, LuCheck, LuCopy, LuEllipsis, LuSquare } from "react-icons/lu";
@@ -38,6 +38,8 @@ type ChatProps = {
   onOpenAgent?: (id: string) => void;
   onRename?: (name: string) => Promise<void>;
   onLifecycle?: (action: "archive" | "restore" | "delete") => void;
+  /** Extra header controls shown before More actions. */
+  headerActions?: ReactNode;
   disabled?: boolean;
   disabledReason?: string;
   focusMessageId?: string;
@@ -217,7 +219,7 @@ function MessageActions({ message }: { message: WorkspaceMessage }) {
 
 function Conversation({
   agent, projectLabel, repositoryScope, delivery, taskPhase, taskDetail, modelLabel, usageLabel, draft: initialDraft, composerHeight, onComposerHeightChange, onDraftInput, onDraftChange, onSend, onSteer, onCancel, onResumeQueue, onApproveImplementation, onClose,
-  disabled, disabledReason, focusMessageId, focusRequest, onOpenAgent, onLifecycle, onRename, onResolveCommandApproval,
+  disabled, disabledReason, focusMessageId, focusRequest, onOpenAgent, onLifecycle, onRename, onResolveCommandApproval, headerActions,
 }: ChatProps) {
   const transcript = useRef<HTMLDivElement>(null);
   const actions = useRef<HTMLDivElement>(null);
@@ -659,6 +661,7 @@ function Conversation({
             </div>
           </>}
         </div>
+        {headerActions}
         <div ref={actions} className="chat-lifecycle-menu">
           <button ref={actionsButton} className="interface-icon-button" type="button" aria-label="More actions"
             title="More actions" aria-expanded={actionsOpen} aria-controls={actionsId}
