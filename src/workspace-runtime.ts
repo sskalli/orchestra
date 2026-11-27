@@ -11,7 +11,7 @@ import { ClaudeAppServer, claudeProviderId } from "./claude-app-server.ts";
 import type { Event, Id, Thread, Turn } from "./app-server.ts";
 import { createFeatureWorktree, removeFeatureWorktree } from "./workspace-worktree.ts";
 import { fingerprintCandidate, fingerprintCheckout, fingerprintMemberSnapshots, hasWorktreeChanges, pinApprovedCandidate, pinDirectCandidates, validateCandidateWorktree, type IntegrationMember } from "./workspace-integration.ts";
-import { chooseModelSettings, modelOptions, recordReportedModel, selectModelSettings, turnModelParams, validateEffort, withDefaultEffort } from "./workspace-models.ts";
+import { chooseModelSettings, modelOptions, newTaskEffortFor, recordReportedModel, selectModelSettings, turnModelParams, validateEffort, withDefaultEffort } from "./workspace-models.ts";
 import type { ModelCatalog, ModelSettings, ProviderModel, ReportedModel } from "./workspace-models.ts";
 import { knownEfforts } from "./workspace-models.ts";
 import type { SavedSession, workspaceStore } from "./workspace-store.ts";
@@ -745,6 +745,11 @@ export class WorkspaceRuntime {
    * Lists the models and reasoning efforts the provider offers, for the picker. Concurrent requests share one
    * provider call; a list is kept for ten minutes and a failure for ten seconds.
    */
+  private cachedModelCatalog() {
+    if (this.demo) return demoModelCatalog;
+    return this.modelCatalog && Date.now() < this.modelCatalog.expiresAt ? this.modelCatalog.catalog : undefined;
+  }
+
   async listModels(): Promise<ModelCatalog> {
     if (this.demo) return demoModelCatalog;
     if (this.modelCatalog && Date.now() < this.modelCatalog.expiresAt) return this.modelCatalog.catalog;
@@ -765,7 +770,10 @@ export class WorkspaceRuntime {
           cursor = response?.nextCursor;
           if (!cursor) break;
         }
-        catalog = { models: modelOptions(models),
+        // A custom provider serves its own configured model; Codex's catalog default describes OpenAI's.
+        const options = modelOptions(models);
+        if (customProvider) for (const option of options) delete option.isDefault;
+        catalog = { models: options,
           ...(customProvider ? { note: `Codex may list models that ${this.providerId} does not offer.` } : {}) };
       } catch (error) {
         catalog = { models: [], error: `${this.engineName} did not list its models: ${errorText(error)}` };
@@ -789,12 +797,16 @@ export class WorkspaceRuntime {
     if ([...this.sessions.values()].filter((entry) => this.isActive(entry)).length >= 30) {
       throw new Error("The workspace has reached its 30-session limit.");
     }
-    const modelSettings = choice.model !== undefined || choice.effort !== undefined
-      ? await this.chooseModel(this.selectModelSettings(), choice) : undefined;
+    // New tasks start at a fixed effort so the choice shown before and after the first turn is the same.
+    const initial = this.selectModelSettings();
+    const effort = choice.effort !== undefined ? choice.effort
+      // The picker has normally loaded the list already; without it, avoid starting a provider just to ask.
+      : newTaskEffortFor(choice.model === undefined ? initial.requestedModel : choice.model, this.cachedModelCatalog());
+    const modelSettings = await this.chooseModel(initial, { ...choice, ...(effort ? { effort } : {}) });
     const session = this.createAgent(randomUUID(), title, "worker");
     session.agent.projectId = projectIds[0];
     session.agent.directTask = { projectIds: [...projectIds], phase: "planning" };
-    if (modelSettings) session.agent.modelSettings = modelSettings;
+    session.agent.modelSettings = modelSettings;
     try {
       await this.attachThread(session);
       if (this.storageFailed) throw new Error("Orchestra could not save the new task.");
