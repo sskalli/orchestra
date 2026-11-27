@@ -311,12 +311,12 @@ export function WorkspaceCanvas({
       lastFocusedTask.current = taskId;
       manualCamera.current = false;
     }
-    const chatWindow = chatWindowRef.current;
     const frame = () => {
       if (manualCamera.current) return;
       const rect = element.getBoundingClientRect();
       if (!rect.width || !rect.height) return;
-      const { width, height } = visibleMapFrame(rect, chatWindow);
+      // Read the dock lazily: on first mount the canvas commits before the chat's ref is attached.
+      const { width, height } = visibleMapFrame(rect, chatWindowRef.current);
       const radius = taskDepth ? radiusAt(taskDepth) : 36;
       const scale = Math.max(MIN_SCALE, Math.min(
         taskDepth ? 1.15 : 1.35,
@@ -336,10 +336,18 @@ export function WorkspaceCanvas({
     frame();
     const observer = new ResizeObserver(frame);
     observer.observe(element);
-    if (chatWindow) observer.observe(chatWindow);
-    const panel = chatWindow?.parentElement?.querySelector(".sw-diff");
-    if (panel) observer.observe(panel);
-    return () => observer.disconnect();
+    const observeDock = () => {
+      const chatWindow = chatWindowRef.current;
+      if (chatWindow) observer.observe(chatWindow);
+      const panel = chatWindow?.parentElement?.querySelector(".sw-diff");
+      if (panel) observer.observe(panel);
+      frame();
+    };
+    const pending = requestAnimationFrame(observeDock);
+    return () => {
+      cancelAnimationFrame(pending);
+      observer.disconnect();
+    };
   }, [chatWindowRef, setCamera, taskId, taskX, taskY, taskDepth]);
 
   const takeCameraControl = useCallback(() => {

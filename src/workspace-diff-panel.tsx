@@ -14,7 +14,7 @@ const minWidth = 320;
 const defaultWidth = 520;
 /** Narrowest the chat is squeezed to so the panel fits beside it. */
 const minChatWidth = 420;
-const minMap = 120;
+const minMap = 300;
 
 function clamp(value: number, min: number, max: number) {
   return Math.max(min, Math.min(max, value));
@@ -34,7 +34,7 @@ type Space = { viewport: number; room: number; chat: number };
 function naturalChatWidth(body: HTMLElement) {
   const vw = window.innerWidth / 100;
   const stored = parseFloat(body.style.getPropertyValue("--right-size"));
-  return clamp(Number.isFinite(stored) ? stored : 65 * vw, Math.min(230, 25 * vw), 75 * vw);
+  return clamp(Number.isFinite(stored) ? stored : 65 * vw, Math.min(230, 25 * vw), Math.min(75 * vw, window.innerWidth - 28 - 240));
 }
 
 /**

@@ -102,7 +102,8 @@ export function useDockResizing(preferences: DockPreferences, inboxOpen: boolean
     } else if (key === "right") {
       current = right;
       min = Math.min(230, width * .25);
-      max = Math.min(width * .75, inboxOpen ? sharedWidth - left : width);
+      // Matches --right-max-width: keep a strip of map for its actions and controls.
+      max = Math.min(width * .75, width - 2 * inset - 240, inboxOpen ? sharedWidth - left : width);
     } else if (mobile) {
       max = width - 2 * inset;
     }

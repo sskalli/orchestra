@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useId, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 import type { CSSProperties, KeyboardEvent } from "react";
 import { createPortal } from "react-dom";
 import { LuCheck, LuChevronDown } from "react-icons/lu";
@@ -115,17 +115,32 @@ export function ModelPicker({ settings, onChange, disabled, busy, placement = "a
     };
   }, [open]);
 
+  function position(side: "above" | "below") {
+    const rect = button.current?.getBoundingClientRect();
+    if (!rect) return;
+    const left = Math.max(8, Math.min(rect.left, window.innerWidth - 288));
+    setMenuStyle(side === "above"
+      ? { left, bottom: window.innerHeight - rect.top + 4, maxHeight: Math.max(120, rect.top - 12) }
+      : { left, top: rect.bottom + 4, maxHeight: Math.max(120, window.innerHeight - rect.bottom - 12) });
+  }
+
   function toggle() {
     if (open) return setOpen(false);
-    const rect = button.current?.getBoundingClientRect();
-    if (rect) {
-      const left = Math.max(8, Math.min(rect.left, window.innerWidth - 288));
-      setMenuStyle(placement === "above"
-        ? { left, bottom: window.innerHeight - rect.top + 4, maxHeight: Math.max(120, rect.top - 12) }
-        : { left, top: rect.bottom + 4, maxHeight: Math.max(120, window.innerHeight - rect.bottom - 12) });
-    }
+    position(placement);
     setOpen(true);
   }
+
+  // Open on the other side when the whole menu fits there but not on the preferred side.
+  useLayoutEffect(() => {
+    const rect = button.current?.getBoundingClientRect();
+    const element = menu.current;
+    if (!open || !rect || !element) return;
+    // The model list scrolls inside the menu, so add up the sections' full heights.
+    const needed = [...element.children].reduce((height, child) => height + child.scrollHeight + 4, 8);
+    const room = { above: rect.top - 12, below: window.innerHeight - rect.bottom - 12 };
+    const other = placement === "above" ? "below" : "above";
+    position(room[placement] < needed && room[other] > room[placement] ? other : placement);
+  }, [open, catalog, placement]);
 
   useEffect(() => {
     if (!open) return;
@@ -219,18 +234,22 @@ export function ModelPicker({ settings, onChange, disabled, busy, placement = "a
           <button type="button" className="chat-model-picker-retry" onClick={() => reload(true)}>Retry</button>
         </p>}
         {catalog.note && <p className="chat-model-picker-status">{catalog.note}</p>}
-        {models.length > 0 && <div role="group" aria-label="Model">
+        {models.length > 0 && <div role="group" aria-label="Model" className="chat-model-picker-models">
           <p className="chat-model-picker-heading" aria-hidden="true">Model</p>
-          {models.map((entry) => <button key={entry.id || "default"} type="button" role="menuitemradio"
-            aria-checked={entry === selected} title={entry.description} onClick={() => chooseModel(entry)}>
+          {models.map((entry, index) => <button key={entry.id || "default"} type="button" role="menuitemradio"
+            aria-checked={entry === selected} aria-label={entry.label}
+            aria-describedby={entry.description ? `${menuId}-model-${index}` : undefined}
+            title={entry.description} onClick={() => chooseModel(entry)}>
             <LuCheck aria-hidden="true" strokeWidth={1.5} className="chat-model-picker-check" />
             <span>{entry.label}</span>
+            {entry.description && <span id={`${menuId}-model-${index}`} hidden>{entry.description}</span>}
           </button>)}
         </div>}
         {efforts.length > 0 && <div role="group" aria-label="Effort">
           <p className="chat-model-picker-heading" aria-hidden="true">Effort</p>
           {efforts.map((entry) => <button key={entry} type="button" role="menuitemradio"
-            aria-checked={entry === effort} onClick={() => chooseEffort(entry)}>
+            aria-checked={entry === effort} aria-label={`${entry}${entry === selected?.defaultEffort ? " (default)" : ""}`}
+            onClick={() => chooseEffort(entry)}>
             <LuCheck aria-hidden="true" strokeWidth={1.5} className="chat-model-picker-check" />
             <span>{entry}{entry === selected?.defaultEffort ? " (default)" : ""}</span>
           </button>)}
