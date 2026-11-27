@@ -1,4 +1,4 @@
-import { createContext, useContext, useEffect, useRef, useState } from "react";
+import { createContext, useContext, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode, RefObject } from "react";
 import Markdown, { defaultUrlTransform } from "react-markdown";
 import type { Components, UrlTransform } from "react-markdown";
@@ -6,6 +6,8 @@ import remarkGfm from "remark-gfm";
 import type { Element, ElementContent } from "hast";
 import { CopyButton } from "./copy-button.tsx";
 import { chatImageSource, isWebLink, pathLinkText, rehypeFootnoteLabelPrefix } from "./workspace-markdown-links.ts";
+
+import { isSvgDocument, maxSvgSourceLength, remarkSvgHtml, svgImageUrl, withSvgNamespaces } from "./workspace-markdown-svg.ts";
 
 import "./workspace-markdown.css";
 
@@ -116,12 +118,15 @@ export function InlineCodeCopy({ transcript }: { transcript: RefObject<HTMLEleme
   );
 }
 
-function CodeBlock({ language, source, children, footer }: { language?: string; source: string; children?: ReactNode; footer?: ReactNode }) {
+function CodeBlock({ language, source, children, footer, actions }: {
+  language?: string; source: string; children?: ReactNode; footer?: ReactNode; actions?: ReactNode;
+}) {
   return (
     <div className="chat-code-block">
       <div className="chat-code-header">
         <span className="chat-code-language">{language}</span>
-        <CopyButton text={source} label={language === "mermaid" ? "Copy diagram source" : "Copy code"} />
+        {actions}
+        <CopyButton text={source} label={language === "mermaid" ? "Copy diagram source" : language === "svg" ? "Copy SVG source" : "Copy code"} />
       </div>
       {children ?? <pre><code className={language ? `language-${language}` : undefined}>{source}</code></pre>}
       {footer}
@@ -186,6 +191,44 @@ function MermaidBlock({ source }: { source: string }) {
     footer={current?.failed ? <p className="chat-mermaid-error" role="note">Diagram could not be rendered.</p> : undefined} />;
 }
 
+function parsesAsSvg(source: string) {
+  try {
+    const document = new DOMParser().parseFromString(withSvgNamespaces(source.trim()), "image/svg+xml");
+    return !document.getElementsByTagName("parsererror").length && document.documentElement.localName === "svg" &&
+      document.documentElement.namespaceURI === "http://www.w3.org/2000/svg";
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * SVG from a ```svg block or raw <svg> markup, shown as an image. It loads through <img> from a data URL, where the SVG
+ * cannot run scripts or fetch anything. It is not opened in a new tab: as a page of its own the SVG could run scripts.
+ */
+function SvgBlock({ source }: { source: string }) {
+  const { streaming } = useContext(MarkdownContext);
+  const [showSource, setShowSource] = useState(false);
+  const [failed, setFailed] = useState<string>();
+  const tooLarge = source.length > maxSvgSourceLength;
+  const url = useMemo(() => !streaming && !tooLarge && isSvgDocument(source) && parsesAsSvg(source) ? svgImageUrl(source) : undefined,
+    [source, streaming, tooLarge]);
+  // A streaming message shows the code until it completes, like Mermaid diagrams.
+  if (streaming) return <CodeBlock language="svg" source={source} />;
+  if (!url || failed === url) {
+    return <CodeBlock language="svg" source={source} footer={<p className="chat-mermaid-error" role="note">
+      {tooLarge ? "Image is too large to render." : "Image could not be rendered."}</p>} />;
+  }
+  const toggle = <button type="button" className="chat-code-toggle" aria-pressed={showSource}
+    onClick={() => setShowSource((shown) => !shown)}>{showSource ? "Show image" : "Show source"}</button>;
+  return (
+    <CodeBlock language="svg" source={source} actions={toggle}>
+      {showSource ? undefined : <div className="chat-svg-preview">
+        <img className="chat-image" src={url} alt="SVG image" decoding="async" onError={() => setFailed(url)} />
+      </div>}
+    </CodeBlock>
+  );
+}
+
 function ChatImage({ src, alt, title }: { src?: string; alt?: string; title?: string }) {
   const { agentId } = useContext(MarkdownContext);
   const insideLink = useContext(InsideLink);
@@ -232,6 +275,9 @@ const components: Components = {
       .map((name) => /^language-(.+)$/.exec(String(name))?.[1]).find(Boolean);
     const source = textOf(code ?? node).replace(/\n$/, "");
     if (language?.toLowerCase() === "mermaid") return <MermaidBlock source={source} />;
+    if (language?.toLowerCase() === "svg" || (language?.toLowerCase() === "xml" && isSvgDocument(source))) {
+      return <SvgBlock source={source} />;
+    }
     return <CodeBlock language={language} source={source} />;
   },
   table: ({ children }) => <div className="chat-table-wrap" tabIndex={0}><table>{children}</table></div>,
@@ -242,7 +288,7 @@ const components: Components = {
 
 // Keep local file references so images can be served from configured repositories; links never open them.
 const urlTransform: UrlTransform = (url) => /^file:/i.test(url) ? url : defaultUrlTransform(url);
-const remarkPlugins = [remarkGfm];
+const remarkPlugins = [remarkGfm, remarkSvgHtml];
 
 export function ChatMarkdown({ text, agentId, streaming = false, idPrefix }: {
   text: string;

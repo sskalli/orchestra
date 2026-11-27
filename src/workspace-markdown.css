@@ -98,3 +98,19 @@
 /* User messages sit on the surface color that inline code and table headers otherwise use. */
 .chat-message--user .chat-markdown :not(pre) > code,
 .chat-message--user .chat-markdown th { background: var(--sw-inset); }
+
+/* SVG written in a message, shown as an image on a light canvas since most SVGs assume a white page. */
+.chat-code-header .chat-code-language { margin-right: auto; }
+.chat-code-toggle {
+  padding: 1px 6px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-secondary);
+  font: inherit;
+  cursor: pointer;
+}
+.chat-code-toggle:hover { background: var(--sw-control-hover); color: var(--text-primary); }
+.chat-code-toggle:focus-visible { outline: 1px solid #b3b3b3; outline-offset: 1px; }
+.chat-svg-preview { padding: .4em 1em .9em; }
+.chat-svg-preview .chat-image { margin: 0 auto; padding: 8px; background: #f4f4f2; }
