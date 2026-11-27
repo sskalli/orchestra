@@ -2,10 +2,11 @@ import { OrbitSpinner } from "./workspace-orbit-spinner.tsx";
 import { needsUserInput } from "./workspace-status.ts";
 import { agentAppearance } from "./workspace-agent-appearance.ts";
 import { memo, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
-import type { FormEvent, KeyboardEvent, PointerEvent } from "react";
+import type { FormEvent, KeyboardEvent, PointerEvent, ReactNode } from "react";
 import { LuArrowUp, LuEllipsis, LuSquare } from "react-icons/lu";
 import { CopyButton } from "./copy-button.tsx";
 import { ChatMarkdown, InlineCodeCopy } from "./workspace-markdown.tsx";
+import { useComposerAssist } from "./workspace-composer.tsx";
 import type { ApprovalChoice, PermissionApproval, SystemMessageKind, WorkspaceAgent, WorkspaceMessage } from "./workspace-runtime.ts";
 import { messageLengthProblem, OrderedSends, restoredDraft, retryableMessageId } from "./workspace-chat-recovery.ts";
 
@@ -23,6 +24,8 @@ type ChatProps = {
   taskPhase?: NonNullable<WorkspaceAgent["directTask"]>["phase"];
   taskDetail?: string;
   modelLabel?: string;
+  /** The model and effort picker, shown first in the composer toolbar. */
+  modelPicker?: ReactNode;
   usageLabel?: string;
   draft: string;
   composerHeight?: number;
@@ -198,7 +201,7 @@ function MessageActions({ message, onRetry, retrying, retryDisabled }: {
 
 function Conversation({
   agent, projectLabel, repositoryScope, delivery, taskPhase, taskDetail, modelLabel, usageLabel, draft: initialDraft, composerHeight, onComposerHeightChange, onDraftInput, onDraftChange, onDraftRestore, onSend, onSteer, onCancel, onResumeQueue, onApproveImplementation, onClose,
-  disabled, disabledReason, providerNotice, focusMessageId, focusRequest, onOpenAgent, onLifecycle, onRename, onResolveCommandApproval,
+  disabled, disabledReason, providerNotice, focusMessageId, focusRequest, onOpenAgent, onLifecycle, onRename, onResolveCommandApproval, modelPicker,
 }: ChatProps) {
   const transcript = useRef<HTMLDivElement>(null);
   const actions = useRef<HTMLDivElement>(null);
@@ -239,6 +242,8 @@ function Conversation({
   const composer = useRef<HTMLFormElement>(null);
   const divider = useRef<HTMLDivElement>(null);
   const composerId = useId();
+  const composerInput = useRef<HTMLTextAreaElement>(null);
+  const composerBox = useRef<HTMLDivElement>(null);
   const resizeDrag = useRef<{ pointerId: number; start: number; height: number } | null>(null);
   const resizeFrame = useRef<number | null>(null);
   const pendingHeight = useRef<number | null>(null);
@@ -343,6 +348,8 @@ function Conversation({
   const blocked = Boolean(disabled || archived || agent.lifecycleBusy || agent.nativeChild);
   const sending = pendingSends > 0;
   const readyToSend = !blocked && Boolean(draft.trim());
+  const assist = useComposerAssist({ textarea: composerInput, anchor: composerBox, value: draft,
+    projectIds: repositoryScope?.map(({ id }) => id) ?? [], disabled: Boolean(agent.lifecycleBusy) });
   const hasFocusMessage = agent.messages.some((message) => message.id === focusMessageId);
   const shownInConversation = (detail: string) => agent.messages.some((message) =>
     message.role === "system" && Boolean(message.text) && (message.text.includes(detail) || detail.includes(message.text)));
@@ -600,6 +607,7 @@ function Conversation({
   }
 
   function handleComposerKey(event: KeyboardEvent<HTMLTextAreaElement>) {
+    if (assist.handleKey(event)) return;
     if (event.key !== "Enter" || event.shiftKey || event.nativeEvent.isComposing) return;
     event.preventDefault();
     void send(steerAction ?? onSend);
@@ -815,15 +823,17 @@ function Conversation({
               if (failed) void retry(failed.id, failed.text);
             }}>{retrying ? "Trying again…" : "Try again"}</button>}</p> : null}
         {error && !shownInConversation(error) ? <p className="chat-error" role="alert">{error}</p> : null}
-        <div className="chat-composer-box">
+        <div ref={composerBox} className="chat-composer-box">
           <div className="chat-composer-input">
             <span className="chat-input-prompt" aria-hidden="true">&gt;</span>
-            <textarea aria-label={`Message ${recipient}`} enterKeyHint="send"
+            <textarea ref={composerInput} aria-label={`Message ${recipient}`} enterKeyHint="send" {...assist.inputProps}
               placeholder={repositoryScope?.length ? "Ask a question or describe a change" : "Message the agent"} rows={2}
               disabled={Boolean(agent.lifecycleBusy)} value={draft}
-              onChange={(event) => updateDraft(event.target.value)} onBlur={flushDraft} onKeyDown={handleComposerKey} />
+              onChange={(event) => updateDraft(event.target.value)} onBlur={() => { assist.onBlur(); flushDraft(); }} onKeyDown={handleComposerKey} />
+            {assist.menu}
           </div>
           <div className="chat-composer-actions">
+            {modelPicker}
             {onSteer && <label className="chat-steer-toggle">
               <input type="checkbox" role="switch" aria-label="Steer active turn" checked={steerEnabled}
                 onChange={(event) => setSteerEnabled(event.target.checked)} />

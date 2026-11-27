@@ -25,8 +25,8 @@ export async function send(command: WorkspaceCommand) {
   await sendRequest(command);
 }
 
-export async function createTask(name: string, projectIds: string[]) {
-  const response = await sendRequest({ type: "createTask", name, projectIds });
+export async function createTask(name: string, projectIds: string[], choice: { model?: string | null; effort?: string | null } = {}) {
+  const response = await sendRequest({ type: "createTask", name, projectIds, ...choice });
   const result = await response.json().catch(() => { throw new UnknownCommandOutcome(); });
   if (typeof result?.agentId !== "string") throw new UnknownCommandOutcome();
   return result.agentId as string;

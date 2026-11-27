@@ -356,6 +356,93 @@ test("stopping a Claude turn ends it at the next result, even with unanswered st
   assert.equal(fake.turns.length, 1);
 });
 
+test("Claude lists its models for the picker and applies a task's model and effort from the next query", async (t) => {
+  const { runtime, fake, agent } = await claudeWorkspace(t, [
+    async function* (io) {
+      const first = await io.nextUser();
+      yield* reply("m1", "One");
+      yield result([first.uuid]);
+    },
+    async function* (io) {
+      const next = await io.nextUser();
+      yield* reply("m2", "Two");
+      yield result([next.uuid]);
+    },
+    async function* (io) {
+      const next = await io.nextUser();
+      yield* reply("m3", "Three");
+      yield result([next.uuid]);
+    },
+  ]);
+  const agentId = String(await runtime.command({ type: "createTask", name: "Chat", projectIds: [], effort: "low" }));
+  await runtime.command({ type: "send", agentId, text: "Hello" });
+  await until(() => agent(agentId).status === "done", "the first turn");
+  assert.equal(fake.turns[0].options.model, undefined);
+  assert.equal(fake.turns[0].options.effort, "low");
+
+  await runtime.command({ type: "setModel", agentId, model: "sonnet", effort: "max" });
+  await runtime.command({ type: "send", agentId, text: "Again" });
+  await until(() => agent(agentId).messages.some(({ text }) => text === "Two") && agent(agentId).status === "done", "the second turn");
+  assert.equal(fake.turns[1].options.model, "sonnet");
+  assert.equal(fake.turns[1].options.effort, "max");
+
+  // The "Default" row returns to Claude Code's default model.
+  await runtime.command({ type: "setModel", agentId, model: null, effort: null });
+  await runtime.command({ type: "send", agentId, text: "Once more" });
+  await until(() => agent(agentId).messages.some(({ text }) => text === "Three") && agent(agentId).status === "done", "the third turn");
+  assert.equal(fake.turns[2].options.model, undefined);
+  assert.equal(fake.turns[2].options.effort, undefined);
+});
+
+test("the Claude engine answers model/list from the Agent SDK without sending a prompt", async () => {
+  let prompted = false;
+  let closed = false;
+  const query = ({ prompt }: { prompt: AsyncIterable<any> }) => {
+    void (async () => { for await (const _ of prompt) prompted = true; })();
+    return {
+      supportedModels: async () => [
+        { value: "default", resolvedModel: "claude-opus-5-5", displayName: "Default (recommended)", description: "Opus",
+          supportsEffort: true, supportedEffortLevels: ["low", "high", "max"] },
+        { value: "haiku", displayName: "Haiku", description: "Fast", supportsEffort: false, supportedEffortLevels: ["low"] },
+      ],
+      close: () => { closed = true; },
+    } as any;
+  };
+  const server = new ClaudeAppServer(undefined, query as any);
+  const listed = await server.call<{ data: any[]; nextCursor: null }>("model/list", {});
+  assert.deepEqual(listed.data.map(({ id, model, isDefault, supportedReasoningEfforts }: any) =>
+    [id, model, isDefault, supportedReasoningEfforts.map(({ reasoningEffort }: any) => reasoningEffort)]), [
+    ["default", "", true, ["low", "high", "max"]],
+    ["haiku", "haiku", false, []],
+  ]);
+  assert.equal(listed.nextCursor, null);
+  assert.equal(closed, true);
+  assert.equal(prompted, false);
+  await server.close();
+});
+
+test("a failed Claude model list is remembered briefly instead of asking Claude Code again", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "orchestra-claude-models-"));
+  let probes = 0;
+  const query = () => {
+    probes += 1;
+    return { supportedModels: async () => { throw new Error("not signed in"); }, close() {} } as any;
+  };
+  const store = workspaceStore(root, join(root, "state"), "engine:claude");
+  const runtime = new WorkspaceRuntime({ cwd: root, engine: "claude", store,
+    createServer: () => new ClaudeAppServer(store.claudeJournalPath, query as any) });
+  t.after(async () => {
+    await runtime.close();
+    rmSync(root, { recursive: true, force: true });
+  });
+  await runtime.start();
+  const [first, second] = await Promise.all([runtime.listModels(), runtime.listModels()]);
+  assert.match(first.error ?? "", /not signed in/);
+  assert.equal(first, second);
+  await runtime.listModels();
+  assert.equal(probes, 1);
+});
+
 test("Codex workspaces keep naming Codex in their messages", () => {
   const runtime = new WorkspaceRuntime({ cwd: tmpdir(), demo: true });
   assert.equal((runtime as any).engineName, "Codex");
