@@ -118,13 +118,12 @@ function pair(points: Map<number, Point>): Pinch | null {
 const statuses: Partial<Record<string, { label: string; Icon: IconType }>> = {
   working: { label: "Working", Icon: OrbitSpinner },
   attention: { label: "Needs attention", Icon: LuTriangleAlert },
-  "awaiting-confirmation": { label: "Awaiting confirmation", Icon: LuInfo },
   done: { label: "Complete", Icon: LuCircleCheck },
   error: { label: "Failed", Icon: LuCircleAlert },
   notice: { label: "Update available", Icon: LuInfo },
 };
 
-const statusPriority = ["error", "attention", "awaiting-confirmation", "working", "done", "notice"];
+const statusPriority = ["error", "attention", "working", "done", "notice"];
 
 function MessageDot({ from, to }: { from: Point; to: Point }) {
   const dot = useRef<HTMLSpanElement>(null);

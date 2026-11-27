@@ -2,7 +2,6 @@ import type { WorkspaceAgent, WorkspaceMessage } from "./workspace-runtime.ts";
 
 export function needsUserInput(message: WorkspaceMessage) {
   return message.productQuestion?.status === "pending" ||
-    message.implementationRequest?.status === "pending" ||
     message.commandApproval?.status === "pending";
 }
 

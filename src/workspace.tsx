@@ -113,7 +113,7 @@ function activityFor(agents: Agent[], id: string) {
 
 const inboxStatus = {
   idle: ["Idle", "notice"], working: ["Working", "working"], attention: ["Needs attention", "attention"],
-  "awaiting-confirmation": ["Ready for review", "notice"], done: ["Complete", "done"],
+  done: ["Complete", "done"],
   error: ["Failed", "error"], notice: ["Update available", "notice"],
 } as const;
 
@@ -535,9 +535,6 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
       headerActions={diff.open && diff.layout !== "floating"
         ? <DiffViewSwitch tab="chat" onTab={diff.setTab} />
         : <DiffToggle open={diff.showing} onToggle={diff.toggle} />}
-      onApproveImplementation={agent.directTask?.projectIds.length
-        ? (requestId) => send({ type: "approveImplementation", agentId: agent.id, requestId })
-        : undefined}
       onResolveProductQuestion={agent.directTask && !agent.nativeChild
         ? (questionId) => send({ type: "resolveProductQuestion", agentId: agent.id, questionId }) : undefined}
       onResolveCommandApproval={agent.directTask && !agent.nativeChild
@@ -545,12 +542,6 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
         : undefined}
       projectLabel={agent.nativeChild && snapshot.projects.length > 1 ? agent.projectId : undefined}
       repositoryScope={repositories?.length ? repositories : undefined}
-      taskPhase={agent.directTask?.phase}
-      taskDetail={agent.directTask?.detail}
-      delivery={agent.integration?.members?.length ? {
-        members: agent.integration.members,
-        taskChecks: agent.integration.validationEvidence?.summary,
-      } : undefined}
       modelLabel={modelLabel}
       modelPicker={agent.nativeChild || agent.archivedAt !== undefined ? undefined : <ModelPicker settings={agent.modelSettings}
         busy={agent.status === "working" || Boolean(agent.canCancel)} disabled={Boolean(agent.lifecycleBusy)}

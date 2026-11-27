@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
 /** Where a task's edits live: an isolated worktree, or a configured checkout edited in place. */
-export type DiffSource = { projectId: string; mode: "automatic" | "worktree" | "checkout"; path: string; base: string; branch?: string };
+export type DiffSource = { projectId: string; mode: "worktree" | "checkout"; path: string; base: string; branch?: string };
 export type DiffLineKind = "+" | "-" | " " | "@" | "\\";
 /** One rendered diff line: kind, text, then old and new line numbers where they apply. */
 export type DiffLine = [kind: DiffLineKind, text: string, oldLine?: number | null, newLine?: number | null];

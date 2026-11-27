@@ -95,9 +95,6 @@ async function readCommand(request: IncomingMessage) {
     return { type: "resolveCommandApproval" as const, agentId: command.agentId, requestId: command.requestId,
       decision: command.decision as "approve" | "approveForSession" | "decline" };
   }
-  if (command.type === "approveImplementation" && typeof command.requestId === "string" && command.requestId) {
-    return { type: "approveImplementation" as const, agentId: command.agentId, requestId: command.requestId };
-  }
   throw new Error("Invalid workspace command");
 }
 
