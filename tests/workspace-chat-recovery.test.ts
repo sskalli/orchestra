@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import type { Event, Id, ProviderServer } from "../src/app-server.ts";
-import { implementationApprovalText, messageCharacterLimit, messageLength, messageLengthProblem, retryableMessageId } from "../src/workspace-chat-recovery.ts";
+import { implementationApprovalText, messageCharacterLimit, messageLength, messageLengthProblem, OrderedSends, restoredDraft, retryableMessageId } from "../src/workspace-chat-recovery.ts";
 import { WorkspaceRuntime, type WorkspaceMessage } from "../src/workspace-runtime.ts";
 import { workspaceStore } from "../src/workspace-store.ts";
 
@@ -298,4 +298,35 @@ test("the command endpoint answers an oversized body with 413 instead of reading
   const oversized = await post(JSON.stringify({ type: "send", agentId: "missing", text: "\u0001".repeat(messageCharacterLimit * 3) }))
     .then((response) => response.status, () => "reset");
   assert(oversized === 413 || oversized === "reset", `unexpected ${oversized}`);
+});
+
+test("an App Server exit does not re-queue the in-flight message, which may already have run", async (t) => {
+  const { runtime, fake, agentId, task } = await setup(t);
+  fake.scripts = ["hold"];
+  await runtime.command({ type: "send", agentId, text: "Edit the file" });
+  await waitFor(() => Boolean(task().canCancel));
+  await runtime.command({ type: "send", agentId, text: "Then summarize" });
+  fake.onFailure?.(new Error("App Server exited (code 1, signal null)"));
+  await waitFor(() => task().status !== "working");
+  assert.equal(task().queuePaused, true);
+  assert.deepEqual(task().messages.filter(({ state }) => state === "queued").map(({ text }) => text), ["Then summarize"],
+    "only the follow-up stays queued; the interrupted message is reconciled on restart instead of resent");
+});
+
+test("ordered sends stop after a failure and give back every unsent text in order", async () => {
+  const sends = new OrderedSends();
+  const sent: string[] = [];
+  const send = async (text: string) => {
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    if (text === "one") throw new Error("offline");
+    sent.push(text);
+  };
+  const outcomes = await Promise.all(["zero", "one", "two", "three"].map((text) => sends.run(text, send)));
+  assert.deepEqual(sent, ["zero"], "sends after the failure never run");
+  assert.deepEqual(outcomes[0], { sent: true });
+  assert.deepEqual(outcomes[1].sent ? [] : outcomes[1].restore, ["one", "two", "three"]);
+  assert.deepEqual(outcomes.slice(2).map((outcome) => outcome.sent ? "sent" : outcome.restore), [[], []]);
+  assert.deepEqual(await sends.run("four", send), { sent: true }, "later sends work again");
+  assert.equal(restoredDraft(["one", "two"], "typed since"), "one\ntwo\ntyped since");
+  assert.equal(restoredDraft(["one"], "  "), "one");
 });

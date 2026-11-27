@@ -5,6 +5,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { WorkspaceCanvas } from "./workspace-canvas.tsx";
 import { WorkspaceChat } from "./workspace-chat.tsx";
+import { restoredDraft } from "./workspace-chat-recovery.ts";
 import { WorkspaceInbox } from "./workspace-inbox.tsx";
 import type { InboxEvent } from "./workspace-inbox.tsx";
 import { clearFlightLog, recordFlightLog } from "./workspace-flight-log.ts";
@@ -481,6 +482,12 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
         draftRevisions.current[agent.id] = (draftRevisions.current[agent.id] ?? 0) + 1;
       }}
       onDraftChange={(value) => setDrafts((current) => ({ ...current, [agent.id]: value }))}
+      onDraftRestore={(unsent) => {
+        const restored = restoredDraft(unsent, draftsRef.current[agent.id] ?? "");
+        draftsRef.current = { ...draftsRef.current, [agent.id]: restored };
+        draftRevisions.current[agent.id] = (draftRevisions.current[agent.id] ?? 0) + 1;
+        setDrafts((current) => ({ ...current, [agent.id]: restored }));
+      }}
       onSend={(value) => submit("send", value)}
       onSteer={(value) => submit("steer", value)}
       onCancel={() => send({ type: "cancel", agentId: agent.id })}

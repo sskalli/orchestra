@@ -1605,7 +1605,9 @@ export class WorkspaceRuntime {
       // Pause follow-ups, and put a failed plain message back first so Resume queue sends it in order.
       session.agent.queuePaused = true;
       const failed = directTaskRun?.message;
-      if (!cancelled && failed && !implementationRoots && failed.state === "failed" && !failed.answersProductQuestionId) {
+      // Skip it when the outcome is uncertain (recovery pending): the turn may have run, so resending could repeat it.
+      if (!cancelled && !session.recovery && failed && !implementationRoots && failed.state === "failed" &&
+          !failed.answersProductQuestionId) {
         const again: WorkspaceMessage = { ...message("user", failed.text), state: "queued" };
         const position = session.agent.messages.indexOf(session.queue[0]);
         session.queue.unshift(again);

@@ -7,7 +7,7 @@ import Markdown from "react-markdown";
 import type { Components } from "react-markdown";
 import { LuArrowUp, LuCheck, LuCopy, LuEllipsis, LuSquare } from "react-icons/lu";
 import type { ApprovalChoice, PermissionApproval, SystemMessageKind, WorkspaceAgent, WorkspaceMessage } from "./workspace-runtime.ts";
-import { messageLengthProblem, retryableMessageId } from "./workspace-chat-recovery.ts";
+import { messageLengthProblem, OrderedSends, restoredDraft, retryableMessageId } from "./workspace-chat-recovery.ts";
 
 import "./workspace-chat.css";
 
@@ -29,6 +29,8 @@ type ChatProps = {
   onComposerHeightChange: (height: number) => void;
   onDraftInput: (text: string) => void;
   onDraftChange: (text: string) => void;
+  /** Puts unsent texts back in front of the task's stored draft after this chat has closed. */
+  onDraftRestore?: (unsent: string[]) => void;
   onSend: (text: string) => Promise<void> | void;
   onSteer?: (text: string) => Promise<void> | void;
   onCancel?: () => Promise<void>;
@@ -228,7 +230,7 @@ function MessageActions({ message, onRetry, retrying, retryDisabled }: {
 }
 
 function Conversation({
-  agent, projectLabel, repositoryScope, delivery, taskPhase, taskDetail, modelLabel, usageLabel, draft: initialDraft, composerHeight, onComposerHeightChange, onDraftInput, onDraftChange, onSend, onSteer, onCancel, onResumeQueue, onApproveImplementation, onClose,
+  agent, projectLabel, repositoryScope, delivery, taskPhase, taskDetail, modelLabel, usageLabel, draft: initialDraft, composerHeight, onComposerHeightChange, onDraftInput, onDraftChange, onDraftRestore, onSend, onSteer, onCancel, onResumeQueue, onApproveImplementation, onClose,
   disabled, disabledReason, providerNotice, focusMessageId, focusRequest, onOpenAgent, onLifecycle, onRename, onResolveCommandApproval,
 }: ChatProps) {
   const transcript = useRef<HTMLDivElement>(null);
@@ -286,7 +288,7 @@ function Conversation({
   draftChangeRef.current = onDraftChange;
   const [steerEnabled, setSteerEnabled] = useState(false);
   const [pendingSends, setPendingSends] = useState(0);
-  const sendChain = useRef<Promise<unknown>>(Promise.resolve());
+  const sends = useRef(new OrderedSends());
   const [retrying, setRetrying] = useState(false);
   const [retriedId, setRetriedId] = useState<string>();
   const retriedRef = useRef<string>(undefined);
@@ -512,26 +514,29 @@ function Conversation({
       return;
     }
     // Clear exactly the submitted text now, so typing during the request starts a new message.
-    // Sends run in order; a failed one puts its text back in front of whatever was typed since.
+    // Sends run in order; a failure cancels later ones and puts every unsent text back in order.
     updateDraft("");
     flushDraft();
     setPendingSends((count) => count + 1);
     setError("");
-    const request = sendChain.current.then(() => action(submitted));
-    sendChain.current = request.catch(() => undefined);
-    try {
-      await request;
+    const outcome = await sends.current.run(submitted, action);
+    setPendingSends((count) => count - 1);
+    if (outcome.sent) {
       pinToBottom.current = true;
       const element = transcript.current;
       if (element) element.scrollTop = element.scrollHeight;
-    } catch (failure) {
-      const typed = draftRef.current;
-      updateDraft(typed.trim() ? `${submitted}\n${typed}` : submitted);
-      flushDraft();
-      setError(failure instanceof Error ? failure.message : "Message could not be sent.");
-    } finally {
-      setPendingSends((count) => count - 1);
+      return;
     }
+    if (!outcome.restore.length) return;
+    if (!mounted.current) {
+      // Another chat may own the composer now; merge into the stored draft instead of replacing it.
+      onDraftRestore?.(outcome.restore);
+      return;
+    }
+    updateDraft(restoredDraft(outcome.restore, draftRef.current));
+    flushDraft();
+    const failure = outcome.error;
+    setError(failure instanceof Error ? failure.message : "Message could not be sent.");
   }
 
   const steerAction = steerEnabled && agent.canSteer ? onSteer : undefined;

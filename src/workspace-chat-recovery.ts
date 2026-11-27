@@ -51,3 +51,40 @@ export function retryableMessageId(messages: readonly WorkspaceMessage[]) {
       messages.some(({ implementationRequest }) => implementationRequest?.status === "approved")) return undefined;
   return latest.id;
 }
+
+export type SendOutcome = { sent: true } | { sent: false; error?: unknown; restore: string[] };
+
+/**
+ * Runs a chat's sends one at a time in submission order. When one fails, the sends
+ * submitted after it are cancelled before they run, and the failed send's outcome
+ * lists every unsent text in order so the composer can put them back together.
+ */
+export class OrderedSends {
+  private chain: Promise<unknown> = Promise.resolve();
+  private readonly pending: { text: string; cancelled: boolean }[] = [];
+
+  run(text: string, send: (text: string) => Promise<void> | void): Promise<SendOutcome> {
+    const entry = { text, cancelled: false };
+    this.pending.push(entry);
+    const outcome = this.chain.then(async (): Promise<SendOutcome> => {
+      try {
+        if (entry.cancelled) return { sent: false, restore: [] };
+        await send(text);
+        return { sent: true };
+      } catch (error) {
+        const later = this.pending.slice(this.pending.indexOf(entry) + 1);
+        for (const next of later) next.cancelled = true;
+        return { sent: false, error, restore: [text, ...later.map((next) => next.text)] };
+      } finally {
+        this.pending.splice(this.pending.indexOf(entry), 1);
+      }
+    });
+    this.chain = outcome;
+    return outcome;
+  }
+}
+
+/** Puts unsent texts back ahead of anything typed since, in their original order. */
+export function restoredDraft(unsent: readonly string[], typed: string) {
+  return [...unsent, ...(typed.trim() ? [typed] : [])].join("\n");
+}
