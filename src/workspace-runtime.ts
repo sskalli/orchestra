@@ -4,13 +4,15 @@ import { demoTasks } from "./workspace-demo.ts";
 import { WorkspaceUsage } from "./workspace-usage.ts";
 import { randomUUID } from "node:crypto";
 import { realpathSync } from "node:fs";
-import { basename, isAbsolute, relative, resolve, sep } from "node:path";
+import { basename, dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import { tmpdir } from "node:os";
 import { AppServer, codexCommand, safeError, type ProviderServer } from "./app-server.ts";
 import { ClaudeAppServer, claudeProviderId } from "./claude-app-server.ts";
 import type { Event, Id, Thread, Turn } from "./app-server.ts";
 import { createFeatureWorktree, removeFeatureWorktree } from "./workspace-worktree.ts";
 import { fingerprintCandidate, fingerprintCheckout, fingerprintMemberSnapshots, hasWorktreeChanges, pinApprovedCandidate, pinDirectCandidates, validateCandidateWorktree, type IntegrationMember } from "./workspace-integration.ts";
+import { describeGitActivity, gitCommonDirectory, readRefState } from "./workspace-git-activity.ts";
+import type { RefState } from "./workspace-git-activity.ts";
 import { chooseModelSettings, modelOptions, newTaskEffortFor, recordReportedModel, selectModelSettings, turnModelParams, validateEffort, withDefaultEffort } from "./workspace-models.ts";
 import type { ModelCatalog, ModelSettings, ProviderModel, ReportedModel } from "./workspace-models.ts";
 import { knownEfforts } from "./workspace-models.ts";
@@ -26,7 +28,7 @@ import type { DiffSource } from "./workspace-diff.ts";
 
 export type AgentStatus = "idle" | "working" | "attention" | "awaiting-confirmation" | "done" | "error" | "notice";
 export type AgentRole = "worker";
-export type SystemMessageKind = "error" | "action" | "warning" | "notice" | "success";
+export type SystemMessageKind = "error" | "action" | "warning" | "notice" | "success" | "git";
 export type WorkspaceMessage = {
   id: string;
   role: "user" | "assistant" | "system";
@@ -72,6 +74,8 @@ export type WorkspaceAgent = {
   scopedWorktrees?: WorktreeRoot[];
   /** Configured checkouts this task was approved to edit in place, with the commit checked out at its first approval. */
   checkoutEdits?: { projectId: string; base: string }[];
+  /** Folders outside the selected repositories that the user allowed this task to write for the rest of the task. */
+  grantedPaths?: string[];
   integration?: { id: string; path: string; base: string; fingerprint: string; sources: { agentId: string; submissionId: string; head: string; fingerprint?: string; projectId?: string }[]; members?: IntegrationMember[]; validationEvidence?: CheckResult };
   status: AgentStatus;
   messages: WorkspaceMessage[];
@@ -146,6 +150,8 @@ type AgentSession = {
   opening?: boolean;
   queue: WorkspaceMessage[];
   stream: Map<string, WorkspaceMessage>;
+  /** Branch tips of the task's repositories when Orchestra last looked, to report commits and pushes. */
+  gitRefs?: Map<string, RefState>;
 };
 
 const questionResolutionToolVersion = 14;
@@ -1512,34 +1518,21 @@ export class WorkspaceRuntime {
   private instructions(session: AgentSession) {
     const roots = session.agent.directTask!.projectIds.map((id) => this.projects.find((project) => project.id === id)!);
     return "Work directly with the user in this task. " +
-      (roots.length ? `The selected repositories for read-only investigation are ${JSON.stringify(roots)}. ` : "No repositories are selected. ") +
-      "Plan and discuss by default. Use raise_product_decision if you need the user to choose, then end the turn. " +
+      (roots.length ? `The selected repositories are ${JSON.stringify(roots)}. ` +
+        "You can read and write them, including their Git data, for the whole task: create linked worktrees, branches and commits yourself. " +
+        "Discuss and plan first when the request is open. For code changes, work in a linked worktree under <repository>/.worktrees/<short-name> on a new branch " +
+        "(add .worktrees/ to .git/info/exclude if it is not ignored yet), commit there with clear messages, and leave the main checkout as the user left it unless they ask you to change it. " +
+        "Do not open pull requests. Push or publish a branch only when the user asks; pushing needs network access, which the user approves in the workspace. Orchestra shows your commits and pushes in the chat. "
+        : "No repositories are selected. ") +
+      "Use raise_product_decision if you need the user to choose, then end the turn. " +
       "When orchestra_pending_questions is supplied, use its question IDs and the resolution tool it indicates only if the current user reply answers that question. Leave unrelated questions open. " +
       "If a user message answers or sets aside a question you raised, including one sent while you were working, call resolve_product_question with that question's ID so the task stops waiting for an answer. " +
-      "Never ask the user to type a trigger phrase to continue implementation. " +
-      (roots.length ? "Make planned changes to the selected repositories in a turn explicitly approved for implementation, using the writable destinations listed with that approval. " +
-        this.implementationRequestInstructions(session) : "") +
-      "When the user directly asks you to change a specific path, or to run something the sandbox blocks, do not stop at the sandbox error or ask the user to change settings. " +
-      "Request the access you need through the normal approval flow: an escalated command, or a permission request for the exact paths, with a one-sentence reason. " +
-      "The user approves or declines each request in the workspace. Request only what the current step needs, and make these requests from this task rather than a subagent. " +
-      "Follow the repository instructions. Verify the candidate, call submit_check_result with the actual result, and report blockers concisely.";
-  }
-
-  private implementationRequestInstructions(session: AgentSession) {
-    const toolVersion = session.threadId ? session.toolVersion ?? 0 : taskToolVersion;
-    const defaultRequest = toolVersion >= implementationRequestToolVersion
-      ? "call request_implementation with a summary of the intended changes"
-      : `call raise_product_decision with a question starting with "${legacyImplementationRequestPrefix}" followed by a summary of the intended changes`;
-    const customRequest = toolVersion >= taskToolVersion
-      ? "set the targets array on request_implementation"
-      : `call raise_product_decision with a question starting with "${legacyScopedImplementationPrefix}" followed by JSON with summary and targets`;
-    return "If the user asks for code changes, confirms a plan, or asks you to proceed with implementation during a read-only turn, " +
-      `resolve any answered product questions first, then ${defaultRequest}. ` +
-      "Use automatic isolated worktrees by default. Only if the user explicitly requests a different destination, " +
-      `${customRequest}. Each entry is {"projectId":"…","mode":"checkout"} for a configured local checkout, ` +
-      'or {"projectId":"…","mode":"worktree","path":"/absolute/path","branch":"optional-new-branch"} for a new isolated worktree. ' +
-      "Ask the user for any missing details instead of choosing a writable destination. " +
-      "Use this tool instead of asking the user to type a specific phrase. End the turn and wait for the workspace approval button. ";
+      "Never ask the user to type a trigger phrase to continue. " +
+      "When the user asks you to change a path outside these folders, or to run something the sandbox blocks, do not stop at the sandbox error or ask the user to change settings. " +
+      "Request the access you need through the normal approval flow, with a one-sentence reason. To write outside the selected repositories, request a permission for the whole folder " +
+      "you need rather than for each file or command: the user can allow a folder once for the rest of the task. " +
+      "The user approves or declines each request in the workspace. Make these requests from this task rather than a subagent. " +
+      "Follow the repository instructions. Run the relevant checks for your changes and report the results and any blockers concisely.";
   }
 
   private selectModelSettings(): ModelSettings {
@@ -1566,7 +1559,7 @@ export class WorkspaceRuntime {
       ...this.threadPermissions(session),
       config: workspaceThreadConfig,
       ephemeral: false,
-      dynamicTools: [decisionTool, checkTool, resolveQuestionTool, implementationRequestTool],
+      dynamicTools: [decisionTool, checkTool, resolveQuestionTool],
       developerInstructions: this.instructions(session),
     });
     const { thread, modelProvider } = response;
@@ -1583,13 +1576,26 @@ export class WorkspaceRuntime {
 
   private directTaskTurnScope(session: AgentSession, implementation?: ImplementationRoot[]) {
     const roots = implementation?.map(({ path }) => path) ?? this.directTaskReadRoots(session);
+    const writable = implementation ? roots : this.directTaskWriteRoots(session);
     return {
       cwd: roots[0] ?? tmpdir(),
       ...(roots.length ? { runtimeWorkspaceRoots: roots } : { environments: [] }),
       sandboxPolicy: implementation
         ? { type: "workspaceWrite", writableRoots: roots, networkAccess: false, excludeTmpdirEnvVar: true, excludeSlashTmp: true }
-        : { type: "readOnly", networkAccess: false },
+        : writable.length
+          ? { type: "workspaceWrite", writableRoots: writable, networkAccess: false, excludeTmpdirEnvVar: false, excludeSlashTmp: false }
+          : { type: "readOnly", networkAccess: false },
     };
+  }
+
+  /**
+   * A repository task writes its selected checkouts from the first turn. Their shared Git directories are listed
+   * as well, because the sandbox otherwise keeps .git read-only and every commit or worktree would need approval.
+   */
+  private directTaskWriteRoots(session: AgentSession) {
+    const repositories = this.directTaskReadRoots(session);
+    const gitDirectories = repositories.map(gitCommonDirectory).filter((path): path is string => Boolean(path));
+    return [...new Set([...repositories, ...gitDirectories, ...(session.agent.grantedPaths ?? [])])];
   }
 
   private pendingQuestionContext(session: AgentSession, answer: WorkspaceMessage, implementation: boolean) {
@@ -1712,6 +1718,7 @@ export class WorkspaceRuntime {
       this.scheduleDemo(session, run);
       return;
     }
+    this.watchGitActivity(session);
     try {
       const turnInput = await this.userInput(session, implementation
         ? this.implementationInput(next.text, implementation.summary, implementation.roots) : this.answerInput(session, next), next.text);
@@ -1808,6 +1815,8 @@ export class WorkspaceRuntime {
     delete session.agent.reconnecting;
     if (session.agent.canCancel !== undefined) session.agent.canCancel = false;
     this.settleStream(session, completed ? undefined : cancelled ? "cancelled" : "failed");
+    this.reportGitActivity(session);
+    delete session.gitRefs;
     session.agent.status = completed ? "done" : cancelled ? "idle" : "error";
     if (directTaskRun && implementationRoots) {
       completed = this.finishDirectTask(session, implementationRoots, directTaskRun.check,
@@ -2113,6 +2122,7 @@ export class WorkspaceRuntime {
       entry.text += delta;
       this.publish(false);
     }
+    if (method === "item/completed" && params.item?.type === "commandExecution" && this.reportGitActivity(session)) this.publish();
     if (method === "item/completed" && params.item?.type === "agentMessage") {
       const { id, text } = params.item as typeof params.item & { id?: string };
       if (typeof text !== "string") return;
@@ -2267,9 +2277,14 @@ export class WorkspaceRuntime {
     if (!chosen) throw new Error(`${this.engineName} did not offer that choice for this request.`);
     const approval = request.commandApproval!;
     const granting = decision !== "decline";
+    // Allowing a request for the task also lets later turns write its folders without asking again.
+    const previousGrants = session.agent.grantedPaths;
+    const folders = decision === "approveForSession" ? this.grantFolders(session, approval) : [];
+    if (folders.length) session.agent.grantedPaths = [...(previousGrants ?? []), ...folders];
     // Save a consumed request before handing it off, without claiming delivery.
     approval.status = "unconfirmed";
     const saved = this.persist();
+    if (!saved) session.agent.grantedPaths = previousGrants;
     const allowed = granting && saved && this.available && !this.storageFailed;
     if (allowed) delete run.check;
     try {
@@ -2284,6 +2299,54 @@ export class WorkspaceRuntime {
     if (granting && !allowed) {
       throw new Error("Orchestra could not approve this request. Ask the agent to request it again.");
     }
+  }
+
+  /**
+   * Folders an approval shows that the task cannot write yet: requested write paths or the folders of edited files.
+   * A command's working directory is not granted, since a command can be escalated for reasons other than writing there.
+   */
+  private grantFolders(session: AgentSession, approval: PermissionApproval) {
+    const writable = this.directTaskWriteRoots(session);
+    const inside = (path: string) => writable.some((root) => {
+      const offset = relative(root, path);
+      return offset === "" || (offset !== ".." && !offset.startsWith(".." + sep) && !isAbsolute(offset));
+    });
+    const candidates = [
+      ...(approval.writePaths ?? []),
+      ...(approval.files ?? []).map((file) => dirname(file)),
+    ];
+    const folders: string[] = [];
+    for (const path of candidates) {
+      if (isAbsolute(path) && !inside(path) && !folders.includes(path)) folders.push(path);
+    }
+    return folders;
+  }
+
+  /** Remembers the repositories' branch tips so later readings can report commits and pushes made since. */
+  private watchGitActivity(session: AgentSession) {
+    const refs = new Map<string, RefState>();
+    for (const projectId of session.agent.directTask?.projectIds ?? []) {
+      const state = readRefState(this.projectById(projectId).path);
+      if (state) refs.set(projectId, state);
+    }
+    session.gitRefs = refs;
+  }
+
+  /** Reports new commits and pushed branches in the task's repositories since the last reading. */
+  private reportGitActivity(session: AgentSession) {
+    if (!session.gitRefs?.size) return false;
+    let reported = false;
+    for (const [projectId, before] of session.gitRefs) {
+      const repository = this.projectById(projectId).path;
+      const after = readRefState(repository);
+      if (!after) continue;
+      for (const note of describeGitActivity(repository, projectId, before, after)) {
+        session.agent.messages.push(message("system", note, "git"));
+        reported = true;
+      }
+      session.gitRefs.set(projectId, after);
+    }
+    return reported;
   }
 
   private expireCommandApprovals(run?: Run) {

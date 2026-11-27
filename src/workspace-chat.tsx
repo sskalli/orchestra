@@ -72,6 +72,7 @@ const systemMessageLabels: Record<SystemMessageKind, string> = {
   warning: "Warning",
   notice: "Notice",
   success: "Success",
+  git: "Git",
 };
 
 const messageTime = new Intl.DateTimeFormat(undefined, { hour: "numeric", minute: "2-digit" });
@@ -127,8 +128,9 @@ function isBlankReply(message: WorkspaceMessage) {
 }
 
 function approvalWarning(approval: PermissionApproval) {
+  const folders = approval.kind === "fileChange" || approval.kind === "permissions" ? ", and later turns of this task can write these folders" : "";
   const session = approval.choices?.includes("approveForSession")
-    ? " Allow for this task also covers similar requests until Orchestra restarts." : "";
+    ? ` Allow for this task also covers similar requests until Orchestra restarts${folders}.` : "";
   if (approval.kind === "fileChange") return "Approving lets the agent apply these file changes outside its current write access." + session;
   if (approval.kind === "permissions") return "Approving extends the agent’s sandbox with the access listed below." + session;
   return "Approving runs this command outside the sandbox with your local account’s access." + session;
@@ -717,7 +719,7 @@ function Conversation({
   const nameTooltip = [
     projectLabel && `Project: ${projectLabel}`,
     repositoryScope && `Repositories: ${repositoryScope.map(({ id }) => id).join(", ")}`,
-    taskPhase === "planning" && (repositoryScope ? "Planning · read-only" : "General chat"),
+    taskPhase === "planning" && (repositoryScope ? "Read & write in selected repositories" : "General chat"),
     modelLabel,
     usageLabel,
   ].filter(Boolean).join("\n");

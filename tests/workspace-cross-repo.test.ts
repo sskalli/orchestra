@@ -123,7 +123,10 @@ test("one direct task plans and delivers an isolated cross-repo change in the sa
     text: "Plan to return { message: 'ready' } from the API and render the same display in the UI. Leave edits until approval." });
   const planning = requests.findLast(({ method }) => method === "turn/start")?.params;
   assert.equal(planning.threadId, task.threadId);
-  assert.equal(planning.sandboxPolicy.type, "readOnly");
+  assert.equal(planning.sandboxPolicy.type, "workspaceWrite");
+  assert.deepEqual(planning.sandboxPolicy.writableRoots, [...projects.slice(0, 2).map(({ path }) => path),
+    ...projects.slice(0, 2).map(({ path }) => join(path, ".git"))], "selected repositories and their Git data are writable");
+  assert.equal(planning.sandboxPolicy.networkAccess, false);
   assert.equal(planning.approvalPolicy, "on-request");
   assert.deepEqual(projects.map(({ path }) => git(path, "worktree", "list", "--porcelain")), initial);
   internal.onEvent({ method: "item/completed", params: {
@@ -188,7 +191,7 @@ test("one direct task plans and delivers an isolated cross-repo change in the sa
   await runtime.command({ type: "send", agentId, text: "Explain the check results without making changes." });
   const followUp = requests.findLast(({ method }) => method === "turn/start")?.params;
   assert.equal(followUp.threadId, planning.threadId);
-  assert.equal(followUp.sandboxPolicy.type, "readOnly");
+  assert.equal(followUp.sandboxPolicy.type, "workspaceWrite");
   assert.equal(followUp.approvalPolicy, "on-request");
   assert.equal((await call(task, "submit_check_result", { outcome: "passed", summary: "Unexpected read-only check." })).success, false);
   complete(task);
@@ -217,7 +220,7 @@ test("implementation approval is tied to a pending request in its own conversati
   ];
   for (const [index, text] of prompts.entries()) {
     await runtime.command({ type: "send", agentId, text });
-    assert.equal(lastTurn().sandboxPolicy.type, "readOnly", text);
+    assert.equal(lastTurn().sandboxPolicy.type, "workspaceWrite", text);
     if (index < prompts.length - 1) complete(task);
   }
 
@@ -236,7 +239,7 @@ test("implementation approval is tied to a pending request in its own conversati
   await assert.rejects(runtime.command({ type: "approveImplementation", agentId, requestId: "missing" }));
   await assert.rejects(runtime.command({ type: "approveImplementation", agentId: otherId, requestId }));
   assert.deepEqual(projects.map(({ path }) => git(path, "worktree", "list", "--porcelain")), initial);
-  assert.equal(lastTurn().sandboxPolicy.type, "readOnly");
+  assert.equal(lastTurn().sandboxPolicy.type, "workspaceWrite");
   await runtime.command({ type: "approveImplementation", agentId, requestId });
 
   const implementation = lastTurn();
@@ -283,8 +286,15 @@ test("native Codex permission requests become one-time decisions in the task cha
 
   // Planning turns stay read-only but can ask for access, including outside the configured repositories.
   await runtime.command({ type: "send", agentId, text: "Update the notes file in the other folder." });
+  // Commits the agent makes during the turn are reported in the chat as commands complete.
+  git(api.path, "-c", "user.name=Agent", "-c", "user.email=agent@example.com", "commit", "--allow-empty", "-m", "Agent commit");
+  internal.onEvent({ method: "item/completed", params: { threadId: task.threadId, turnId: task.run.turn.id,
+    item: { id: "commit-1", type: "commandExecution", command: "git commit", status: "completed", exitCode: 0 } } });
+  const gitNotes = () => runtime.snapshot().agents.find(({ id }) => id === agentId)!.messages.filter(({ kind }) => kind === "git");
+  assert.equal(gitNotes().length, 1);
+  assert.match(gitNotes()[0].text, /^Committed 1 commit on `[^`]+` in api: `[0-9a-f]{7}` Agent commit$/);
   assert.equal(requests.findLast(({ method }) => method === "turn/start")?.params.approvalPolicy, "on-request");
-  assert.equal(requests.findLast(({ method }) => method === "turn/start")?.params.sandboxPolicy.type, "readOnly");
+  assert.equal(requests.findLast(({ method }) => method === "turn/start")?.params.sandboxPolicy.type, "workspaceWrite");
   await requestCommand("planning-escalation", other.path, { command: "touch notes.md" });
   const planning = getApprovals().at(-1)!;
   assert.equal(planning.commandApproval?.status, "pending");
@@ -309,6 +319,9 @@ test("native Codex permission requests become one-time decisions in the task cha
   await resolve(fileApproval.id, "approveForSession");
   assert.deepEqual(replies.get("file-approval"), [{ decision: "acceptForSession" }]);
   assert.equal(getApprovals().at(-1)?.commandApproval?.status, "approved-for-session");
+  assert.deepEqual(task.agent.grantedPaths, [other.path], "allowing for the task grants the edited folder");
+  assert.ok(internal.directTaskTurnScope(task).sandboxPolicy.writableRoots.includes(other.path), "later turns can write the folder");
+  assert.deepEqual(internal.sessions.get(unrelatedId).agent.grantedPaths, undefined, "grants stay with their task");
 
   const requested = { fileSystem: { write: [other.path], read: null }, network: null };
   await internal.onRequest({ id: "permission-request", method: "item/permissions/requestApproval", params: {
@@ -454,7 +467,7 @@ test("mixed write approval uses the exact configured checkout and named linked w
   const initial = projects.map(({ path }) => git(path, "worktree", "list", "--porcelain"));
 
   await runtime.command({ type: "send", agentId, text: "Use the existing API checkout and a named linked worktree for UI." });
-  assert.equal(lastTurn().sandboxPolicy.type, "readOnly");
+  assert.equal(lastTurn().sandboxPolicy.type, "workspaceWrite");
   const request = await call(task, "request_implementation", { summary: "Update both exports.", targets });
   assert.equal(request.success, true, request.text);
   const { requestId } = JSON.parse(request.text);
@@ -496,7 +509,7 @@ test("mixed write approval uses the exact configured checkout and named linked w
   assert.equal(git(worktree, "branch", "--show-current"), branch);
 
   await runtime.command({ type: "send", agentId, text: "Explain the result without editing." });
-  assert.equal(lastTurn().sandboxPolicy.type, "readOnly");
+  assert.equal(lastTurn().sandboxPolicy.type, "workspaceWrite");
   complete(task);
 });
 
@@ -749,7 +762,7 @@ test("an imperative answer resolves a product question in a read-only turn befor
   const answer = "Fix this.";
   await runtime.command({ type: "send", agentId, text: answer });
   const answerTurn = requests.findLast(({ method }) => method === "turn/start")?.params;
-  assert.equal(answerTurn.sandboxPolicy.type, "readOnly");
+  assert.equal(answerTurn.sandboxPolicy.type, "workspaceWrite");
   assert.equal(git(projects[1].path, "worktree", "list", "--porcelain"), worktrees);
   assert.equal(JSON.parse(answerTurn.additionalContext.orchestra_pending_questions.value).questions[0].id, questionId);
   const resolution = await call(task, "resolve_product_question", { questionId });

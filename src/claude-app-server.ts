@@ -396,6 +396,8 @@ export class ClaudeAppServer implements ProviderServer {
     if (params.effort !== undefined) config.effort = effortLevels.has(params.effort) ? params.effort : undefined;
     const implementation = params.sandboxPolicy?.type === "workspaceWrite";
     const roots: string[] = Array.isArray(params.runtimeWorkspaceRoots) ? params.runtimeWorkspaceRoots : config.roots;
+    // Writable roots can add folders beyond the repositories, such as their Git data or folders the user allowed.
+    const writable: string[] = implementation && Array.isArray(params.sandboxPolicy?.writableRoots) ? params.sandboxPolicy.writableRoots : [];
     const cwd: string = params.cwd ?? config.cwd;
     const input = new InputQueue();
     const first = this.userMessage(this.promptText(params));
@@ -405,7 +407,7 @@ export class ClaudeAppServer implements ProviderServer {
     const env = this.claudeEnvironment();
     const options: Options = {
       cwd,
-      additionalDirectories: roots.filter((root) => root !== cwd),
+      additionalDirectories: [...new Set([...roots, ...writable])].filter((root) => root !== cwd),
       ...(thread.started ? { resume: thread.id } : { sessionId: thread.id }),
       systemPrompt: { type: "preset", preset: "claude_code", append: config.instructions + backgroundSubagentInstructions },
       ...(config.model ? { model: config.model } : {}),
