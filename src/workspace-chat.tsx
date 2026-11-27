@@ -44,6 +44,8 @@ type ChatProps = {
   onOpenAgent?: (id: string) => void;
   onRename?: (name: string) => Promise<void>;
   onLifecycle?: (action: "archive" | "restore" | "delete") => void;
+  /** Extra header controls shown before More actions. */
+  headerActions?: ReactNode;
   disabled?: boolean;
   disabledReason?: string;
   /** A provider problem that does not block sending, such as a usage limit. */
@@ -201,7 +203,7 @@ function MessageActions({ message, onRetry, retrying, retryDisabled }: {
 
 function Conversation({
   agent, projectLabel, repositoryScope, delivery, taskPhase, taskDetail, modelLabel, usageLabel, draft: initialDraft, composerHeight, onComposerHeightChange, onDraftInput, onDraftChange, onDraftRestore, onSend, onSteer, onCancel, onResumeQueue, onApproveImplementation, onClose,
-  disabled, disabledReason, providerNotice, focusMessageId, focusRequest, onOpenAgent, onLifecycle, onRename, onResolveCommandApproval, modelPicker,
+  disabled, disabledReason, providerNotice, focusMessageId, focusRequest, onOpenAgent, onLifecycle, onRename, onResolveCommandApproval, modelPicker, headerActions,
 }: ChatProps) {
   const transcript = useRef<HTMLDivElement>(null);
   const actions = useRef<HTMLDivElement>(null);
@@ -723,6 +725,7 @@ function Conversation({
             </div>
           </>}
         </div>
+        {headerActions}
         <div ref={actions} className="chat-lifecycle-menu">
           <button ref={actionsButton} className="interface-icon-button" type="button" aria-label="More actions"
             title="More actions" aria-expanded={actionsOpen} aria-controls={actionsId}

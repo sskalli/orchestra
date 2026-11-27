@@ -4,6 +4,7 @@ import { extname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { WorkspaceRuntime } from "./workspace-runtime.ts";
 import { safeError } from "./app-server.ts";
+import { taskDiff } from "./workspace-diff.ts";
 import { workspaceStore } from "./workspace-store.ts";
 import { messageCharacterLimit } from "./workspace-chat-recovery.ts";
 import { modelChoice } from "./workspace-models.ts";
@@ -27,6 +28,8 @@ let host = `127.0.0.1:${port}`;
 let origin = `http://${host}`;
 const dist = fileURLToPath(new URL("../dist/", import.meta.url));
 let runtime: WorkspaceRuntime;
+// Concurrent requests for the same task's changes share one Git computation.
+const diffsInFlight = new Map<string, ReturnType<typeof taskDiff>>();
 
 // Fits the longest message Codex accepts even when every character is JSON-escaped.
 const commandByteLimit = messageCharacterLimit * 6 + 64 * 1024;
@@ -155,6 +158,28 @@ const server = createServer(async (request, response) => {
   if (request.method === "GET" && path === "/api/models") {
     const catalog = await runtime.listModels();
     response.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(catalog));
+    return;
+  }
+  if (request.method === "GET" && path === "/api/diff") {
+    const agentId = new URL(request.url ?? "", origin).searchParams.get("agentId");
+    const sources = agentId ? runtime.diffSources(agentId) : undefined;
+    if (!sources) {
+      response.writeHead(404, { "Content-Type": "application/json" }).end(JSON.stringify({ error: "This task is unavailable." }));
+      return;
+    }
+    try {
+      const key = JSON.stringify(sources);
+      let pending = diffsInFlight.get(key);
+      if (!pending) {
+        pending = taskDiff(sources).finally(() => diffsInFlight.delete(key));
+        diffsInFlight.set(key, pending);
+      }
+      const diff = await pending;
+      if (!response.destroyed) response.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(diff));
+    } catch (error) {
+      response.writeHead(500, { "Content-Type": "application/json" })
+        .end(JSON.stringify({ error: error instanceof Error ? error.message : "Orchestra could not compute the changes." }));
+    }
     return;
   }
   if (request.method === "GET" && path === "/api/events") {

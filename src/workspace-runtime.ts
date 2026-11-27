@@ -22,6 +22,7 @@ import { SkillCatalog, demoSkills, normalizeSkills, skillInputFor } from "./work
 import type { ProviderSkillsResponse, WorkspaceSkill } from "./workspace-skills.ts";
 import type { WorkspaceProject } from "./workspace-projects.ts";
 import { implementationApprovalText, messageLength, messageLengthProblem } from "./workspace-chat-recovery.ts";
+import type { DiffSource } from "./workspace-diff.ts";
 
 export type AgentStatus = "idle" | "working" | "attention" | "awaiting-confirmation" | "done" | "error" | "notice";
 export type AgentRole = "worker";
@@ -68,6 +69,8 @@ export type WorkspaceAgent = {
   directTask?: { projectIds: string[]; phase: "planning" | "implementing" | "blocked" | "ready-for-review"; detail?: string };
   directCandidates?: (Candidate & { projectId: string })[];
   scopedWorktrees?: WorktreeRoot[];
+  /** Configured checkouts this task was approved to edit in place, with the commit checked out at its first approval. */
+  checkoutEdits?: { projectId: string; base: string }[];
   integration?: { id: string; path: string; base: string; fingerprint: string; sources: { agentId: string; submissionId: string; head: string; fingerprint?: string; projectId?: string }[]; members?: IntegrationMember[]; validationEvidence?: CheckResult };
   status: AgentStatus;
   messages: WorkspaceMessage[];
@@ -847,6 +850,7 @@ export class WorkspaceRuntime {
     const previousWorktrees = agent.scopedWorktrees;
     const previousCandidate = agent.candidate;
     const previousDirectCandidates = agent.directCandidates;
+    const previousCheckoutEdits = agent.checkoutEdits;
     const previousTask = { ...task };
     const previousStatus = agent.status;
     const previousIntegration = agent.integration;
@@ -861,6 +865,11 @@ export class WorkspaceRuntime {
     } else if (created.length) {
       agent.scopedWorktrees = [...(agent.scopedWorktrees ?? []), ...created];
     }
+    for (const root of roots) {
+      if (root.mode === "checkout" && !agent.checkoutEdits?.some(({ projectId }) => projectId === root.projectId)) {
+        agent.checkoutEdits = [...(agent.checkoutEdits ?? []), { projectId: root.projectId, base: root.base }];
+      }
+    }
     approval.status = "approved";
     task.phase = "implementing";
     delete task.detail;
@@ -870,6 +879,7 @@ export class WorkspaceRuntime {
       agent.scopedWorktrees = previousWorktrees;
       agent.candidate = previousCandidate;
       agent.directCandidates = previousDirectCandidates;
+      agent.checkoutEdits = previousCheckoutEdits;
       agent.directTask = previousTask;
       agent.status = previousStatus;
       agent.integration = previousIntegration;
@@ -926,6 +936,37 @@ export class WorkspaceRuntime {
       if (mode === "worktree") removeRequestedWorktree(project, path, branch, base);
       else removeFeatureWorktree(project, path);
     }
+  }
+
+  /** Where a task's edits can be reviewed. Subagent chats show their task's changes. */
+  diffSources(agentId: string): DiffSource[] | "general" | undefined {
+    let session = this.sessions.get(agentId);
+    if (!session) return undefined;
+    const visited = new Set([agentId]);
+    while (!session.agent.directTask && session.agent.parentId && !visited.has(session.agent.parentId)) {
+      visited.add(session.agent.parentId);
+      const parent = this.sessions.get(session.agent.parentId);
+      if (!parent) break;
+      session = parent;
+    }
+    const { agent } = session;
+    if (!agent.directTask?.projectIds.length) return agent.directTask ? "general" : [];
+    const sources: DiffSource[] = [];
+    const add = (source: DiffSource) => {
+      if (!sources.some(({ path }) => path === source.path)) sources.push(source);
+    };
+    for (const projectId of agent.directTask.projectIds) {
+      const project = this.projects.find(({ id }) => id === projectId);
+      if (!project) continue;
+      const automatic = this.directTaskCandidates(session).find((entry) => entry.projectId === projectId);
+      if (automatic) add({ projectId, mode: "automatic", path: automatic.path, base: automatic.base });
+      for (const entry of agent.scopedWorktrees ?? []) {
+        if (entry.projectId === projectId) add({ projectId, mode: entry.mode, path: entry.path, base: entry.base });
+      }
+      const checkout = agent.checkoutEdits?.find((entry) => entry.projectId === projectId);
+      if (checkout) add({ projectId, mode: "checkout", path: project.path, base: checkout.base });
+    }
+    return sources;
   }
 
   private directTaskCandidates(session: AgentSession) {

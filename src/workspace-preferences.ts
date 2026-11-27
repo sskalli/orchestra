@@ -104,5 +104,10 @@ export function workspacePreferences(projectPath: string, mode: "demo" | "codex"
     writeCamera: (camera: Camera) => write("camera", camera),
     readNodePositions: () => nodePositions(read("node-positions")),
     writeNodePositions: (positions: NodePositions) => write("node-positions", positions),
+    readDiffWidth(): number | undefined {
+      const value = read("diff-width");
+      return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : undefined;
+    },
+    writeDiffWidth: (width: number) => { write("diff-width", width); },
   };
 }
