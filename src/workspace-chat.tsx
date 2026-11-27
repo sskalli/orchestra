@@ -119,6 +119,11 @@ const approvalChoiceLabels: Record<ApprovalChoice, [idle: string, busy: string]>
   approve: ["Approve once", "Approving…"],
 };
 
+/** A finished agent reply without visible text, such as one a provider saved before a tool call. */
+function isBlankReply(message: WorkspaceMessage) {
+  return message.role === "assistant" && message.state !== "streaming" && !message.text.trim();
+}
+
 function approvalWarning(approval: PermissionApproval) {
   const session = approval.choices?.includes("approveForSession")
     ? " Allow for this task also covers similar requests until Orchestra restarts." : "";
@@ -629,7 +634,7 @@ function Conversation({
   }, [agent.canCancel, agent.queueDepth, approvingImplementation, blocked, onApproveImplementation]);
 
   const messageElements = useMemo(() => agent.messages.filter((message) =>
-    needsUserInput(message) || !hiddenMessages.has(message.id)).map((message) => {
+    needsUserInput(message) || (!hiddenMessages.has(message.id) && !isBlankReply(message))).map((message) => {
           const sender = message.role === "user" ? "USER" : message.role === "system" ? "SYSTEM" : "COMPUTER";
           const { productQuestion, implementationRequest, commandApproval } = message;
           const resolved = productQuestion?.status === "answered" ||
