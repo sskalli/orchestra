@@ -4,7 +4,7 @@ import { extname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { WorkspaceRuntime } from "./workspace-runtime.ts";
 import { safeError } from "./app-server.ts";
-import { taskDiff } from "./workspace-diff.ts";
+import { diffScheduler, taskDiff } from "./workspace-diff.ts";
 import { workspaceStore } from "./workspace-store.ts";
 import { messageCharacterLimit } from "./workspace-chat-recovery.ts";
 import { modelChoice } from "./workspace-models.ts";
@@ -29,7 +29,7 @@ let origin = `http://${host}`;
 const dist = fileURLToPath(new URL("../dist/", import.meta.url));
 let runtime: WorkspaceRuntime;
 // Concurrent requests for the same task's changes share one Git computation.
-const diffsInFlight = new Map<string, ReturnType<typeof taskDiff>>();
+const sharedDiff = diffScheduler((key) => taskDiff(JSON.parse(key)));
 
 // Fits the longest message Codex accepts even when every character is JSON-escaped.
 const commandByteLimit = messageCharacterLimit * 6 + 64 * 1024;
@@ -168,13 +168,7 @@ const server = createServer(async (request, response) => {
       return;
     }
     try {
-      const key = JSON.stringify(sources);
-      let pending = diffsInFlight.get(key);
-      if (!pending) {
-        pending = taskDiff(sources).finally(() => diffsInFlight.delete(key));
-        diffsInFlight.set(key, pending);
-      }
-      const diff = await pending;
+      const diff = await sharedDiff(JSON.stringify(sources));
       if (!response.destroyed) response.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(diff));
     } catch (error) {
       response.writeHead(500, { "Content-Type": "application/json" })

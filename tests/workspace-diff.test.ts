@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
-import { diffLimits, diffSource, parseNameStatus, parseNumstat, parsePatch, taskDiff } from "../src/workspace-diff.ts";
+import { diffLimits, diffScheduler, diffSource, parseNameStatus, parseNumstat, parsePatch, taskDiff } from "../src/workspace-diff.ts";
 import { buildFileTree, treeFiles } from "../src/workspace-diff-tree.ts";
 import { WorkspaceRuntime } from "../src/workspace-runtime.ts";
 
@@ -212,7 +212,34 @@ test("untracked files over the count or size limits are listed but not read", as
   const group = await diffSource({ projectId: "app", mode: "checkout", path: fixture.path, base: fixture.base });
   assert.deepEqual(group.files.map(({ path, skipped, additions }) => [path, skipped, additions]),
     [["u1.txt", undefined, 1], ["u2.txt", undefined, 1], ["big.bin", "size", 0], ["u3.txt", "count", 0]]);
-  assert.equal(group.notices?.length, 1);
+  assert.deepEqual(group.notices, [
+    "1 untracked file was not read because it is over the size limit.",
+    "1 untracked file was not read because there are too many untracked files to read.",
+  ]);
+});
+
+test("concurrent diff requests share only a recent computation and queue one fresh run otherwise", async () => {
+  const runs: { key: string; resolve: (value: number) => void }[] = [];
+  const shared = diffScheduler((key) => new Promise<number>((resolve) => runs.push({ key, resolve })), 50);
+  const first = shared("task");
+  assert.equal(shared("task"), first);
+  assert.equal(runs.length, 1);
+  await new Promise((resolve) => setTimeout(resolve, 80));
+  const late = shared("task");
+  const later = shared("task");
+  assert.equal(later, late);
+  assert.equal(runs.length, 1, "the fresh run waits for the stale one");
+  runs[0].resolve(1);
+  assert.equal(await first, 1);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(runs.length, 2);
+  runs[1].resolve(2);
+  assert.equal(await late, 2);
+  const after = shared("task");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(runs.length, 3);
+  runs[2].resolve(3);
+  assert.equal(await after, 3);
 });
 
 test("one deadline covers the whole request", async (t) => {

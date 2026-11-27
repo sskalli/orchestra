@@ -637,7 +637,8 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
               onSend={(agentId, text) => send({ type: "send", agentId, text })}
               onStarted={setNewTaskId} />
           </div>
-          {(selected || newTaskOpen) && resizeHandle("right")}
+          {/* Beside the changes panel, the panel's own handle sets the split; the chat keeps its saved width for later. */}
+          {(selected || newTaskOpen) && !(diff.open && diff.layout === "floating") && resizeHandle("right")}
         </aside>
         <DiffPanel agent={dockAgent} open={diff.open} layout={diff.layout} tab={diff.tab} onTab={diff.setTab} resizing={diff.resizing}
           resizeHandle={diff.resizeHandle} onClose={closeDiff} />

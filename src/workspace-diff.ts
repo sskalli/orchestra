@@ -330,9 +330,11 @@ export async function diffSource(source: DiffSource, deadline = Date.now() + dif
     }));
     const notices: string[] = [];
     if (untracked.truncated) notices.push("Some untracked files are not listed because there are too many.");
-    if (untracked.skipped.length) {
-      notices.push(`${untracked.skipped.length} untracked ${untracked.skipped.length === 1 ? "file was" : "files were"} not read because of size limits.`);
-    }
+    const untrackedLabel = (count: number) => `${count} untracked ${count === 1 ? "file was" : "files were"}`;
+    const tooLarge = untracked.skipped.filter(({ reason }) => reason === "size").length;
+    const tooMany = untracked.skipped.length - tooLarge;
+    if (tooLarge) notices.push(`${untrackedLabel(tooLarge)} not read because ${tooLarge === 1 ? "it is" : "they are"} over the size limit.`);
+    if (tooMany) notices.push(`${untrackedLabel(tooMany)} not read because there are too many untracked files to read.`);
     if (notices.length) group.notices = notices;
     if (!names.length && !skipped.length) return group;
     const counts = names.length ? parseNumstat(await text([...common, "--numstat", "-z", source.base, "--"], env)) : [];
@@ -364,6 +366,36 @@ export async function diffSource(source: DiffSource, deadline = Date.now() + dif
   } finally {
     if (temporary) await rm(temporary, { recursive: true, force: true }).catch(() => {});
   }
+}
+
+/**
+ * Shares diff computations between concurrent requests. A request joins a computation only if it started
+ * within `freshMs`; otherwise it may have read files before the latest writes, so one fresh computation is
+ * queued after it and shared by everyone who asks in the meantime.
+ */
+export function diffScheduler<T>(compute: (key: string) => Promise<T>, freshMs = 250) {
+  const running = new Map<string, { startedAt: number; promise: Promise<T> }>();
+  const queued = new Map<string, Promise<T>>();
+  const start = (key: string) => {
+    const flight = { startedAt: Date.now(), promise: compute(key) };
+    running.set(key, flight);
+    const clear = () => { if (running.get(key) === flight) running.delete(key); };
+    flight.promise.then(clear, clear);
+    return flight.promise;
+  };
+  return (key: string): Promise<T> => {
+    const waiting = queued.get(key);
+    if (waiting) return waiting;
+    const current = running.get(key);
+    if (!current) return start(key);
+    if (Date.now() - current.startedAt <= freshMs) return current.promise;
+    const next = current.promise.then(() => undefined, () => undefined).then(() => {
+      queued.delete(key);
+      return start(key);
+    });
+    queued.set(key, next);
+    return next;
+  };
 }
 
 export async function taskDiff(sources: DiffSource[] | "general"): Promise<TaskDiff> {

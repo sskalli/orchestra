@@ -87,6 +87,13 @@ export function useDiffPanel(preferences: DiffPreferences, chatWindowRef: RefObj
 
   const fits = space.room >= Math.min(space.chat, minChatWidth) + minWidth;
   const layout: DiffLayout = space.viewport <= 650 ? "overlay" : inboxOpen || !fits ? "tabs" : "floating";
+  // When the window or the Inbox takes away the room beside the chat, keep the chat in front instead of
+  // covering it (and the composer focus) with the Changes tab.
+  const [previousLayout, setPreviousLayout] = useState(layout);
+  if (previousLayout !== layout) {
+    setPreviousLayout(layout);
+    if (previousLayout === "floating" && open) setTab("chat");
+  }
   const maxWidth = Math.max(minWidth, space.room - Math.min(space.chat, minChatWidth));
   const shownWidth = clamp(width, minWidth, maxWidth);
   const chatWidth = (panel: number) => Math.max(Math.min(space.chat, minChatWidth), Math.min(space.chat, space.room - panel));
