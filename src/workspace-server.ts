@@ -182,7 +182,8 @@ const server = createServer(async (request, response) => {
     const unsubscribe = runtime.subscribe(publish);
     const unsubscribeSignals = runtime.subscribeSignals((signal) => response.write(`event: agent-signal\ndata: ${JSON.stringify(signal)}\n\n`));
     publish(runtime.snapshot());
-    const heartbeat = setInterval(() => response.write(": heartbeat\n\n"), 15_000);
+    // A named event, unlike an SSE comment, reaches the page, which reconnects when heartbeats stop.
+    const heartbeat = setInterval(() => response.write("event: heartbeat\ndata: {}\n\n"), 15_000);
     response.on("close", () => {
       clearInterval(heartbeat);
       unsubscribe();

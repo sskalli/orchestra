@@ -139,30 +139,63 @@ function flightLogEvents(agents: Agent[]): InboxEvent[] {
   });
 }
 
+/** The server sends a heartbeat every 15 seconds; a stream silent for longer than this is treated as dead. */
+const staleStreamMs = 40_000;
+
 function Workspace() {
   const [snapshot, setSnapshot] = useState<Snapshot>();
   const [connected, setConnected] = useState(false);
   const [signals, setSignals] = useState<AgentSignal[]>([]);
 
   useEffect(() => {
-    const events = new EventSource("/api/events");
     const timers = new Set<ReturnType<typeof setTimeout>>();
-    events.onerror = () => setConnected(false);
-    events.onmessage = ({ data }) => {
-      setSnapshot(JSON.parse(data) as Snapshot);
-      setConnected(true);
+    let events: EventSource | undefined;
+    let lastEventAt = Date.now();
+    // A stream can stop without an error, for example after the computer sleeps, leaving a stale snapshot
+    // that keeps the composer disabled. Reconnect when the server's heartbeats stop or the stream closes.
+    const connect = () => {
+      events?.close();
+      lastEventAt = Date.now();
+      const stream = new EventSource("/api/events");
+      events = stream;
+      // The browser retries a dropped stream itself; the watchdog replaces one it gave up on.
+      stream.onerror = () => setConnected(false);
+      stream.onmessage = ({ data }) => {
+        lastEventAt = Date.now();
+        setSnapshot(JSON.parse(data) as Snapshot);
+        setConnected(true);
+      };
+      stream.addEventListener("heartbeat", () => { lastEventAt = Date.now(); });
+      stream.addEventListener("agent-signal", (event) => {
+        lastEventAt = Date.now();
+        const signal = JSON.parse((event as MessageEvent).data) as AgentSignal;
+        setSignals((current) => [...current.slice(-39), signal]);
+        schedule(() => setSignals((current) => current.filter((entry) => entry.id !== signal.id)), 350);
+      });
     };
-    events.addEventListener("agent-signal", (event) => {
-      const signal = JSON.parse((event as MessageEvent).data) as AgentSignal;
-      setSignals((current) => [...current.slice(-39), signal]);
+    const schedule = (run: () => void, delay: number) => {
       const timer = setTimeout(() => {
-        setSignals((current) => current.filter((entry) => entry.id !== signal.id));
         timers.delete(timer);
-      }, 350);
+        run();
+      }, delay);
       timers.add(timer);
-    });
+    };
+    const reconnectIfStale = () => {
+      if (!events || events.readyState === EventSource.CLOSED || Date.now() - lastEventAt > staleStreamMs) {
+        setConnected(false);
+        connect();
+      }
+    };
+    const onVisible = () => { if (document.visibilityState === "visible") reconnectIfStale(); };
+    connect();
+    const watchdog = setInterval(reconnectIfStale, 5_000);
+    window.addEventListener("online", reconnectIfStale);
+    document.addEventListener("visibilitychange", onVisible);
     return () => {
-      events.close();
+      events?.close();
+      clearInterval(watchdog);
+      window.removeEventListener("online", reconnectIfStale);
+      document.removeEventListener("visibilitychange", onVisible);
       for (const timer of timers) clearTimeout(timer);
     };
   }, []);
