@@ -65,6 +65,7 @@ function providerFixture(runtime: WorkspaceRuntime) {
       requests.push({ method, params });
       if (method === "thread/start") return { thread: { id: `thread-${++sequence}` }, modelProvider: "openai" };
       if (method === "turn/start") return { turn: { id: `turn-${++sequence}`, status: "inProgress" } };
+      if (method === "turn/steer") return {};
       throw new Error(`Unexpected fixture RPC ${method}`);
     },
     reply: (id: string, value: any) => replies.set(id, value),
@@ -497,4 +498,27 @@ test("tasks sharing a repository are warned, and Git changes no single task made
   ]);
   assert.deepEqual(agent(second).messages.filter(({ kind }) => kind === "git"), []);
   complete(internal.sessions.get(first));
+});
+
+test("a reply sent while the agent is working can resolve the question it answers", async (t) => {
+  const fixture = crossRepoFixture(t);
+  if (!fixture) return;
+  const { runtime, internal, call, complete } = fixture;
+  const agentId = String(await runtime.command({ type: "createTask", name: "Footer", projectIds: ["ui"] }));
+  const task = internal.sessions.get(agentId);
+  const question = () => runtime.snapshot().agents.find(({ id }) => id === agentId)!.messages.find(({ productQuestion }) => productQuestion)!;
+  await runtime.command({ type: "send", agentId, text: "Review the footer." });
+  const asked = await call(task, "raise_product_decision", { question: "Fix or remove the footer?" });
+  const { questionId } = JSON.parse(asked.text);
+  assert.equal((await call(task, "resolve_product_question", { questionId })).success, false,
+    "a question cannot be resolved by the message that came before it");
+
+  await runtime.command({ type: "steer", agentId, text: "Fix it." });
+  const reply = runtime.snapshot().agents.find(({ id }) => id === agentId)!.messages.findLast(({ role }) => role === "user")!;
+  assert.equal(reply.text, "Fix it.");
+  const resolved = await call(task, "resolve_product_question", { questionId });
+  assert.equal(resolved.success, true, resolved.text);
+  assert.deepEqual(question().productQuestion, { status: "answered", answerMessageId: reply.id });
+  assert.equal(runtime.snapshot().agents.find(({ id }) => id === agentId)!.messages.some(({ productQuestion }) => productQuestion?.status === "pending"), false);
+  complete(task);
 });
