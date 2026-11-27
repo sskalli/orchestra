@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
@@ -160,6 +160,66 @@ test("a same-size edit right after the index was written is still reported", asy
   await new Promise((resolve) => setTimeout(resolve, 1100));
   const group = await diffSource({ projectId: "app", mode: "checkout", path: fixture.path, base: fixture.base });
   assert.deepEqual(group.files.map(({ path, status }) => [path, status]), [["a.txt", "M"]]);
+});
+
+function listTree(root: string): string[] {
+  return readdirSync(root, { withFileTypes: true }).flatMap((entry) => entry.isDirectory()
+    ? [entry.name + "/", ...listTree(join(root, entry.name)).map((child) => entry.name + "/" + child)] : [entry.name]).sort();
+}
+
+test("diffs never run the repository's clean or process filters", async (t) => {
+  const fixture = repository(t, { "a.txt": "one\n", ".gitattributes": "*.txt filter=evil\n" });
+  if (!fixture) return;
+  const marker = join(fixture.root, "MARKER");
+  git(fixture.path, "config", "filter.evil.clean", `touch '${marker}'; cat`);
+  git(fixture.path, "config", "filter.evil.smudge", `touch '${marker}'; cat`);
+  git(fixture.path, "config", "filter.evil.required", "true");
+  writeFileSync(join(fixture.path, ".git", "info", "attributes"), "*.md filter=lfs\n");
+  git(fixture.path, "config", "filter.lfs.process", `sh -c "touch '${marker}'"`);
+  git(fixture.path, "config", "filter.lfs.required", "true");
+  writeFileSync(join(fixture.path, "a.txt"), "one\ntwo\n");
+  writeFileSync(join(fixture.path, "new.txt"), "new\n");
+  writeFileSync(join(fixture.path, "notes.md"), "# notes\n");
+  const group = await diffSource({ projectId: "app", mode: "checkout", path: fixture.path, base: fixture.base });
+  assert.equal(group.error, undefined);
+  assert.deepEqual(group.files.map(({ path, additions }) => [path, additions]), [["a.txt", 1], ["new.txt", 1], ["notes.md", 1]]);
+  assert.equal(existsSync(marker), false);
+});
+
+test("a split index repository is left without new shared index files", async (t) => {
+  const fixture = repository(t, { "a.txt": "one\n" });
+  if (!fixture) return;
+  git(fixture.path, "config", "core.splitIndex", "true");
+  git(fixture.path, "config", "core.untrackedCache", "true");
+  git(fixture.path, "update-index", "--split-index");
+  writeFileSync(join(fixture.path, "a.txt"), "two\n");
+  writeFileSync(join(fixture.path, "b.txt"), "b\n");
+  const before = listTree(join(fixture.path, ".git"));
+  const group = await diffSource({ projectId: "app", mode: "checkout", path: fixture.path, base: fixture.base });
+  assert.deepEqual(group.files.map(({ path, status }) => [path, status]), [["a.txt", "M"], ["b.txt", "A"]]);
+  assert.deepEqual(listTree(join(fixture.path, ".git")), before);
+});
+
+test("untracked files over the count or size limits are listed but not read", async (t) => {
+  const fixture = repository(t, { "a.txt": "a\n" });
+  if (!fixture) return;
+  const previous = { ...diffLimits };
+  t.after(() => Object.assign(diffLimits, previous));
+  diffLimits.untrackedFiles = 2;
+  diffLimits.untrackedFileBytes = 100;
+  writeFileSync(join(fixture.path, "big.bin"), "x".repeat(500));
+  for (const name of ["u1.txt", "u2.txt", "u3.txt"]) writeFileSync(join(fixture.path, name), name + "\n");
+  const group = await diffSource({ projectId: "app", mode: "checkout", path: fixture.path, base: fixture.base });
+  assert.deepEqual(group.files.map(({ path, skipped, additions }) => [path, skipped, additions]),
+    [["u1.txt", undefined, 1], ["u2.txt", undefined, 1], ["big.bin", "size", 0], ["u3.txt", "count", 0]]);
+  assert.equal(group.notices?.length, 1);
+});
+
+test("one deadline covers the whole request", async (t) => {
+  const fixture = repository(t, { "a.txt": "a\n" });
+  if (!fixture) return;
+  const group = await diffSource({ projectId: "app", mode: "checkout", path: fixture.path, base: fixture.base }, Date.now() - 1);
+  assert.match(group.error ?? "", /too long/);
 });
 
 test("large diffs are truncated per file and omitted past the byte limit", async (t) => {

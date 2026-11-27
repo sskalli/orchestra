@@ -12,7 +12,9 @@ type DiffPreferences = { readDiffWidth(): number | undefined; writeDiffWidth(wid
 const panelId = "workspace-diff-panel";
 const minWidth = 320;
 const defaultWidth = 520;
-const minMap = 160;
+/** Narrowest the chat is squeezed to so the panel fits beside it. */
+const minChatWidth = 420;
+const minMap = 120;
 
 function clamp(value: number, min: number, max: number) {
   return Math.max(min, Math.min(max, value));
@@ -26,17 +28,28 @@ export function DiffToggle({ open, onToggle }: { open: boolean; onToggle: () => 
   </button>;
 }
 
+type Space = { viewport: number; room: number; chat: number };
+
+/** The chat's own width from its CSS rule (65vw by default, or the size the user dragged it to). */
+function naturalChatWidth(body: HTMLElement) {
+  const vw = window.innerWidth / 100;
+  const stored = parseFloat(body.style.getPropertyValue("--right-size"));
+  return clamp(Number.isFinite(stored) ? stored : 65 * vw, Math.min(230, 25 * vw), 75 * vw);
+}
+
 /**
- * Open state, placement and width of the changes panel. The panel floats left of the chat when the
- * map has room, becomes a tab over the chat dock on narrower windows or with the Inbox open, and
- * covers the workspace on phones.
+ * Open state, placement and width of the changes panel. On desktop widths the panel sits right of the
+ * chat and pushes it left, narrowing the chat (to 420px at least) while open. When even the minimum
+ * widths do not fit, or the Inbox is open, it becomes a Changes tab over the chat dock; phones get a
+ * full-screen version of those tabs.
  */
 export function useDiffPanel(preferences: DiffPreferences, chatWindowRef: RefObject<HTMLElement | null>,
   active: boolean, inboxOpen: boolean) {
   const [open, setOpen] = useState(false);
+  const [tab, setTab] = useState<"changes" | "chat">("changes");
   const [width, setWidth] = useState(() => preferences.readDiffWidth() ?? defaultWidth);
   const widthRef = useRef(width);
-  const [space, setSpace] = useState({ viewport: window.innerWidth, available: Infinity });
+  const [space, setSpace] = useState<Space>({ viewport: window.innerWidth, room: Infinity, chat: 0 });
   const [resizing, setResizing] = useState(false);
   const drag = useRef<{ pointerId: number; start: number; width: number } | null>(null);
 
@@ -52,25 +65,31 @@ export function useDiffPanel(preferences: DiffPreferences, chatWindowRef: RefObj
       const style = getComputedStyle(body);
       const inset = parseFloat(style.getPropertyValue("--window-inset")) || 0;
       const gap = parseFloat(style.getPropertyValue("--panel-gap")) || 0;
-      const available = body.getBoundingClientRect().width - chat.getBoundingClientRect().width - 2 * inset - gap - minMap;
-      setSpace((current) => current.viewport === window.innerWidth && current.available === available
-        ? current : { viewport: window.innerWidth, available });
+      const next = { viewport: window.innerWidth, room: body.getBoundingClientRect().width - 2 * inset - gap - minMap,
+        chat: naturalChatWidth(body) };
+      setSpace((current) => current.viewport === next.viewport && current.room === next.room && current.chat === next.chat
+        ? current : next);
     };
     measure();
     const observer = new ResizeObserver(measure);
     observer.observe(body);
     observer.observe(chat);
+    // The chat's own resize handle changes this inline size.
+    const mutations = new MutationObserver(measure);
+    mutations.observe(body, { attributes: true, attributeFilter: ["style"] });
     window.addEventListener("resize", measure);
     return () => {
       observer.disconnect();
+      mutations.disconnect();
       window.removeEventListener("resize", measure);
     };
   }, [chatWindowRef]);
 
-  const layout: DiffLayout = space.viewport <= 650 ? "overlay"
-    : space.viewport < 1100 || inboxOpen || space.available < minWidth ? "tabs" : "floating";
-  const maxWidth = Math.max(minWidth, space.available);
+  const fits = space.room >= Math.min(space.chat, minChatWidth) + minWidth;
+  const layout: DiffLayout = space.viewport <= 650 ? "overlay" : inboxOpen || !fits ? "tabs" : "floating";
+  const maxWidth = Math.max(minWidth, space.room - Math.min(space.chat, minChatWidth));
   const shownWidth = clamp(width, minWidth, maxWidth);
+  const chatWidth = (panel: number) => Math.max(Math.min(space.chat, minChatWidth), Math.min(space.chat, space.room - panel));
 
   const commitWidth = useCallback((next: number) => {
     widthRef.current = next;
@@ -81,7 +100,9 @@ export function useDiffPanel(preferences: DiffPreferences, chatWindowRef: RefObj
   function resizeHandle() {
     if (layout !== "floating") return null;
     const preview = (element: HTMLElement, next: number) => {
-      chatWindowRef.current?.parentElement?.style.setProperty("--diff-size", `${next}px`);
+      const body = chatWindowRef.current?.parentElement;
+      body?.style.setProperty("--diff-size", `${next}px`);
+      body?.style.setProperty("--diff-chat-width", `${chatWidth(next)}px`);
       element.setAttribute("aria-valuenow", String(Math.round(next)));
     };
     return <div className="sw-diff-resize" role="separator" tabIndex={0} aria-label="Resize changes panel"
@@ -121,11 +142,30 @@ export function useDiffPanel(preferences: DiffPreferences, chatWindowRef: RefObj
       }} />;
   }
 
-  const style = { "--diff-size": `${shownWidth}px` } as CSSProperties;
+  const isOpen = open && active;
+  // In the tab layouts the panel can stay open behind the chat tab.
+  const showing = isOpen && (layout === "floating" || tab === "changes");
+  const style = {
+    "--diff-size": `${shownWidth}px`,
+    ...(layout === "floating" && space.chat ? { "--diff-chat-width": `${chatWidth(shownWidth)}px` } : {}),
+  } as CSSProperties;
   return {
-    open: open && active,
+    open: isOpen,
+    /** The panel is visible rather than behind the chat tab. */
+    showing,
+    /** The chat dock is fully covered by the panel. */
+    coversChat: isOpen && layout !== "floating" && tab === "changes",
+    tab: layout === "floating" ? "changes" as const : tab,
+    setTab,
     setOpen,
-    toggle: () => setOpen((current) => !current),
+    toggle: () => {
+      if (isOpen && !showing) setTab("changes");
+      else if (isOpen) setOpen(false);
+      else {
+        setTab("changes");
+        setOpen(true);
+      }
+    },
     layout,
     resizing,
     style,
@@ -174,9 +214,12 @@ function FileDiff({ group, file, id }: { group: DiffGroup; file: DiffFile; id: s
         {file.oldPath && <span className="sw-diff-dir">{file.oldPath} → </span>}
         <span className="sw-diff-dir">{directory}</span>{name}
       </span>
-      {!file.binary && <Counts additions={file.additions} deletions={file.deletions} />}
+      {!file.binary && !file.skipped && <Counts additions={file.additions} deletions={file.deletions} />}
     </header>
-    {file.binary ? <p className="sw-diff-note">Binary file not shown</p>
+    {file.skipped ? <p className="sw-diff-note">{file.skipped === "size"
+      ? "Not shown. This untracked file is over the size limit."
+      : "Not shown. There are too many untracked files to read."}</p>
+      : file.binary ? <p className="sw-diff-note">Binary file not shown</p>
       : file.omitted ? <p className="sw-diff-note">Diff not loaded. This repository's changes exceed the display limit.</p>
       : !file.lines.length ? <p className="sw-diff-note">No content changes</p>
       : <div className="sw-diff-code" role="table" aria-label={`Diff of ${file.path}`}>
@@ -254,9 +297,16 @@ function FileTree({ groups, multiple, collapsed, onToggle, selected, onSelect }:
     setFocusRequest((count) => count + 1);
   }
 
+  // Collapsing a folder that holds the focused row keeps focus on the folder.
+  function toggle(key: string) {
+    const collapsing = !collapsed.has(key);
+    onToggle(key);
+    if (collapsing && tree.current?.contains(document.activeElement)) move(key);
+  }
+
   function activate(item: TreeItem) {
     setFocused(item.key);
-    if (item.expandable) onToggle(item.key);
+    if (item.expandable) toggle(item.key);
     else onSelect(item.key);
   }
 
@@ -272,11 +322,11 @@ function FileTree({ groups, multiple, collapsed, onToggle, selected, onSelect }:
     else if (event.key === "End") { handled(); move(items.at(-1)?.key); }
     else if (event.key === "ArrowRight") {
       handled();
-      if (item.expandable && !open) onToggle(item.key);
+      if (item.expandable && !open) toggle(item.key);
       else if (open && items[index + 1]?.parent === item.key) move(items[index + 1].key);
     } else if (event.key === "ArrowLeft") {
       handled();
-      if (open) onToggle(item.key);
+      if (open) toggle(item.key);
       else move(item.parent);
     } else if (event.key === "Enter" || event.key === " ") {
       handled();
@@ -303,7 +353,7 @@ function FileTree({ groups, multiple, collapsed, onToggle, selected, onSelect }:
           {item.kind === "repo" ? <><strong>{item.name}</strong>{multiple && <span className="sw-diff-dir">{modeNames[item.group.mode]}</span>}</>
             : <span className={`sw-diff-file-path${item.kind === "dir" ? " sw-diff-folder" : ""}`}>{item.name}</span>}
           <span className="sw-diff-tree-meta" aria-hidden="true">
-            {file?.binary ? <span className="sw-diff-dir">bin</span> : <Counts additions={item.additions} deletions={item.deletions} />}
+            {file?.binary ? <span className="sw-diff-dir">bin</span> : file?.skipped ? <span className="sw-diff-dir">skipped</span> : <Counts additions={item.additions} deletions={item.deletions} />}
           </span>
         </div>
       </li>;
@@ -312,13 +362,13 @@ function FileTree({ groups, multiple, collapsed, onToggle, selected, onSelect }:
 }
 
 function running(agent: WorkspaceAgent) {
-  return agent.status === "working" || Boolean(agent.canCancel) || agent.directTask?.phase === "implementing";
+  return agent.status === "working" || Boolean(agent.canCancel);
 }
 
 /** Read-only review of the files a task changed against the revision it started from. */
-export function DiffPanel({ agent, open, layout, resizing, resizeHandle, onClose }: {
-  agent?: WorkspaceAgent; open: boolean; layout: DiffLayout; resizing: boolean;
-  resizeHandle: () => ReactNode; onClose: (restoreFocus: boolean) => void;
+export function DiffPanel({ agent, open, layout, tab, onTab, resizing, resizeHandle, onClose }: {
+  agent?: WorkspaceAgent; open: boolean; layout: DiffLayout; tab: "changes" | "chat"; onTab: (tab: "changes" | "chat") => void;
+  resizing: boolean; resizeHandle: () => ReactNode; onClose: (restoreFocus: boolean) => void;
 }) {
   const [state, setState] = useState<LoadState>({ status: "loading" });
   const [refreshing, setRefreshing] = useState(false);
@@ -397,7 +447,11 @@ export function DiffPanel({ agent, open, layout, resizing, resizeHandle, onClose
       <button type="button" className="sw-diff-button" onClick={() => void load(false)}>Retry</button>
     </div>;
   } else if (diff?.kind === "general") body = <p className="sw-diff-empty">General chat — no repository changes</p>;
-  else if (!groups.length) body = <p className="sw-diff-empty">No changes yet. Edits start after Allow edits.</p>;
+  else if (!groups.length) {
+    // Tasks saved before Orchestra recorded checkout edits can have approved edits with nothing to diff.
+    const approved = agent?.messages.some(({ implementationRequest }) => implementationRequest?.status === "approved");
+    body = <p className="sw-diff-empty">{approved ? "No reviewable changes for this task." : "No changes yet. Edits start after Allow edits."}</p>;
+  }
   else {
     if (files.length) {
       tree = <FileTree groups={groups.filter((group) => group.files.length)}
@@ -419,6 +473,7 @@ export function DiffPanel({ agent, open, layout, resizing, resizeHandle, onClose
         {groups.length > 1 && <h3 className="sw-diff-group-title">
           {group.projectId} <span className="sw-diff-dir">· {modeNames[group.mode]} · base <code>{shortRevision(group.base)}</code></span>
         </h3>}
+        {group.notices?.map((notice) => <p key={notice} className="sw-diff-note">{notice}</p>)}
         {group.mode === "checkout" && <p className="sw-diff-note">Edits in the local checkout. Uncommitted changes that were already there are included.</p>}
         {treeFiles(groupTree(group)).map((file) => {
           const key = fileKey(group, file);
@@ -429,18 +484,35 @@ export function DiffPanel({ agent, open, layout, resizing, resizeHandle, onClose
     </>;
   }
 
-  return <aside ref={panel} id={panelId} className="sw-diff" data-layout={layout} aria-label="Changes" hidden={!open}
-    data-resizing={resizing || undefined}
+  const covered = layout !== "floating" && tab === "chat";
+  const changesTab = useRef<HTMLButtonElement>(null);
+  // In the tab layouts the panel covers the chat, so focus moves into it when it appears.
+  const visibleOverChat = open && layout !== "floating" && !covered;
+  useEffect(() => {
+    if (visibleOverChat) changesTab.current?.focus();
+  }, [visibleOverChat]);
+
+  return <aside ref={panel} id={panelId} className="sw-diff" data-layout={layout} data-tab={layout === "floating" ? undefined : tab}
+    aria-label="Changes" hidden={!open} data-resizing={resizing || undefined}
     onKeyDown={(event) => {
       if (event.key !== "Escape" || event.nativeEvent.isComposing) return;
       event.stopPropagation();
       onClose(true);
     }}>
     <div className="sw-diff-inner">
-      {layout !== "floating" && <div className="sw-diff-tabs" role="tablist" aria-label="Chat view">
-        <button type="button" role="tab" aria-selected={false} onClick={() => onClose(true)}>Chat</button>
-        <button type="button" role="tab" aria-selected={true} tabIndex={-1}>Changes</button>
+      {layout !== "floating" && <div className="sw-diff-tabs" role="tablist" aria-label="Chat view" onKeyDown={(event) => {
+        if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+        event.preventDefault();
+        const next = tab === "chat" ? "changes" : "chat";
+        onTab(next);
+        (event.currentTarget.querySelector<HTMLElement>(`[data-tab="${next}"]`))?.focus();
+      }}>
+        <button type="button" role="tab" data-tab="chat" aria-selected={covered} tabIndex={covered ? 0 : -1}
+          onClick={() => onTab("chat")}>Chat</button>
+        <button ref={changesTab} type="button" role="tab" data-tab="changes" aria-selected={!covered} tabIndex={covered ? -1 : 0}
+          aria-controls={`${panelId}-content`} onClick={() => onTab("changes")}>Changes</button>
       </div>}
+      <div id={`${panelId}-content`} className="sw-diff-content" hidden={covered}>
       <header className="sw-diff-header">
         <div className="sw-diff-title">
           <h2>{bases.length === 1 ? <>Changes vs base <code>{shortRevision(bases[0])}</code></> : "Changes"}</h2>
@@ -455,6 +527,7 @@ export function DiffPanel({ agent, open, layout, resizing, resizeHandle, onClose
       </header>
       {tree && <div className="sw-diff-tree-wrap">{tree}</div>}
       <div ref={scroller} className="sw-diff-body" aria-busy={refreshing}>{body}</div>
+      </div>
     </div>
     {open && resizeHandle()}
   </aside>;

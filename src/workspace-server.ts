@@ -24,6 +24,8 @@ let host = `127.0.0.1:${port}`;
 let origin = `http://${host}`;
 const dist = fileURLToPath(new URL("../dist/", import.meta.url));
 let runtime: WorkspaceRuntime;
+// Concurrent requests for the same task's changes share one Git computation.
+const diffsInFlight = new Map<string, ReturnType<typeof taskDiff>>();
 
 async function readCommand(request: IncomingMessage) {
   const chunks: Buffer[] = [];
@@ -96,7 +98,14 @@ const server = createServer(async (request, response) => {
       return;
     }
     try {
-      response.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(await taskDiff(sources)));
+      const key = JSON.stringify(sources);
+      let pending = diffsInFlight.get(key);
+      if (!pending) {
+        pending = taskDiff(sources).finally(() => diffsInFlight.delete(key));
+        diffsInFlight.set(key, pending);
+      }
+      const diff = await pending;
+      if (!response.destroyed) response.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(diff));
     } catch (error) {
       response.writeHead(500, { "Content-Type": "application/json" })
         .end(JSON.stringify({ error: error instanceof Error ? error.message : "Orchestra could not compute the changes." }));

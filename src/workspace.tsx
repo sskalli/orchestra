@@ -360,7 +360,8 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
 
   function closeDiff(restoreFocus: boolean) {
     diff.setOpen(false);
-    if (restoreFocus) document.querySelector<HTMLButtonElement>(".sw-right .sw-diff-toggle")?.focus();
+    // The chat dock may be inert until the panel stops covering it.
+    if (restoreFocus) setTimeout(() => document.querySelector<HTMLButtonElement>(".sw-right .sw-diff-toggle")?.focus());
   }
 
   function handleStatus(id: string) {
@@ -456,7 +457,7 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
       onOpenAgent={(id) => select(id)}
       onRename={agent.nativeChild ? undefined : (name) => send({ type: "rename", agentId: agent.id, name })}
       onLifecycle={agent.nativeChild ? undefined : (action) => requestLifecycle(action, agent.id)}
-      headerActions={<DiffToggle open={diff.open} onToggle={diff.toggle} />}
+      headerActions={<DiffToggle open={diff.showing} onToggle={diff.toggle} />}
       onApproveImplementation={agent.directTask?.projectIds.length
         ? (requestId) => send({ type: "approveImplementation", agentId: agent.id, requestId })
         : undefined}
@@ -529,7 +530,8 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
         {snapshot.usage && <WorkspaceUsage usage={snapshot.usage} />}
       </header>
       <main ref={bodyRef} className={`sw-body ${chatOpen ? "is-agent-open" : ""} ${leftOpen ? "is-inbox-open" : ""} ${resizing ? "is-resizing" : ""}`}
-        style={{ ...dockStyle, ...diff.style }} data-diff-layout={diff.open ? diff.layout : undefined}>
+        style={{ ...dockStyle, ...diff.style }} data-diff-layout={diff.open ? diff.layout : undefined}
+        data-diff-tab={diff.open && diff.layout !== "floating" ? diff.tab : undefined}>
         {!leftOpen && inboxToggle}
         <aside id="workspace-inbox-window" className="sw-dock sw-left" aria-label="Inbox window" hidden={!leftOpen}>
           <div className="sw-dock-inner">
@@ -581,7 +583,7 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
           </div>}
         </section>
         <aside ref={chatWindowRef} className="sw-dock sw-right" aria-label={newTaskOpen ? "Session composer" : "Agent chat"}
-          inert={!selected && !newTaskOpen} onKeyDown={(event) => {
+          inert={(!selected && !newTaskOpen) || diff.coversChat} onKeyDown={(event) => {
             if (event.key !== "Escape") return;
             event.stopPropagation();
             if (diff.open) closeDiff(true);
@@ -596,7 +598,7 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
           </div>
           {(selected || newTaskOpen) && resizeHandle("right")}
         </aside>
-        <DiffPanel agent={dockAgent} open={diff.open} layout={diff.layout} resizing={diff.resizing}
+        <DiffPanel agent={dockAgent} open={diff.open} layout={diff.layout} tab={diff.tab} onTab={diff.setTab} resizing={diff.resizing}
           resizeHandle={diff.resizeHandle} onClose={closeDiff} />
       </main>
       <TaskLifecycleDialog action={lifecycle?.action}

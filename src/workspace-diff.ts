@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { copyFile, mkdir, mkdtemp, realpath, rm, stat, utimes, writeFile } from "node:fs/promises";
+import { copyFile, lstat, mkdir, mkdtemp, realpath, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -21,6 +21,8 @@ export type DiffFile = {
   truncated?: boolean;
   /** The patch for this file was not loaded because the repository's diff exceeded the size limit. */
   omitted?: boolean;
+  /** An untracked file that was not read: it is too large, or there are too many untracked files. */
+  skipped?: "size" | "count";
 };
 export type DiffGroup = {
   projectId: string;
@@ -29,6 +31,8 @@ export type DiffGroup = {
   files: DiffFile[];
   /** More files changed than were listed. */
   moreFiles?: number;
+  /** Limits that hid part of the changes. */
+  notices?: string[];
   error?: string;
 };
 export type TaskDiff = { kind: "general" } | { kind: "repositories"; groups: DiffGroup[] };
@@ -43,6 +47,11 @@ export const diffLimits = {
   /** Characters shown per line. */
   lineLength: 2000,
   files: 2000,
+  /** Untracked files read per repository, the largest one read, and their combined size. */
+  untrackedFiles: 1000,
+  untrackedFileBytes: 2 * 1024 * 1024,
+  untrackedBytes: 32 * 1024 * 1024,
+  /** One deadline for a whole request, across repositories. */
   timeoutMs: 30_000,
 };
 
@@ -50,21 +59,34 @@ const shaPattern = /^[a-f0-9]{40}(?:[a-f0-9]{24})?$/i;
 
 function cleanEnvironment(overrides: Record<string, string> = {}): NodeJS.ProcessEnv {
   const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith("GIT_")));
-  return { ...env, GIT_TERMINAL_PROMPT: "0", GIT_OPTIONAL_LOCKS: "0", LC_ALL: "C", ...overrides };
+  return {
+    ...env, GIT_TERMINAL_PROMPT: "0", GIT_OPTIONAL_LOCKS: "0", GIT_NO_LAZY_FETCH: "1", GIT_LITERAL_PATHSPECS: "1", LC_ALL: "C",
+    ...overrides,
+  };
 }
 
-// Never run repository hooks, fsmonitor programs, external diff drivers or pagers.
+// Never run repository hooks, fsmonitor programs, external diff drivers, pagers or network fetches,
+// and never write split-index or untracked-cache files into the repository.
 const safeConfig = [
   "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-c", "core.quotepath=off",
-  "-c", "diff.noprefix=false", "-c", "diff.mnemonicPrefix=false", "-c", "color.ui=false",
+  "-c", "core.splitIndex=false", "-c", "core.untrackedCache=false", "-c", "protocol.allow=never",
+  "-c", "core.attributesFile=/dev/null",
+  "-c", "diff.noprefix=false", "-c", "diff.mnemonicPrefix=false", "-c", "diff.suppressBlankEmpty=false", "-c", "color.ui=false",
   "--no-pager",
 ];
 
 type GitResult = { stdout: Buffer; truncated: boolean };
+type GitOptions = { limit?: number; allowTruncation?: boolean; deadline: number; isolation?: string[] };
 
-function runGit(cwd: string, args: string[], env: NodeJS.ProcessEnv, limit = 64 * 1024 * 1024): Promise<GitResult> {
+function runGit(cwd: string, args: string[], env: NodeJS.ProcessEnv, options: GitOptions): Promise<GitResult> {
+  const { limit = 64 * 1024 * 1024, allowTruncation = false, deadline, isolation = [] } = options;
   return new Promise((resolvePromise, reject) => {
-    const child = spawn("git", [...safeConfig, ...args], { cwd, env, stdio: ["ignore", "pipe", "pipe"] });
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) {
+      reject(new Error("Git took too long to compute the changes."));
+      return;
+    }
+    const child = spawn("git", [...safeConfig, ...isolation, ...args], { cwd, env, stdio: ["ignore", "pipe", "pipe"] });
     const chunks: Buffer[] = [];
     let size = 0;
     let truncated = false;
@@ -73,7 +95,7 @@ function runGit(cwd: string, args: string[], env: NodeJS.ProcessEnv, limit = 64 
     const timer = setTimeout(() => {
       timedOut = true;
       child.kill("SIGKILL");
-    }, diffLimits.timeoutMs);
+    }, remaining);
     child.stdout.on("data", (chunk: Buffer) => {
       if (truncated) return;
       const room = limit - size;
@@ -95,6 +117,7 @@ function runGit(cwd: string, args: string[], env: NodeJS.ProcessEnv, limit = 64 
     child.on("close", (code) => {
       clearTimeout(timer);
       if (timedOut) reject(new Error("Git took too long to compute the changes."));
+      else if (truncated && !allowTruncation) reject(new Error("Git produced more output than Orchestra can show."));
       else if (truncated || code === 0) resolvePromise({ stdout: Buffer.concat(chunks), truncated });
       else reject(new Error(stderr.trim().split("\n").at(-1) || `Git exited with status ${code}.`));
     });
@@ -191,8 +214,64 @@ export function parsePatch(patch: string, streamTruncated = false, limits = diff
   return sections;
 }
 
+let attrSourceSupport: Promise<boolean> | undefined;
+
+/**
+ * Config that keeps Git from running repository programs while it hashes files: every configured
+ * clean/smudge/process filter is blanked, and attributes are read from an empty tree where Git supports it.
+ */
+async function isolationConfig(root: string, deadline: number) {
+  const env = cleanEnvironment();
+  let names: string[] = [];
+  try {
+    const output = (await runGit(root, ["config", "--null", "--name-only", "--get-regexp", "^filter\\."], env, { deadline })).stdout;
+    names = output.toString("utf8").split("\0").filter(Boolean);
+  } catch (error) {
+    // `git config --get-regexp` exits with status 1 when nothing matches.
+    if (!/status 1\b/.test(String((error as Error).message))) throw error;
+  }
+  const drivers = [...new Set(names.map((name) => name.slice("filter.".length, name.lastIndexOf("."))))];
+  if (drivers.some((name) => !name || /[=\n]/.test(name))) throw new Error("A Git filter in this repository cannot be disabled safely.");
+  const config = drivers.flatMap((name) => ["clean", "smudge", "process"].map((key) => ["-c", `filter.${name}.${key}=`])
+    .flat().concat(["-c", `filter.${name}.required=false`]));
+  const emptyTree = (await runGit(root, ["hash-object", "-t", "tree", "/dev/null"], env, { deadline })).stdout.toString("utf8").trim();
+  attrSourceSupport ??= runGit(root, [`--attr-source=${emptyTree}`, "--version"], env, { deadline: Date.now() + 10_000 })
+    .then(() => true, () => false);
+  if (await attrSourceSupport) config.unshift(`--attr-source=${emptyTree}`);
+  return config;
+}
+
+async function untrackedFiles(root: string, run: (args: string[], options?: Partial<GitOptions>) => Promise<GitResult>) {
+  const listing = await run(["ls-files", "--others", "--exclude-standard", "-z", "--", "."], { limit: 8 * 1024 * 1024, allowTruncation: true });
+  const paths = listing.stdout.toString("utf8").split("\0");
+  if (listing.truncated || paths.at(-1) !== "") paths.pop();
+  const included: string[] = [];
+  const skipped: { path: string; reason: "size" | "count" }[] = [];
+  let total = 0;
+  for (const path of paths) {
+    if (!path) continue;
+    if (included.length >= diffLimits.untrackedFiles) {
+      skipped.push({ path, reason: "count" });
+      continue;
+    }
+    let size = 0;
+    try {
+      size = (await lstat(join(root, path))).size;
+    } catch {
+      continue;
+    }
+    if (size > diffLimits.untrackedFileBytes || total + size > diffLimits.untrackedBytes) {
+      skipped.push({ path, reason: total + size > diffLimits.untrackedBytes && size <= diffLimits.untrackedFileBytes ? "count" : "size" });
+      continue;
+    }
+    total += size;
+    included.push(path);
+  }
+  return { included, skipped, truncated: listing.truncated };
+}
+
 /** Diff the current contents of one worktree, including untracked files Git does not ignore, against its base commit. */
-export async function diffSource(source: DiffSource): Promise<DiffGroup> {
+export async function diffSource(source: DiffSource, deadline = Date.now() + diffLimits.timeoutMs): Promise<DiffGroup> {
   const group: DiffGroup = { projectId: source.projectId, mode: source.mode, base: source.base, files: [] };
   if (!shaPattern.test(source.base)) return { ...group, error: "The task's base revision is invalid." };
   let temporary: string | undefined;
@@ -204,16 +283,20 @@ export async function diffSource(source: DiffSource): Promise<DiffGroup> {
       throw new Error(source.mode === "checkout" ? "The configured checkout is unavailable." : "The task's worktree no longer exists.");
     }
     const plain = cleanEnvironment();
-    const text = async (args: string[], env = plain) => (await runGit(root, args, env)).stdout.toString("utf8");
-    const top = (await text(["rev-parse", "--show-toplevel"])).trim();
+    const top = (await runGit(root, ["rev-parse", "--show-toplevel"], plain, { deadline })).stdout.toString("utf8").trim();
     if (await realpath(top) !== root) throw new Error("The task's worktree is not a complete Git worktree.");
+    const isolation = await isolationConfig(root, deadline);
+    const run = (args: string[], options: Partial<GitOptions> = {}, env = plain) =>
+      runGit(root, args, env, { deadline, isolation, ...options });
+    const text = async (args: string[], env = plain) => (await run(args, {}, env)).stdout.toString("utf8");
     try {
       await text(["cat-file", "-e", source.base + "^{commit}"]);
     } catch {
       throw new Error("The task's base revision is no longer available in this repository.");
     }
+    const untracked = await untrackedFiles(root, (args, options) => run(args, options));
 
-    // Stage everything into a throwaway index and object directory so the real index and object store stay untouched.
+    // Stage into a throwaway index and object directory so the real index and object store stay untouched.
     temporary = await mkdtemp(join(tmpdir(), "orchestra-diff-"));
     const objects = resolve(root, (await text(["rev-parse", "--git-path", "objects"])).trim());
     const temporaryObjects = join(temporary, "objects");
@@ -227,22 +310,39 @@ export async function diffSource(source: DiffSource): Promise<DiffGroup> {
       const { atime, mtime } = await stat(index);
       await copyFile(index, join(temporary, "index"));
       await utimes(join(temporary, "index"), atime, mtime);
-      await text(["add", "-A", "--", "."], env);
-    } catch {
+      await text(["add", "--update", "--", "."], env);
+    } catch (error) {
+      if (/too long/.test(String((error as Error).message))) throw error;
       await rm(join(temporary, "index"), { force: true });
       await text(["read-tree", "HEAD"], env);
-      await text(["add", "-A", "--", "."], env);
+      await text(["add", "--update", "--", "."], env);
+    }
+    if (untracked.included.length) {
+      const list = join(temporary, "untracked");
+      await writeFile(list, untracked.included.join("\0") + "\0");
+      await text(["add", `--pathspec-from-file=${list}`, "--pathspec-file-nul"], env);
     }
 
     const common = ["diff", "--cached", "-M", "--no-ext-diff", "--no-textconv", "--no-color"];
     const names = parseNameStatus(await text([...common, "--name-status", "-z", source.base, "--"], env));
-    if (!names.length) return group;
-    const counts = parseNumstat(await text([...common, "--numstat", "-z", source.base, "--"], env));
-    const patch = await runGit(root, [...common, "--unified=3", "--src-prefix=a/", "--dst-prefix=b/", source.base, "--"],
-      env, diffLimits.patchBytes);
+    const skipped = untracked.skipped.map(({ path, reason }): DiffFile => ({
+      path, status: "A", additions: 0, deletions: 0, binary: false, lines: [], skipped: reason,
+    }));
+    const notices: string[] = [];
+    if (untracked.truncated) notices.push("Some untracked files are not listed because there are too many.");
+    if (untracked.skipped.length) {
+      notices.push(`${untracked.skipped.length} untracked ${untracked.skipped.length === 1 ? "file was" : "files were"} not read because of size limits.`);
+    }
+    if (notices.length) group.notices = notices;
+    if (!names.length && !skipped.length) return group;
+    const counts = names.length ? parseNumstat(await text([...common, "--numstat", "-z", source.base, "--"], env)) : [];
+    const patch = names.length
+      ? await run([...common, "--unified=3", "--src-prefix=a/", "--dst-prefix=b/", source.base, "--"],
+        { limit: diffLimits.patchBytes, allowTruncation: true }, env)
+      : { stdout: Buffer.alloc(0), truncated: false };
     const sections = parsePatch(patch.stdout.toString("utf8"), patch.truncated);
     // Git emits name-status, numstat and patch sections in the same order for the same diff options.
-    group.files = names.slice(0, diffLimits.files).map((entry, position) => {
+    const files = names.map((entry, position) => {
       const count = counts[position]?.path === entry.path ? counts[position] : counts.find(({ path }) => path === entry.path);
       const section = sections[position];
       const binary = Boolean(count?.binary || section?.binary);
@@ -255,8 +355,9 @@ export async function diffSource(source: DiffSource): Promise<DiffGroup> {
       if (section?.truncated && !binary) file.truncated = true;
       if (!section && !binary) file.omitted = true;
       return file;
-    });
-    if (names.length > group.files.length) group.moreFiles = names.length - group.files.length;
+    }).concat(skipped);
+    group.files = files.slice(0, diffLimits.files);
+    if (files.length > group.files.length) group.moreFiles = files.length - group.files.length;
     return group;
   } catch (error) {
     return { ...group, error: error instanceof Error ? error.message : "Orchestra could not compute the changes." };
@@ -267,7 +368,8 @@ export async function diffSource(source: DiffSource): Promise<DiffGroup> {
 
 export async function taskDiff(sources: DiffSource[] | "general"): Promise<TaskDiff> {
   if (sources === "general") return { kind: "general" };
+  const deadline = Date.now() + diffLimits.timeoutMs;
   const groups: DiffGroup[] = [];
-  for (const source of sources) groups.push(await diffSource(source));
+  for (const source of sources) groups.push(await diffSource(source, deadline));
   return { kind: "repositories", groups };
 }

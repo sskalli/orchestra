@@ -7,6 +7,8 @@
   --diff-del-text: #ec7474;
 }
 .sw-body.is-agent-open[data-diff-layout="floating"] {
+  /* The chat narrows while the panel is open beside it and returns to its own width afterwards. */
+  --right-width: var(--diff-chat-width);
   --map-right-inset: calc(var(--right-width) + var(--panel-gap) + var(--diff-width) + 2 * var(--window-inset));
 }
 .sw-body.is-agent-open[data-diff-layout="floating"] .sw-right {
@@ -26,6 +28,13 @@
 .sw-diff[data-layout="tabs"] { right: var(--window-inset); width: var(--right-width); }
 .sw-diff[data-layout="overlay"] { left: var(--window-inset); right: var(--window-inset); z-index: 9; }
 .sw-diff-inner { height: 100%; display: flex; flex-direction: column; min-height: 0; }
+.sw-diff-content { display: flex; flex: 1; flex-direction: column; min-height: 0; }
+.sw-diff-content[hidden] { display: none; }
+
+/* Behind the Chat tab only the tab strip stays, above the chat dock. */
+.sw-diff[data-tab="chat"] { bottom: auto; }
+.sw-diff[data-tab="chat"] .sw-diff-tabs { padding-bottom: 4px; }
+.sw-body.is-agent-open[data-diff-tab="chat"] .sw-right { top: calc(var(--window-inset) + 40px); }
 
 .sw-diff-resize { position: absolute; z-index: 4; top: 0; bottom: 0; left: 0; width: 14px; cursor: col-resize; touch-action: none; }
 .sw-diff-resize::after { content: ""; position: absolute; top: 0; bottom: 0; left: 0; width: 2px; }
@@ -109,5 +118,7 @@
 
 @media (max-width: 650px) {
   .sw-diff[data-layout="overlay"] { top: var(--window-inset); bottom: var(--window-inset); }
+  .sw-diff[data-layout="overlay"][data-tab="chat"] { top: var(--chat-top); bottom: auto; }
+  .sw-body.is-agent-open[data-diff-tab="chat"] .sw-right { top: calc(var(--chat-top) + 40px); }
   .sw-diff-header { padding-left: 12px; }
 }
