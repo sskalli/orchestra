@@ -35,7 +35,8 @@ export type WorkspaceMessage = {
   kind?: SystemMessageKind;
   providerItemId?: string;
   state?: "queued" | "streaming" | "failed" | "cancelled";
-  productQuestion?: { status: "pending" } | { status: "answered"; answerMessageId: string };
+  /** A question the user resolved by hand is "resolved", without a linked answer. */
+  productQuestion?: { status: "pending" | "resolved" } | { status: "answered"; answerMessageId: string };
   answersProductQuestionId?: string;
   commandApproval?: PermissionApproval;
   implementationRequest?: { status: "pending" | "approved" | "superseded"; targets?: WriteTarget[] };
@@ -102,6 +103,7 @@ export type WorkspaceCommand =
   | { type: "createTask"; name: string; projectIds: string[]; model?: string | null; effort?: string | null }
   | { type: "setModel"; agentId: string; model?: string | null; effort?: string | null }
   | { type: "answerProductQuestion"; agentId: string; questionId: string; text: string }
+  | { type: "resolveProductQuestion"; agentId: string; questionId: string }
   | { type: "resolveCommandApproval"; agentId: string; requestId: string; decision: ApprovalChoice }
   | { type: "approveImplementation"; agentId: string; requestId: string }
   | { type: "send" | "steer"; agentId: string; text: string }
@@ -591,6 +593,10 @@ export class WorkspaceRuntime {
     if (!this.isActive(session)) throw new Error("Restore this archived conversation before messaging it.");
     if (command.type === "setModel") {
       await this.setModel(session, command);
+      return;
+    }
+    if (command.type === "resolveProductQuestion") {
+      this.markProductQuestionResolved(session, command.questionId);
       return;
     }
     if (command.type === "resolveCommandApproval") {
@@ -1509,6 +1515,7 @@ export class WorkspaceRuntime {
       (roots.length ? `The selected repositories for read-only investigation are ${JSON.stringify(roots)}. ` : "No repositories are selected. ") +
       "Plan and discuss by default. Use raise_product_decision if you need the user to choose, then end the turn. " +
       "When orchestra_pending_questions is supplied, use its question IDs and the resolution tool it indicates only if the current user reply answers that question. Leave unrelated questions open. " +
+      "If a user message answers or sets aside a question you raised, including one sent while you were working, call resolve_product_question with that question's ID so the task stops waiting for an answer. " +
       "Never ask the user to type a trigger phrase to continue implementation. " +
       (roots.length ? "Make planned changes to the selected repositories in a turn explicitly approved for implementation, using the writable destinations listed with that approval. " +
         this.implementationRequestInstructions(session) : "") +
@@ -1605,15 +1612,16 @@ export class WorkspaceRuntime {
     };
   }
 
+  /** The agent links the user's reply to a question it raised, including a reply sent while the turn ran. */
   private resolveProductQuestion(session: AgentSession, questionId: unknown) {
     const run = session.run;
-    if (!session.agent.directTask || !run || run.implementationRoots || run.steered || run.message.answersProductQuestionId) {
-      throw new Error("Only a normal reply in this task can resolve a pending product question.");
+    if (!session.agent.directTask || !run || run.implementationRoots) {
+      throw new Error("Only a reply in this task can resolve a pending product question.");
     }
-    const answer = run.message;
-    const question = session.agent.messages.slice(0, session.agent.messages.indexOf(answer))
-      .find(({ id }) => id === questionId);
-    if (question?.productQuestion?.status !== "pending") throw new Error("Choose a pending question from before this reply in the current task.");
+    const messages = session.agent.messages;
+    const answer = messages.findLast((entry) => entry.role === "user" && entry.state !== "queued" && !entry.answersProductQuestionId);
+    const question = answer && messages.slice(0, messages.indexOf(answer)).find(({ id }) => id === questionId);
+    if (question?.productQuestion?.status !== "pending") throw new Error("Choose a pending question from before the user's latest reply in the current task.");
     question.productQuestion = { status: "answered", answerMessageId: answer.id };
     answer.answersProductQuestionId = question.id;
     if (!this.persist()) {
@@ -1621,6 +1629,19 @@ export class WorkspaceRuntime {
       delete answer.answersProductQuestionId;
       this.publish(false);
       throw new Error("Orchestra could not save the answer. The question remains pending.");
+    }
+    this.publish(false);
+  }
+
+  /** The user clears a question by hand, for example after answering it in a message the agent did not link. */
+  private markProductQuestionResolved(session: AgentSession, questionId: unknown) {
+    const question = session.agent.messages.find(({ id }) => id === questionId);
+    if (question?.productQuestion?.status !== "pending") throw new Error("This question is no longer pending.");
+    question.productQuestion = { status: "resolved" };
+    if (!this.persist()) {
+      question.productQuestion = { status: "pending" };
+      this.publish(false);
+      throw new Error("Orchestra could not save the change. The question remains pending.");
     }
     this.publish(false);
   }
