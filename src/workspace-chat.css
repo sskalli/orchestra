@@ -612,7 +612,7 @@
 
 .chat-message--assistant { color: var(--text-primary); }
 .chat-message--system { color: var(--text-primary); }
-.chat-message--system:is(.chat-message--error, .chat-message--action, .chat-message--warning, .chat-message--notice, .chat-message--success) > .chat-message-content {
+.chat-message--system:is(.chat-message--error, .chat-message--action, .chat-message--warning, .chat-message--notice, .chat-message--success, .chat-message--git) > .chat-message-content {
   padding-block: 8px;
   color: var(--text-primary);
 }
@@ -621,6 +621,7 @@
 .chat-message--system.chat-message--warning > .chat-message-content { background: #454020; }
 .chat-message--system.chat-message--notice > .chat-message-content { background: #253747; }
 .chat-message--system.chat-message--success > .chat-message-content { background: #263d2d; }
+.chat-message--system.chat-message--git > .chat-message-content { background: #2f2c40; }
 .chat-input-prompt { color: var(--control-highlight); flex: none; font-size: .765rem; line-height: 1.5; }
 
 .chat-message--assistant .chat-markdown { line-height: 1.75; }
