@@ -1,29 +1,24 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { attentionTaskCount, documentTitle } from "../src/workspace-status.ts";
+import { documentTitle } from "../src/workspace-status.ts";
+import { unreadInbox } from "../src/workspace-flight-log.ts";
+import type { InboxEvent } from "../src/workspace-inbox.tsx";
 import { nodePositions, workspacePreferences } from "../src/workspace-preferences.ts";
-import type { WorkspaceAgent, WorkspaceMessage } from "../src/workspace-runtime.ts";
 
-type Agent = Pick<WorkspaceAgent, "id" | "parentId" | "archivedAt" | "status" | "messages">;
-const agent = (id: string, status: Agent["status"], extra: Partial<Agent> = {}): Agent =>
-  ({ id, status, messages: [], ...extra });
-const pendingQuestion = { productQuestion: { status: "pending" } } as WorkspaceMessage;
 
-test("tab title counts top-level tasks that need the user", () => {
-  assert.equal(documentTitle([]), "Orchestra");
-  assert.equal(documentTitle([agent("a", "working"), agent("b", "awaiting-confirmation"), agent("c", "done")]), "Orchestra");
-  const agents = [
-    agent("root1", "working"),
-    agent("child1", "error", { parentId: "root1" }),
-    agent("grandchild1", "attention", { parentId: "child1" }),
-    agent("root2", "idle", { messages: [pendingQuestion] }),
-    agent("root3", "error", { archivedAt: "2026-01-01" }),
-    agent("root4", "working"),
-    agent("child4", "error", { parentId: "root4", archivedAt: "2026-01-01" }),
-    agent("root5", "attention"),
-  ];
-  assert.equal(attentionTaskCount(agents), 3);
-  assert.equal(documentTitle(agents), "Orchestra (3)");
+test("tab title and Inbox count only notifications not yet seen in the Inbox or the task's chat", () => {
+  assert.equal(documentTitle(0), "Orchestra");
+  assert.equal(documentTitle(2), "Orchestra (2)");
+  const entry = (sequence: number, agentId: string, tone: InboxEvent["tone"]) =>
+    ({ sequence, event: { id: `${agentId}:${sequence}`, agentId, agentName: agentId, status: tone, tone, text: "" } });
+  const log = { entries: [entry(5, "child1", "error"), entry(4, "root2", "attention"), entry(3, "root3", "done"), entry(2, "gone", "error")],
+    latest: {}, sequence: 5, archivedAgentIds: [] };
+  const roots: Record<string, string> = { child1: "root1", root2: "root2", root3: "root3" };
+  const rootOf = (id: string) => roots[id];
+  assert.deepEqual(unreadInbox(log, 0, {}, rootOf), { unread: true, alerts: 2 }, "a subagent failure counts for its task; removed tasks do not");
+  assert.deepEqual(unreadInbox(log, 5, {}, rootOf), { unread: false, alerts: 0 }, "opening the Inbox marks everything seen");
+  assert.deepEqual(unreadInbox(log, 0, { root1: 5 }, rootOf), { unread: true, alerts: 1 }, "opening a task's chat acknowledges its failure");
+  assert.deepEqual(unreadInbox(log, 4, {}, rootOf), { unread: true, alerts: 1 }, "only newer notifications are unseen");
 });
 
 test("node positions are validated, filtered by known ids, and stored per workspace", () => {
