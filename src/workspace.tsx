@@ -216,7 +216,7 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
     const dismissOutside = (event: Event) => {
       const target = event.target;
       if (!(target instanceof Element)) return;
-      document.querySelectorAll<HTMLDetailsElement>(".sw-usage-menu[open]").forEach((menu) => {
+      document.querySelectorAll<HTMLDetailsElement>(".sw-usage-menu[open], .sw-provider-detail[open]").forEach((menu) => {
         if (!menu.contains(target)) menu.open = false;
       });
       if (!target.closest(".sw-project-menu")) setProjectDetails(false);
@@ -225,8 +225,8 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
     const dismissOnEscape = (event: globalThis.KeyboardEvent) => {
       if (event.key !== "Escape") return;
       const target = event.target instanceof Element ? event.target : undefined;
-      const menu = target?.closest<HTMLDetailsElement>(".sw-usage-menu[open]") ??
-        document.querySelector<HTMLDetailsElement>(".sw-usage-menu[open]");
+      const menu = target?.closest<HTMLDetailsElement>(".sw-usage-menu[open], .sw-provider-detail[open]") ??
+        document.querySelector<HTMLDetailsElement>(".sw-usage-menu[open], .sw-provider-detail[open]");
       const projectTrigger = document.querySelector<HTMLButtonElement>(".sw-project-button[aria-expanded='true']");
       if (menu) {
         menu.open = false;
@@ -295,7 +295,7 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
   const blockedReason = !connected ? "Reconnecting to the local workspace…" : provider.message ?? providerLabel(provider);
   const projectName = project.name;
   // Workspace-level detail (sign-in steps, save or load failures, usage limits) stays readable without hovering.
-  const providerDetail = blocked && connected && provider.message ? provider.message : undefined;
+  const providerDetail = connected && provider.message && (blocked || provider.state === "usage-limit") ? provider.message : undefined;
   const storageMessage = "Browser storage is unavailable. Drafts and layout changes may not survive reload.";
 
   const inboxEvents = useMemo(() => flightLogEvents(agents), [agents]);

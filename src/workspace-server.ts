@@ -172,7 +172,7 @@ const server = createServer(async (request, response) => {
       if (!response.destroyed) response.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(diff));
     } catch (error) {
       response.writeHead(500, { "Content-Type": "application/json" })
-        .end(JSON.stringify({ error: error instanceof Error ? error.message : "Orchestra could not compute the changes." }));
+        .end(JSON.stringify({ error: error instanceof Error ? safeError(error.message) : "Orchestra could not compute the changes." }));
     }
     return;
   }
