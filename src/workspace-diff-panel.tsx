@@ -216,7 +216,7 @@ function shortRevision(revision: string) {
 }
 
 const statusNames = { A: "Added", M: "Modified", D: "Deleted", R: "Renamed", C: "Copied", T: "Type changed" } as const;
-const modeNames = { automatic: "isolated worktree", worktree: "linked worktree", checkout: "local checkout" } as const;
+const modeNames = { worktree: "linked worktree", checkout: "local checkout" } as const;
 
 function splitPath(path: string) {
   const index = path.lastIndexOf("/");
@@ -456,8 +456,7 @@ export function DiffPanel({ agent, open, layout, tab, onTab, resizing, resizeHan
 
   // Refresh when a turn finishes or the task's edit destinations change, keeping the scroll position.
   const isRunning = agent ? running(agent) : false;
-  const destinations = agent ? JSON.stringify([agent.candidate, agent.directCandidates, agent.scopedWorktrees, agent.checkoutEdits,
-    agent.checkoutBases, agent.taskWorktrees, agent.directTask?.phase]) : "";
+  const destinations = agent ? JSON.stringify([agent.checkoutBases, agent.taskWorktrees]) : "";
   const previous = useRef({ isRunning, destinations });
   useEffect(() => {
     const before = previous.current;
@@ -494,9 +493,7 @@ export function DiffPanel({ agent, open, layout, tab, onTab, resizing, resizeHan
     </div>;
   } else if (diff?.kind === "general") body = <p className="sw-diff-empty">General chat — no repository changes</p>;
   else if (!groups.length) {
-    // Tasks saved before Orchestra recorded checkout edits can have approved edits with nothing to diff.
-    const approved = agent?.messages.some(({ implementationRequest }) => implementationRequest?.status === "approved");
-    body = <p className="sw-diff-empty">{approved ? "No reviewable changes for this task." : "No changes yet."}</p>;
+    body = <p className="sw-diff-empty">No changes yet.</p>;
   }
   else {
     if (files.length) {

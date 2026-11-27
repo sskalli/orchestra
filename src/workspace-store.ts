@@ -2,15 +2,13 @@ import { createHash, randomUUID } from "node:crypto";
 import { mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { acquirePathReservations, reservationOwnerAlive, releasePathReservations,
-  type CheckoutReservation } from "./workspace-reservations.ts";
+import { acquirePathReservations, reservationOwnerAlive, releasePathReservations } from "./workspace-reservations.ts";
 import type { WorkspaceAgent } from "./workspace-runtime.ts";
 
 export type SavedSession = {
   agent: WorkspaceAgent;
   threadId?: string;
   toolVersion?: number;
-  checkoutReservation?: CheckoutReservation;
   run?: { messageId: string; turnId?: string };
 };
 

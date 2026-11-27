@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import type { Event, Id, ProviderServer } from "../src/app-server.ts";
-import { implementationApprovalText, messageCharacterLimit, messageLength, messageLengthProblem, OrderedSends, restoredDraft, retryableMessageId } from "../src/workspace-chat-recovery.ts";
+import { messageCharacterLimit, messageLength, messageLengthProblem, OrderedSends, restoredDraft, retryableMessageId } from "../src/workspace-chat-recovery.ts";
 import { WorkspaceRuntime, type WorkspaceMessage } from "../src/workspace-runtime.ts";
 import { workspaceStore } from "../src/workspace-store.ts";
 
@@ -216,10 +216,6 @@ test("only the latest failed plain user message offers Retry", () => {
   assert.equal(retryableMessageId([user("a", "One", { state: "failed" }), user("b", "Two", { state: "queued" })]), undefined);
   assert.equal(retryableMessageId([user("a", "One", { state: "cancelled" })]), undefined);
   assert.equal(retryableMessageId([user("a", "Yes", { state: "failed", answersProductQuestionId: "q" })]), undefined);
-  assert.equal(retryableMessageId([
-    { id: "r", role: "system", text: "Edit files", implementationRequest: { status: "approved" } },
-    user("a", implementationApprovalText, { state: "failed" }),
-  ]), undefined);
 });
 
 test("a provider retry in one task does not block the other tasks", async (t) => {

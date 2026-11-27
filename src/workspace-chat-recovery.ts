@@ -7,9 +7,6 @@ import type { WorkspaceMessage } from "./workspace-runtime.ts";
  */
 export const messageCharacterLimit = 1_048_576;
 
-/** The user message Orchestra records when the user allows edits. */
-export const implementationApprovalText = "I approve the requested implementation.";
-
 /** Counts Unicode characters the way Codex does, so an astral character counts once. */
 export function messageLength(text: string) {
   let count = 0;
@@ -40,15 +37,13 @@ export function messageLengthProblem(text: string, reserved = 0) {
 
 /**
  * The latest user message can be resent when its turn failed and nothing is queued behind it. Answers to product
- * questions and edit approvals have their own flows, so they are not offered.
+ * questions have their own flow, so they are not offered.
  */
 export function retryableMessageId(messages: readonly WorkspaceMessage[]) {
   // With queued follow-ups the runtime already put the failed text back at the head of the paused queue.
   if (messages.some(({ role, state }) => role === "user" && state === "queued")) return undefined;
   const latest = messages.findLast((entry) => entry.role === "user" && entry.state !== "queued");
   if (!latest || latest.state !== "failed" || latest.answersProductQuestionId || !latest.text.trim()) return undefined;
-  if (latest.text === implementationApprovalText &&
-      messages.some(({ implementationRequest }) => implementationRequest?.status === "approved")) return undefined;
   return latest.id;
 }
 

@@ -8,6 +8,7 @@ import { WorkspaceChat } from "./workspace-chat.tsx";
 import { restoredDraft } from "./workspace-chat-recovery.ts";
 import { WorkspaceInbox } from "./workspace-inbox.tsx";
 import type { InboxEvent } from "./workspace-inbox.tsx";
+import { watchEventStream } from "./workspace-event-stream.ts";
 import { clearFlightLog, recordFlightLog, unreadInbox } from "./workspace-flight-log.ts";
 import { nodePositions, workspacePreferences } from "./workspace-preferences.ts";
 import { useDockResizing } from "./use-dock-resizing.tsx";
@@ -113,7 +114,7 @@ function activityFor(agents: Agent[], id: string) {
 
 const inboxStatus = {
   idle: ["Idle", "notice"], working: ["Working", "working"], attention: ["Needs attention", "attention"],
-  "awaiting-confirmation": ["Ready for review", "notice"], done: ["Complete", "done"],
+  done: ["Complete", "done"],
   error: ["Failed", "error"], notice: ["Update available", "notice"],
 } as const;
 
@@ -139,8 +140,15 @@ function flightLogEvents(agents: Agent[]): InboxEvent[] {
   });
 }
 
-/** The server sends a heartbeat every 15 seconds; a stream silent for longer than this is treated as dead. */
-const staleStreamMs = 40_000;
+function usePageVisible() {
+  const [visible, setVisible] = useState(() => document.visibilityState === "visible");
+  useEffect(() => {
+    const update = () => setVisible(document.visibilityState === "visible");
+    document.addEventListener("visibilitychange", update);
+    return () => document.removeEventListener("visibilitychange", update);
+  }, []);
+  return visible;
+}
 
 function Workspace() {
   const [snapshot, setSnapshot] = useState<Snapshot>();
@@ -149,53 +157,21 @@ function Workspace() {
 
   useEffect(() => {
     const timers = new Set<ReturnType<typeof setTimeout>>();
-    let events: EventSource | undefined;
-    let lastEventAt = Date.now();
-    // A stream can stop without an error, for example after the computer sleeps, leaving a stale snapshot
-    // that keeps the composer disabled. Reconnect when the server's heartbeats stop or the stream closes.
-    const connect = () => {
-      events?.close();
-      lastEventAt = Date.now();
-      const stream = new EventSource("/api/events");
-      events = stream;
-      // The browser retries a dropped stream itself; the watchdog replaces one it gave up on.
-      stream.onerror = () => setConnected(false);
-      stream.onmessage = ({ data }) => {
-        lastEventAt = Date.now();
-        setSnapshot(JSON.parse(data) as Snapshot);
-        setConnected(true);
-      };
-      stream.addEventListener("heartbeat", () => { lastEventAt = Date.now(); });
-      stream.addEventListener("agent-signal", (event) => {
-        lastEventAt = Date.now();
-        const signal = JSON.parse((event as MessageEvent).data) as AgentSignal;
+    const stop = watchEventStream({
+      onSnapshot: (data) => setSnapshot(JSON.parse(data) as Snapshot),
+      onConnected: setConnected,
+      onSignal: (data) => {
+        const signal = JSON.parse(data) as AgentSignal;
         setSignals((current) => [...current.slice(-39), signal]);
-        schedule(() => setSignals((current) => current.filter((entry) => entry.id !== signal.id)), 350);
-      });
-    };
-    const schedule = (run: () => void, delay: number) => {
-      const timer = setTimeout(() => {
-        timers.delete(timer);
-        run();
-      }, delay);
-      timers.add(timer);
-    };
-    const reconnectIfStale = () => {
-      if (!events || events.readyState === EventSource.CLOSED || Date.now() - lastEventAt > staleStreamMs) {
-        setConnected(false);
-        connect();
-      }
-    };
-    const onVisible = () => { if (document.visibilityState === "visible") reconnectIfStale(); };
-    connect();
-    const watchdog = setInterval(reconnectIfStale, 5_000);
-    window.addEventListener("online", reconnectIfStale);
-    document.addEventListener("visibilitychange", onVisible);
+        const timer = setTimeout(() => {
+          timers.delete(timer);
+          setSignals((current) => current.filter((entry) => entry.id !== signal.id));
+        }, 350);
+        timers.add(timer);
+      },
+    }, { open: () => new EventSource("/api/events"), network: window, page: document });
     return () => {
-      events?.close();
-      clearInterval(watchdog);
-      window.removeEventListener("online", reconnectIfStale);
-      document.removeEventListener("visibilitychange", onVisible);
+      stop();
       for (const timer of timers) clearTimeout(timer);
     };
   }, []);
@@ -399,7 +375,9 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
   const inboxHasActivity = unseen.unread;
   const title = documentTitle(unseen.alerts);
   useEffect(() => { document.title = title; }, [title]);
-  const selectedRoot = chatOpen && selectedId ? rootOf(selectedId) : undefined;
+  // A chat left open in a background tab has not been seen, so it acknowledges nothing until the page is shown.
+  const pageVisible = usePageVisible();
+  const selectedRoot = chatOpen && selectedId && pageVisible ? rootOf(selectedId) : undefined;
   useEffect(() => {
     if (!selectedRoot || (inboxAcknowledged[selectedRoot] ?? 0) >= flightLog.sequence) return;
     const kept = Object.entries(inboxAcknowledged).filter(([id]) => activeConversationIds.has(id));
@@ -409,10 +387,10 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
   }, [selectedRoot, flightLog.sequence, inboxAcknowledged, preferences, activeConversationIds]);
 
   useEffect(() => {
-    if (!leftOpen || flightLog.sequence === inboxReadSequence) return;
+    if (!leftOpen || !pageVisible || flightLog.sequence === inboxReadSequence) return;
     setInboxReadSequence(flightLog.sequence);
     preferences.writeInboxReadSequence(flightLog.sequence);
-  }, [leftOpen, flightLog.sequence, inboxReadSequence, preferences]);
+  }, [leftOpen, pageVisible, flightLog.sequence, inboxReadSequence, preferences]);
 
   function select(id: string | null, messageId?: string) {
     setNewTaskOpen(false);
@@ -535,9 +513,6 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
       headerActions={diff.open && diff.layout !== "floating"
         ? <DiffViewSwitch tab="chat" onTab={diff.setTab} />
         : <DiffToggle open={diff.showing} onToggle={diff.toggle} />}
-      onApproveImplementation={agent.directTask?.projectIds.length
-        ? (requestId) => send({ type: "approveImplementation", agentId: agent.id, requestId })
-        : undefined}
       onResolveProductQuestion={agent.directTask && !agent.nativeChild
         ? (questionId) => send({ type: "resolveProductQuestion", agentId: agent.id, questionId }) : undefined}
       onResolveCommandApproval={agent.directTask && !agent.nativeChild
@@ -545,12 +520,6 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
         : undefined}
       projectLabel={agent.nativeChild && snapshot.projects.length > 1 ? agent.projectId : undefined}
       repositoryScope={repositories?.length ? repositories : undefined}
-      taskPhase={agent.directTask?.phase}
-      taskDetail={agent.directTask?.detail}
-      delivery={agent.integration?.members?.length ? {
-        members: agent.integration.members,
-        taskChecks: agent.integration.validationEvidence?.summary,
-      } : undefined}
       modelLabel={modelLabel}
       modelPicker={agent.nativeChild || agent.archivedAt !== undefined ? undefined : <ModelPicker settings={agent.modelSettings}
         busy={agent.status === "working" || Boolean(agent.canCancel)} disabled={Boolean(agent.lifecycleBusy)}
