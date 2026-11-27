@@ -14,7 +14,7 @@ import { useDockResizing } from "./use-dock-resizing.tsx";
 import { TaskLifecycleDialog } from "./workspace-task-dialogs.tsx";
 import { NewSessionComposer } from "./workspace-new-session.tsx";
 import { ModelPicker } from "./workspace-model-picker.tsx";
-import { DiffPanel, DiffToggle, useDiffPanel } from "./workspace-diff-panel.tsx";
+import { DiffPanel, DiffToggle, DiffViewSwitch, useDiffPanel } from "./workspace-diff-panel.tsx";
 import type { AgentSignal, WorkspaceRuntime } from "./workspace-runtime.ts";
 import { createTask, send } from "./workspace-commands.ts";
 import "./workspace.css";
@@ -532,7 +532,9 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
       onOpenAgent={(id) => select(id)}
       onRename={agent.nativeChild ? undefined : (name) => send({ type: "rename", agentId: agent.id, name })}
       onLifecycle={agent.nativeChild ? undefined : (action) => requestLifecycle(action, agent.id)}
-      headerActions={<DiffToggle open={diff.showing} onToggle={diff.toggle} />}
+      headerActions={diff.open && diff.layout !== "floating"
+        ? <DiffViewSwitch tab="chat" onTab={diff.setTab} />
+        : <DiffToggle open={diff.showing} onToggle={diff.toggle} />}
       onApproveImplementation={agent.directTask?.projectIds.length
         ? (requestId) => send({ type: "approveImplementation", agentId: agent.id, requestId })
         : undefined}
@@ -624,7 +626,7 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
       </header>
       <main ref={bodyRef} className={`sw-body ${chatOpen ? "is-agent-open" : ""} ${leftOpen ? "is-inbox-open" : ""} ${resizing ? "is-resizing" : ""}`}
         style={{ ...dockStyle, ...diff.style }} data-diff-layout={diff.open ? diff.layout : undefined}
-        data-diff-tab={diff.open && diff.layout !== "floating" ? diff.tab : undefined}>
+>
         {!leftOpen && inboxToggle}
         <aside id="workspace-inbox-window" className="sw-dock sw-left" aria-label="Inbox window" hidden={!leftOpen}>
           <div className="sw-dock-inner">

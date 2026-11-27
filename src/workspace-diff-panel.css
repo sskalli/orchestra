@@ -31,10 +31,6 @@
 .sw-diff-content { display: flex; flex: 1; flex-direction: column; min-height: 0; }
 .sw-diff-content[hidden] { display: none; }
 
-/* Behind the Chat tab only the tab strip stays, above the chat dock. */
-.sw-diff[data-tab="chat"] { bottom: auto; }
-.sw-diff[data-tab="chat"] .sw-diff-tabs { padding-bottom: 4px; }
-.sw-body.is-agent-open[data-diff-tab="chat"] .sw-right { top: calc(var(--window-inset) + 40px); }
 
 .sw-diff-resize { position: absolute; z-index: 4; top: 0; bottom: 0; left: 0; width: 14px; cursor: col-resize; touch-action: none; }
 .sw-diff-resize::after { content: ""; position: absolute; top: 0; bottom: 0; left: 0; width: 2px; }
@@ -42,12 +38,13 @@
 .sw-diff-resize:focus-visible::after { background: #dedede; }
 .sw-diff[data-resizing] { user-select: none; }
 
-.sw-diff-tabs { display: flex; gap: 4px; padding: 6px 12px 0; background: var(--panel-header-bg); }
-.sw-diff-tabs button {
-  padding: 6px 10px; border: 0; border-bottom: 2px solid transparent; background: none;
+.sw-diff-switch { display: inline-flex; flex: none; padding: 2px; gap: 2px; border: 1px solid var(--sw-line); border-radius: 7px; }
+.sw-diff-switch button {
+  padding: 3px 8px; border: 0; border-radius: 5px; background: none;
   color: var(--text-secondary); cursor: pointer; font-size: 11px;
 }
-.sw-diff-tabs button[aria-selected="true"] { color: var(--control-highlight); border-bottom-color: var(--accent-mint); cursor: default; }
+.sw-diff-switch button:hover { color: var(--text-primary); }
+.sw-diff-switch button[aria-selected="true"] { color: var(--control-highlight); background: var(--sw-control-hover); cursor: default; }
 
 .sw-diff-header {
   display: flex; align-items: center; gap: 6px; flex: 0 0 auto; min-height: 52px;
@@ -120,7 +117,5 @@
 
 @media (max-width: 650px) {
   .sw-diff[data-layout="overlay"] { top: var(--window-inset); bottom: var(--window-inset); }
-  .sw-diff[data-layout="overlay"][data-tab="chat"] { top: var(--chat-top); bottom: auto; }
-  .sw-body.is-agent-open[data-diff-tab="chat"] .sw-right { top: calc(var(--chat-top) + 40px); }
   .sw-diff-header { padding-left: 12px; }
 }

@@ -28,6 +28,27 @@ export function DiffToggle({ open, onToggle }: { open: boolean; onToggle: () => 
   </button>;
 }
 
+/**
+ * Switches between the chat and the changes when there is no room to show them side by side. It sits in the
+ * top bar of whichever view is showing, so the two bars look the same.
+ */
+export function DiffViewSwitch({ tab, onTab, focusRef }: {
+  tab: "chat" | "changes"; onTab: (tab: "chat" | "changes") => void; focusRef?: RefObject<HTMLButtonElement | null>;
+}) {
+  return <div className="sw-diff-switch" role="tablist" aria-label="Chat view" onKeyDown={(event) => {
+    if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+    event.preventDefault();
+    onTab(tab === "chat" ? "changes" : "chat");
+  }}>
+    {(["chat", "changes"] as const).map((entry) => <button key={entry} ref={entry === tab ? focusRef : undefined}
+      type="button" role="tab" data-tab={entry} aria-selected={entry === tab} tabIndex={entry === tab ? 0 : -1}
+      aria-controls={entry === "changes" ? `${panelId}-content` : undefined}
+      onClick={() => { if (entry !== tab) onTab(entry); }}>
+      {entry === "chat" ? "Chat" : "Changes"}
+    </button>)}
+  </div>;
+}
+
 type Space = { viewport: number; room: number; chat: number };
 
 /** The chat's own width from its CSS rule (65vw by default, or the size the user dragged it to). */
@@ -509,38 +530,30 @@ export function DiffPanel({ agent, open, layout, tab, onTab, resizing, resizeHan
     </>;
   }
 
-  const covered = layout !== "floating" && tab === "chat";
+  const switched = layout !== "floating";
+  const covered = switched && tab === "chat";
   const changesTab = useRef<HTMLButtonElement>(null);
-  // In the tab layouts the panel covers the chat, so focus moves into it when it appears.
-  const visibleOverChat = open && layout !== "floating" && !covered;
+  // In the switched layouts the panel covers the chat, so focus moves into it when it appears.
+  const visibleOverChat = open && switched && !covered;
   useEffect(() => {
     if (visibleOverChat) changesTab.current?.focus();
   }, [visibleOverChat]);
 
-  return <aside ref={panel} id={panelId} className="sw-diff" data-layout={layout} data-tab={layout === "floating" ? undefined : tab}
-    aria-label="Changes" hidden={!open} data-resizing={resizing || undefined}
+  return <aside ref={panel} id={panelId} className="sw-diff" data-layout={layout}
+    aria-label="Changes" hidden={!open || covered} data-resizing={resizing || undefined}
     onKeyDown={(event) => {
       if (event.key !== "Escape" || event.nativeEvent.isComposing) return;
       event.stopPropagation();
       onClose(true);
     }}>
     <div className="sw-diff-inner">
-      {layout !== "floating" && <div className="sw-diff-tabs" role="tablist" aria-label="Chat view" onKeyDown={(event) => {
-        if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
-        event.preventDefault();
-        const next = tab === "chat" ? "changes" : "chat";
-        onTab(next);
-        (event.currentTarget.querySelector<HTMLElement>(`[data-tab="${next}"]`))?.focus();
-      }}>
-        <button type="button" role="tab" data-tab="chat" aria-selected={covered} tabIndex={covered ? 0 : -1}
-          onClick={() => onTab("chat")}>Chat</button>
-        <button ref={changesTab} type="button" role="tab" data-tab="changes" aria-selected={!covered} tabIndex={covered ? -1 : 0}
-          aria-controls={`${panelId}-content`} onClick={() => onTab("changes")}>Changes</button>
-      </div>}
-      <div id={`${panelId}-content`} className="sw-diff-content" hidden={covered}>
+      <div id={`${panelId}-content`} className="sw-diff-content">
       <header className="sw-diff-header">
+        {switched && <DiffViewSwitch tab="changes" onTab={onTab} focusRef={changesTab} />}
         <div className="sw-diff-title">
-          <h2>{bases.length === 1 ? <>Changes vs base <code>{shortRevision(bases[0])}</code></> : "Changes"}</h2>
+          {/* Beside the Chat/Changes switch the word Changes would repeat it. */}
+          <h2>{bases.length === 1 ? <>{switched ? "vs base" : "Changes vs base"} <code>{shortRevision(bases[0])}</code></>
+            : switched ? null : "Changes"}</h2>
           {files.length > 0 && <span className="sw-diff-summary">
             <Counts additions={additions} deletions={deletions} /> · {files.length} {files.length === 1 ? "file" : "files"}
           </span>}
