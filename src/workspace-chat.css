@@ -139,6 +139,7 @@
   min-width: 0;
   padding: 3px 5px;
   border: 1px solid var(--sw-line);
+  border-radius: 4px;
   background: var(--panel-bg);
   color: var(--sw-text);
   font: inherit;
@@ -333,7 +334,7 @@
 .chat-steer {
   padding: 5px 8px;
   border: 1px solid #545454;
-
+  border-radius: 6px;
   background: var(--panel-header-bg);
   font-size: .72rem !important;
 }
@@ -528,6 +529,7 @@
 .chat-implementation-targets > div {
   padding: 6px 8px;
   border: 1px solid var(--sw-line);
+  border-radius: 8px;
   background: var(--panel-input-bg);
 }
 
@@ -550,6 +552,7 @@
   margin: 6px 0 0;
   padding: 6px 8px;
   border: 1px solid var(--sw-line);
+  border-radius: 8px;
   background: var(--panel-input-bg);
 }
 .chat-command-approval dt { color: var(--text-secondary); }
