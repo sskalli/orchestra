@@ -61,7 +61,7 @@ export function InlineCodeCopy({ transcript }: { transcript: RefObject<HTMLEleme
       const box = code.getBoundingClientRect();
       const frame = wrapper.getBoundingClientRect();
       const above = box.top - frame.top - 22;
-      setTarget((previous) => previous?.text === code.dataset.copy && previous.left === Math.round(box.right - frame.left) ? previous : {
+      setTarget((previous) => previous && previous.text === code.dataset.copy && previous.left === Math.round(box.right - frame.left) ? previous : {
         text: code.dataset.copy ?? "",
         top: Math.round(above >= 0 ? above : box.bottom - frame.top + 2),
         left: Math.round(box.right - frame.left),
