@@ -1,0 +1,261 @@
+import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from "react";
+import type { CSSProperties, KeyboardEvent } from "react";
+import { createPortal } from "react-dom";
+import { LuCheck, LuChevronDown } from "react-icons/lu";
+import { currentModelChoice } from "./workspace-models.ts";
+import type { ModelCatalog, ModelOption, ModelSettings } from "./workspace-models.ts";
+import "./workspace-model-picker.css";
+
+export type ModelChange = { model?: string | null; effort?: string | null };
+
+type LoadedCatalog = ModelCatalog & { loadedAt: number };
+
+const unavailable: ModelCatalog = { models: [], error: "Orchestra could not list models." };
+/** How long a list, or a failure to list, is used before opening the menu fetches it again. */
+const catalogMs = 5 * 60_000;
+const failedCatalogMs = 10_000;
+let catalogRequest: Promise<LoadedCatalog> | undefined;
+let loadedCatalog: LoadedCatalog | undefined;
+
+function stale(catalog: LoadedCatalog | undefined) {
+  if (!catalog) return true;
+  const failed = Boolean(catalog.error) || !catalog.models.length;
+  return Date.now() - catalog.loadedAt > (failed ? failedCatalogMs : catalogMs);
+}
+
+/** Loads the provider's model list for the page, shared by every picker; `force` asks again at once. */
+function loadCatalog(force = false) {
+  if (!force && !stale(loadedCatalog)) return Promise.resolve(loadedCatalog!);
+  catalogRequest ??= fetch("/api/models")
+    .then((response) => response.ok ? response.json() as Promise<ModelCatalog> : unavailable)
+    .catch(() => unavailable)
+    .then((catalog) => {
+      loadedCatalog = {
+        models: Array.isArray(catalog?.models) ? catalog.models : [],
+        ...(catalog?.error ? { error: catalog.error } : {}),
+        ...(catalog?.note ? { note: catalog.note } : {}),
+        loadedAt: Date.now(),
+      };
+      return loadedCatalog;
+    })
+    .finally(() => { catalogRequest = undefined; });
+  return catalogRequest;
+}
+
+function useModelCatalog() {
+  const [catalog, setCatalog] = useState<LoadedCatalog | undefined>(loadedCatalog);
+  const mounted = useRef(true);
+  const reload = useCallback((force = false) => {
+    void loadCatalog(force).then((next) => { if (mounted.current) setCatalog(next); });
+  }, []);
+  useEffect(() => {
+    mounted.current = true;
+    reload();
+    return () => { mounted.current = false; };
+  }, [reload]);
+  return { catalog, reload };
+}
+
+type ModelPickerProps = {
+  /** The task's settings, or the draft choice in the New session dialog. */
+  settings?: ModelSettings;
+  onChange: (change: ModelChange) => Promise<void> | void;
+  disabled?: boolean;
+  /** A turn is running, so a change applies from the next turn. */
+  busy?: boolean;
+  /** Where the menu opens relative to the button. */
+  placement?: "above" | "below";
+  className?: string;
+};
+
+/** A model and reasoning-effort menu. Choices apply to the task's next turn. */
+export function ModelPicker({ settings, onChange, disabled, busy, placement = "above", className }: ModelPickerProps) {
+  const { catalog, reload } = useModelCatalog();
+  const [open, setOpen] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  const [appliesNextTurn, setAppliesNextTurn] = useState(false);
+  const [menuStyle, setMenuStyle] = useState<CSSProperties>();
+  const root = useRef<HTMLDivElement>(null);
+  const button = useRef<HTMLButtonElement>(null);
+  const menu = useRef<HTMLDivElement>(null);
+  const menuId = useId();
+  const busyNoteId = useId();
+
+  const listed = catalog?.models ?? [];
+  const { modelId, option, effort } = currentModelChoice(settings, listed);
+  // A model the provider did not list (a custom provider or an environment override) stays selectable as it is.
+  const models: ModelOption[] = option || !modelId ? listed : [{ id: modelId, label: modelId, efforts: [] }, ...listed];
+  const selected = option ?? models.find((entry) => entry.id === modelId);
+  const efforts = selected?.efforts ?? [];
+  const modelLabel = selected?.label ?? modelId ?? (catalog ? "Default model" : "Model");
+  const label = [modelLabel, effort].filter(Boolean).join(" · ");
+
+  useEffect(() => {
+    if (!busy) setAppliesNextTurn(false);
+  }, [busy]);
+
+  useEffect(() => {
+    if (!open) return;
+    if (stale(catalog)) reload();
+    const dismissOutside = (event: Event) => {
+      if (event.target instanceof Node && !root.current?.contains(event.target) && !menu.current?.contains(event.target)) setOpen(false);
+    };
+    // The menu is fixed to the viewport so the scrolling composer cannot clip it; moving the page closes it.
+    const dismiss = (event: Event) => {
+      if (!(event.target instanceof Node && menu.current?.contains(event.target))) setOpen(false);
+    };
+    document.addEventListener("pointerdown", dismissOutside, true);
+    window.addEventListener("resize", dismiss);
+    window.addEventListener("scroll", dismiss, true);
+    return () => {
+      document.removeEventListener("pointerdown", dismissOutside, true);
+      window.removeEventListener("resize", dismiss);
+      window.removeEventListener("scroll", dismiss, true);
+    };
+  }, [open]);
+
+  function position(side: "above" | "below") {
+    const rect = button.current?.getBoundingClientRect();
+    if (!rect) return;
+    const left = Math.max(8, Math.min(rect.left, window.innerWidth - 288));
+    setMenuStyle(side === "above"
+      ? { left, bottom: window.innerHeight - rect.top + 4, maxHeight: Math.max(120, rect.top - 12) }
+      : { left, top: rect.bottom + 4, maxHeight: Math.max(120, window.innerHeight - rect.bottom - 12) });
+  }
+
+  function toggle() {
+    if (open) return setOpen(false);
+    position(placement);
+    setOpen(true);
+  }
+
+  // Open on the other side when the whole menu fits there but not on the preferred side.
+  useLayoutEffect(() => {
+    const rect = button.current?.getBoundingClientRect();
+    const element = menu.current;
+    if (!open || !rect || !element) return;
+    // The model list scrolls inside the menu, so add up the sections' full heights.
+    const needed = [...element.children].reduce((height, child) => height + child.scrollHeight + 4, 8);
+    const room = { above: rect.top - 12, below: window.innerHeight - rect.bottom - 12 };
+    const other = placement === "above" ? "below" : "above";
+    position(room[placement] < needed && room[other] > room[placement] ? other : placement);
+  }, [open, catalog, placement]);
+
+  useEffect(() => {
+    if (!open) return;
+    const items = menuItems();
+    (items.find((item) => item.getAttribute("aria-checked") === "true") ?? items[0])?.focus({ preventScroll: true });
+  }, [open, catalog]);
+
+  function menuItems() {
+    return [...(menu.current?.querySelectorAll<HTMLElement>('[role="menuitemradio"]') ?? [])];
+  }
+
+  function close() {
+    setOpen(false);
+    button.current?.focus();
+  }
+
+  async function apply(change: ModelChange) {
+    close();
+    // The pill stays enabled and focused while the choice is saved.
+    setSaving(true);
+    setError("");
+    try {
+      await onChange(change);
+      if (busy) setAppliesNextTurn(true);
+    } catch (failure) {
+      setError(failure instanceof Error ? failure.message : "The model choice could not be saved.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  function chooseModel(next: ModelOption) {
+    if (next === selected) return close();
+    const requested = settings?.requestedEffort;
+    // Return to the model's default effort when the new model does not offer the chosen one. Codex keeps the
+    // thread's previous effort when none is sent, so the default is named when the list gives one.
+    void apply({ model: next.id || null,
+      ...(requested && !next.efforts.includes(requested) ? { effort: next.defaultEffort ?? null } : {}) });
+  }
+
+  function chooseEffort(next: string) {
+    if (next === settings?.requestedEffort) return close();
+    void apply({ effort: next });
+  }
+
+  function onKeyDown(event: KeyboardEvent<HTMLDivElement>) {
+    if (event.nativeEvent.isComposing || !open) return;
+    if (event.key === "Escape") {
+      // The menu closes before anything behind it, such as the chat dock.
+      event.stopPropagation();
+      event.preventDefault();
+      close();
+      return;
+    }
+    if (event.key === "Tab") {
+      // Focus returns to the pill, and the browser then moves it on as usual.
+      close();
+      return;
+    }
+    if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return;
+    event.preventDefault();
+    const items = menuItems();
+    if (!items.length) return;
+    const index = items.indexOf(document.activeElement as HTMLElement);
+    const next = event.key === "Home" ? 0 : event.key === "End" ? items.length - 1
+      : event.key === "ArrowDown" ? (index + 1) % items.length : (index - 1 + items.length) % items.length;
+    items[next].focus({ preventScroll: true });
+  }
+
+  return <div ref={root} className={`chat-model-picker chat-model-picker--${placement}${className ? ` ${className}` : ""}`} onKeyDown={onKeyDown}>
+    <button ref={button} type="button" className="chat-model-picker-button" disabled={disabled} aria-busy={saving || undefined}
+      aria-haspopup="menu" aria-expanded={open} aria-controls={menuId}
+      aria-label={`Model and reasoning effort: ${label}`} title={`Model and reasoning effort: ${label}`}
+      onClick={toggle}
+      onKeyDown={(event) => {
+        if (!open && (event.key === "ArrowDown" || event.key === "ArrowUp")) {
+          event.preventDefault();
+          toggle();
+        }
+      }}>
+      <span className="chat-model-picker-label">{label}</span>
+      <LuChevronDown aria-hidden="true" strokeWidth={1.5} />
+    </button>
+    {appliesNextTurn && <span className="chat-model-picker-note" role="status">Applies next turn</span>}
+    {error && <span className="chat-model-picker-error" role="alert" title={error}>{error}</span>}
+    {open && createPortal(<div ref={menu} id={menuId} className="chat-model-picker-menu" role="menu" aria-label="Model and reasoning effort" style={menuStyle}
+      aria-describedby={busy ? busyNoteId : undefined}>
+      {!catalog ? <p className="chat-model-picker-status">Loading models…</p> : <>
+        {catalog.error && <p className="chat-model-picker-status">
+          {catalog.error}{" "}
+          <button type="button" className="chat-model-picker-retry" onClick={() => reload(true)}>Retry</button>
+        </p>}
+        {catalog.note && <p className="chat-model-picker-status">{catalog.note}</p>}
+        {models.length > 0 && <div role="group" aria-label="Model" className="chat-model-picker-models">
+          <p className="chat-model-picker-heading" aria-hidden="true">Model</p>
+          {models.map((entry, index) => <button key={entry.id || "default"} type="button" role="menuitemradio"
+            aria-checked={entry === selected} aria-label={entry.label}
+            aria-describedby={entry.description ? `${menuId}-model-${index}` : undefined}
+            title={entry.description} onClick={() => chooseModel(entry)}>
+            <LuCheck aria-hidden="true" strokeWidth={1.5} className="chat-model-picker-check" />
+            <span>{entry.label}</span>
+            {entry.description && <span id={`${menuId}-model-${index}`} hidden>{entry.description}</span>}
+          </button>)}
+        </div>}
+        {efforts.length > 0 && <div role="group" aria-label="Effort">
+          <p className="chat-model-picker-heading" aria-hidden="true">Effort</p>
+          {efforts.map((entry) => <button key={entry} type="button" role="menuitemradio"
+            aria-checked={entry === effort} aria-label={`${entry}${entry === selected?.defaultEffort ? " (default)" : ""}`}
+            onClick={() => chooseEffort(entry)}>
+            <LuCheck aria-hidden="true" strokeWidth={1.5} className="chat-model-picker-check" />
+            <span>{entry}{entry === selected?.defaultEffort ? " (default)" : ""}</span>
+          </button>)}
+        </div>}
+        {busy && <p id={busyNoteId} className="chat-model-picker-status">Changes apply from the next turn.</p>}
+      </>}
+    </div>, document.body)}
+  </div>;
+}

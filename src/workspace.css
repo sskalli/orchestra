@@ -101,6 +101,17 @@ button:focus-visible { outline: 2px solid #b8bcb8; outline-offset: 3px; }
 .sw-provider--ready > span { background: #68ca84; }
 .sw-provider--error > span { background: #ec7474; }
 .sw-provider--usage-limit > span, .sw-provider--signed-out > span { background: #e5bb68; }
+.sw-storage-issue { display: flex; align-items: center; gap: 5px; min-width: 0; flex: 0 1 auto; color: #e5bb68; font-size: 12px; white-space: nowrap; }
+.sw-storage-issue > svg { flex: none; }
+.sw-storage-issue > span { overflow: hidden; text-overflow: ellipsis; }
+.sw-provider-detail { position: relative; min-width: 0; flex: 0 1 auto; max-width: 40vw; }
+.sw-provider-detail summary { display: flex; align-items: center; gap: 5px; list-style: none; cursor: pointer; padding: 4px; border-radius: 7px; color: #e5bb68; font-size: 12px; white-space: nowrap; }
+.sw-provider-detail summary > svg { flex: none; }
+.sw-provider-detail summary > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.sw-provider-detail summary::-webkit-details-marker { display: none; }
+.sw-provider-detail summary:hover { background: var(--sw-control-hover); }
+.sw-provider-detail summary:focus-visible { outline: 2px solid #b8bcb8; outline-offset: 2px; }
+.sw-provider-detail .sw-usage-details { overflow-wrap: anywhere; white-space: pre-wrap; }
 .sw-usage-menu { position: relative; flex: none; }
 .sw-usage-menu summary { cursor: pointer; font-size: 11px; padding: 4px; border-radius: 7px; }
 .sw-usage-menu summary:hover { background: var(--sw-control-hover); }
@@ -118,7 +129,9 @@ button:focus-visible { outline: 2px solid #b8bcb8; outline-offset: 3px; }
   --map-right-inset: var(--window-inset);
   --panel-gap: 12px;
   --left-width: clamp(200px, var(--left-size, 310px), 50vw);
-  --right-max-width: 75vw;
+  /* Leave enough map beside the chat for the map actions and canvas controls. */
+  --min-map-width: 240px;
+  --right-max-width: min(75vw, calc(100vw - 2 * var(--window-inset) - var(--min-map-width)));
   --right-width: clamp(min(230px, 25vw, var(--right-max-width)), var(--right-size, 65vw), var(--right-max-width));
   --left-max-height: calc(100% - 2 * var(--window-inset));
   --left-height: clamp(min(160px, var(--left-max-height)), var(--left-height-size, 440px), var(--left-max-height));
@@ -172,11 +185,10 @@ button:focus-visible { outline: 2px solid #b8bcb8; outline-offset: 3px; }
 .sw-inbox-toggle { position: absolute; z-index: 7; top: var(--window-inset); left: var(--window-inset); }
 .is-agent-open .swarm-canvas-controls { right: auto; left: var(--window-inset); }
 .sw-loading { height: 100dvh; display: flex; align-items: center; justify-content: center; gap: 14px; color: var(--sw-muted); }
-.sw-banner, .sw-activity {
+.sw-activity {
   position: absolute; z-index: 8; left: 50%; top: 16px; transform: translateX(-50%);
   max-width: calc(100% - 24px); border: 1px solid #484743; border-radius: 7px; background: #242524;
 }
-.sw-banner { padding: 8px 12px; width: max-content; color: #ededed; font-size: 13px; }
 .sw-activity { width: 320px; padding: 8px; box-shadow: 0 12px 40px #0008; }
 .sw-activity header { display: flex; justify-content: space-between; align-items: center; padding: 4px 6px 7px; }
 .sw-activity button { border: 0; background: transparent; text-align: left; border-radius: 7px; padding: 7px; cursor: pointer; }
@@ -203,6 +215,14 @@ button:focus-visible { outline: 2px solid #b8bcb8; outline-offset: 3px; }
   .sw-provider { font-size: 10px; gap: 5px; overflow: hidden; text-overflow: ellipsis; }
   .sw-provider > span { flex: none; }
   .sw-usage-menu summary { font-size: 10px; }
+  .sw-storage-issue > span { display: none; }
+  .sw-provider-detail summary > span { display: none; }
+  .sw-provider { min-width: 0; flex-shrink: 4; }
+  .sw-project-button { max-width: 100%; min-width: 0; overflow: hidden; }
+  .sw-project-button > svg { flex: none; }
+}
+@media (max-width: 420px) {
+  .sw-brand > span { display: none; }
 }
 @media (prefers-reduced-motion: reduce) {
   .sw-dock, .sw-dock-inner { transition: none !important; }

@@ -5,6 +5,8 @@ import type { CSSProperties, KeyboardEvent, PointerEvent, RefObject } from "reac
 import { LuCircleAlert, LuCircleCheck, LuInfo, LuTriangleAlert } from "react-icons/lu";
 import type { IconType } from "react-icons";
 import type { Camera } from "./workspace-preferences.ts";
+import { placeRoots, rootAngle } from "./workspace-map-layout.ts";
+import type { Point } from "./workspace-map-layout.ts";
 import type { AgentSignal } from "./workspace-runtime.ts";
 import "./workspace-canvas.css";
 
@@ -20,7 +22,6 @@ export type CanvasAgent = {
   activity?: string;
 };
 
-type Point = { x: number; y: number };
 type Node = Point & { agent: CanvasAgent; taskRoot: boolean };
 type Team = Point & { id: string; depth: number };
 type Layout = { nodes: Node[]; teams: Team[] };
@@ -35,24 +36,6 @@ const RING_START = 105;
 const RING_STEP = 62;
 const TAU = Math.PI * 2;
 const radiusAt = (depth: number) => RING_START + (depth - 1) * RING_STEP;
-
-function teamCenters(count: number): Point[] {
-  const centers = [{ x: 0, y: 0 }];
-  const spacing = 560;
-  const directions = [[1, 0], [1, -1], [0, -1], [-1, 0], [-1, 1], [0, 1]];
-  for (let ring = 1; centers.length < count; ring++) {
-    let q = -ring;
-    let r = ring;
-    for (const [dq, dr] of directions) {
-      for (let step = 0; step < ring && centers.length < count; step++) {
-        centers.push({ x: spacing * (q + r / 2), y: spacing * Math.sqrt(3) / 2 * r });
-        q += dq;
-        r += dr;
-      }
-    }
-  }
-  return centers;
-}
 
 export function radialLayout(agents: CanvasAgent[], taskPositions: ReadonlyMap<string, Point> = new Map()): Layout {
   const ids = new Set(agents.map((agent) => agent.id));
@@ -71,9 +54,9 @@ export function radialLayout(agents: CanvasAgent[], taskPositions: ReadonlyMap<s
   const nodes: Node[] = [];
   const teams: Team[] = [];
   const visited = new Set<string>();
-  const centers = teamCenters(roots.length);
-  roots.forEach((root, index) => {
-    const team = { ...(taskPositions.get(root.id) ?? centers[index]), id: root.id, depth: 0 };
+  const centers = placeRoots(roots.map(({ id }) => id), taskPositions);
+  roots.forEach((root) => {
+    const team = { ...centers.get(root.id)!, id: root.id, depth: 0 };
     const walk = (agent: CanvasAgent, depth: number, angle: number, sector: number) => {
       if (visited.has(agent.id)) return;
       visited.add(agent.id);
@@ -91,16 +74,22 @@ export function radialLayout(agents: CanvasAgent[], taskPositions: ReadonlyMap<s
         walk(child, depth + 1, angle + (sibling - (siblings.length - 1) / 2) * share, share);
       });
     };
-    walk(root, 0, index % 2 ? Math.PI / 7 : -Math.PI / 3, TAU);
+    walk(root, 0, rootAngle(root.id), TAU);
     teams.push(team);
   });
   return { nodes, teams };
 }
 
+/** A floating changes panel beside the chat also covers the map. */
+function besideChatPanel(chatWindow?: HTMLElement | null) {
+  return chatWindow?.parentElement?.querySelector<HTMLElement>(".sw-diff[data-layout='floating']:not([hidden])");
+}
+
 function visibleMapFrame(rect: DOMRect, chatWindow?: HTMLElement | null) {
   const chat = chatWindow?.getBoundingClientRect();
   if (!chat) return { width: rect.width, height: rect.height };
-  const left = chat.left - rect.left;
+  const panel = besideChatPanel(chatWindow)?.getBoundingClientRect();
+  const left = Math.min(chat.left, panel?.width ? panel.left : Infinity) - rect.left;
   const above = chat.top - rect.top;
   if (left >= 96) return { width: Math.min(rect.width, left), height: rect.height };
   if (above >= 96) return { width: rect.width, height: Math.min(rect.height, above) };
@@ -204,6 +193,8 @@ export function WorkspaceCanvas({
   emptyMessage = "Select + to start a session.",
   initialCamera,
   onCameraChange,
+  initialTaskPositions,
+  onTaskPositionsChange,
 }: {
   agents: CanvasAgent[];
   signals: AgentSignal[];
@@ -214,10 +205,24 @@ export function WorkspaceCanvas({
   emptyMessage?: string;
   initialCamera?: Camera;
   onCameraChange?: (camera: Camera) => void;
+  initialTaskPositions?: Record<string, Point>;
+  onTaskPositionsChange?: (positions: Record<string, Point>) => void;
 }) {
-  const [taskPositions, setTaskPositions] = useState(() => new Map<string, Point>());
+  const [taskPositions, setTaskPositions] = useState(() => new Map(Object.entries(initialTaskPositions ?? {})));
+  const taskPositionsRef = useRef(taskPositions);
+  taskPositionsRef.current = taskPositions;
   const layout = useMemo(() => radialLayout(agents, taskPositions), [agents, taskPositions]);
   const taskDrag = useRef<TaskDrag | null>(null);
+  useEffect(() => {
+    // Keep each root where it first appeared, so archiving or adding tasks never moves the others.
+    const unsaved = layout.teams.filter(({ id }) => !taskPositionsRef.current.has(id));
+    if (!unsaved.length) return;
+    const next = new Map(taskPositionsRef.current);
+    for (const { id, x, y } of unsaved) next.set(id, { x, y });
+    taskPositionsRef.current = next;
+    setTaskPositions(next);
+    onTaskPositionsChange?.(Object.fromEntries(next));
+  }, [layout, onTaskPositionsChange]);
   const suppressTaskClick = useRef<string | null>(null);
   const viewport = useRef<HTMLDivElement>(null);
   const nodes = useRef(new Map<string, HTMLButtonElement>());
@@ -306,12 +311,12 @@ export function WorkspaceCanvas({
       lastFocusedTask.current = taskId;
       manualCamera.current = false;
     }
-    const chatWindow = chatWindowRef.current;
     const frame = () => {
       if (manualCamera.current) return;
       const rect = element.getBoundingClientRect();
       if (!rect.width || !rect.height) return;
-      const { width, height } = visibleMapFrame(rect, chatWindow);
+      // Read the dock lazily: on first mount the canvas commits before the chat's ref is attached.
+      const { width, height } = visibleMapFrame(rect, chatWindowRef.current);
       const radius = taskDepth ? radiusAt(taskDepth) : 36;
       const scale = Math.max(MIN_SCALE, Math.min(
         taskDepth ? 1.15 : 1.35,
@@ -331,8 +336,18 @@ export function WorkspaceCanvas({
     frame();
     const observer = new ResizeObserver(frame);
     observer.observe(element);
-    if (chatWindow) observer.observe(chatWindow);
-    return () => observer.disconnect();
+    const observeDock = () => {
+      const chatWindow = chatWindowRef.current;
+      if (chatWindow) observer.observe(chatWindow);
+      const panel = chatWindow?.parentElement?.querySelector(".sw-diff");
+      if (panel) observer.observe(panel);
+      frame();
+    };
+    const pending = requestAnimationFrame(observeDock);
+    return () => {
+      cancelAnimationFrame(pending);
+      observer.disconnect();
+    };
   }, [chatWindowRef, setCamera, taskId, taskX, taskY, taskDepth]);
 
   const takeCameraControl = useCallback(() => {
@@ -437,14 +452,18 @@ export function WorkspaceCanvas({
     takeCameraControl();
     drag.moved = true;
     suppressTaskClick.current = drag.id;
-    setTaskPositions((previous) => new Map(previous).set(drag.id, {
+    const next = new Map(taskPositionsRef.current).set(drag.id, {
       x: drag.center.x + dx / drag.scale,
       y: drag.center.y + dy / drag.scale,
-    }));
+    });
+    taskPositionsRef.current = next;
+    setTaskPositions(next);
   }
 
   function taskPointerEnd(event: PointerEvent<HTMLButtonElement>) {
-    if (taskDrag.current?.pointerId === event.pointerId) taskDrag.current = null;
+    if (taskDrag.current?.pointerId !== event.pointerId) return;
+    if (taskDrag.current.moved) onTaskPositionsChange?.(Object.fromEntries(taskPositionsRef.current));
+    taskDrag.current = null;
   }
 
   function pointerDown(event: PointerEvent<HTMLDivElement>) {

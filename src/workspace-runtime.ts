@@ -11,13 +11,18 @@ import { ClaudeAppServer, claudeProviderId } from "./claude-app-server.ts";
 import type { Event, Id, Thread, Turn } from "./app-server.ts";
 import { createFeatureWorktree, removeFeatureWorktree } from "./workspace-worktree.ts";
 import { fingerprintCandidate, fingerprintCheckout, fingerprintMemberSnapshots, hasWorktreeChanges, pinApprovedCandidate, pinDirectCandidates, validateCandidateWorktree, type IntegrationMember } from "./workspace-integration.ts";
-import { recordReportedModel, selectModelSettings } from "./workspace-models.ts";
-import type { ModelSettings, ReportedModel } from "./workspace-models.ts";
+import { chooseModelSettings, modelOptions, recordReportedModel, selectModelSettings, turnModelParams, validateEffort, withDefaultEffort } from "./workspace-models.ts";
+import type { ModelCatalog, ModelSettings, ProviderModel, ReportedModel } from "./workspace-models.ts";
+import { knownEfforts } from "./workspace-models.ts";
 import type { SavedSession, workspaceStore } from "./workspace-store.ts";
 import { checkoutBaseline, createRequestedWorktree, removeRequestedWorktree, resolveWriteTargets, validateRequestedWorktree } from "./workspace-write-scope.ts";
 import type { WriteTarget } from "./workspace-write-scope.ts";
 import { defaultProject, workspaceIdentity } from "./workspace-projects.ts";
+import { SkillCatalog, demoSkills, normalizeSkills, skillInputFor } from "./workspace-skills.ts";
+import type { ProviderSkillsResponse, WorkspaceSkill } from "./workspace-skills.ts";
 import type { WorkspaceProject } from "./workspace-projects.ts";
+import { implementationApprovalText, messageLength, messageLengthProblem } from "./workspace-chat-recovery.ts";
+import type { DiffSource } from "./workspace-diff.ts";
 
 export type AgentStatus = "idle" | "working" | "attention" | "awaiting-confirmation" | "done" | "error" | "notice";
 export type AgentRole = "worker";
@@ -64,6 +69,8 @@ export type WorkspaceAgent = {
   directTask?: { projectIds: string[]; phase: "planning" | "implementing" | "blocked" | "ready-for-review"; detail?: string };
   directCandidates?: (Candidate & { projectId: string })[];
   scopedWorktrees?: WorktreeRoot[];
+  /** Configured checkouts this task was approved to edit in place, with the commit checked out at its first approval. */
+  checkoutEdits?: { projectId: string; base: string }[];
   integration?: { id: string; path: string; base: string; fingerprint: string; sources: { agentId: string; submissionId: string; head: string; fingerprint?: string; projectId?: string }[]; members?: IntegrationMember[]; validationEvidence?: CheckResult };
   status: AgentStatus;
   messages: WorkspaceMessage[];
@@ -74,6 +81,8 @@ export type WorkspaceAgent = {
   canCancel?: boolean;
   /** The agent ended its response and its turn stays open for this many background subagents. */
   awaitingSubagents?: number;
+  /** The provider is retrying this task's current turn, for example after a dropped stream. */
+  reconnecting?: string;
   archivedAt?: number;
   lifecycleBusy?: boolean;
   lifecycleBlockedReason?: string;
@@ -90,7 +99,8 @@ export type WorkspaceSnapshot = {
 };
 export type AgentSignal = { id: string; senderId: string; recipientId: string };
 export type WorkspaceCommand =
-  | { type: "createTask"; name: string; projectIds: string[] }
+  | { type: "createTask"; name: string; projectIds: string[]; model?: string | null; effort?: string | null }
+  | { type: "setModel"; agentId: string; model?: string | null; effort?: string | null }
   | { type: "answerProductQuestion"; agentId: string; questionId: string; text: string }
   | { type: "resolveCommandApproval"; agentId: string; requestId: string; decision: ApprovalChoice }
   | { type: "approveImplementation"; agentId: string; requestId: string }
@@ -144,7 +154,17 @@ const legacyImplementationRequestPrefix = "Request implementation: ";
 const legacyQuestionResolutionPrefix = "Resolve product question: ";
 const unresolvedSubagentPrefix = "Subagent activity is unresolved. ";
 const legacyUnresolvedSubagentPrefix = "Codex subagent activity is unresolved. ";
+const maxSkillCatalogs = 16;
+/** How long a Codex turn waits for an unloaded skill list before sending "/name" as plain text. */
+const skillLookupTimeoutMs = 5_000;
 const workspaceThreadConfig = { "features.multi_agent": true, "features.multi_agent_v2": true };
+const modelCatalogMs = 10 * 60_000;
+const modelCatalogFailureMs = 10_000;
+const knownEffort = (effort: string) => knownEfforts.includes(effort);
+const demoModelCatalog: ModelCatalog = { models: [
+  { id: "gpt-5.5", label: "GPT-5.5", efforts: ["low", "medium", "high", "xhigh"], defaultEffort: "medium", isDefault: true },
+  { id: "gpt-5.5-mini", label: "GPT-5.5 mini", efforts: ["low", "medium", "high"], defaultEffort: "medium" },
+] };
 const input = (text: string) => [{ type: "text", text, text_elements: [] }];
 const hasSubmittedMessage = (agent: WorkspaceAgent) =>
   agent.messages.some((entry) => entry.role === "user" && entry.state !== "queued");
@@ -215,6 +235,21 @@ function errorText(error: unknown) {
   return safeError(error instanceof Error ? error.message : error);
 }
 
+/**
+ * Recognizes rate and usage limits. Codex reports an HTTP 429 from a provider as
+ * "exceeded retry limit, last status: 429 Too Many Requests" with structured codexErrorInfo.
+ */
+function limitDetail(engineName: string, detail: string, error: unknown) {
+  const info = (error as { codexErrorInfo?: unknown } | undefined)?.codexErrorInfo;
+  const structured = info === "usageLimitExceeded" || (!!info && typeof info === "object" &&
+    Object.entries(info).some(([kind, value]) => kind === "usageLimitExceeded" ||
+      (value as { httpStatusCode?: unknown } | null)?.httpStatusCode === 429));
+  const phrase = /\b(usage|rate) limit\b|too many requests|insufficient_quota|exceeded your current quota|last status: 429\b/i;
+  if (!structured && !phrase.test(detail)) return undefined;
+  if (/\b(usage|rate) limit\b/i.test(detail)) return detail;
+  return `${engineName} hit a rate or usage limit. ${detail}`;
+}
+
 // Characters that can hide or reorder what the user reviews on an approval card.
 const unsafeDisplayText = /[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u061c\u200b-\u200f\u2028-\u202e\u2060-\u2069\ufeff]/;
 
@@ -272,12 +307,17 @@ function approvalSummary(kind: NonNullable<PermissionApproval["kind"]>) {
 export class WorkspaceRuntime {
   private readonly state: WorkspaceSnapshot;
   private readonly demo: boolean;
+  /** The provider's model list, kept for a while; failures are kept briefly so repeated requests do not pile up. */
+  private modelCatalog?: { catalog: ModelCatalog; expiresAt: number };
+  private modelCatalogRequest?: Promise<ModelCatalog>;
   private readonly providerId: string;
   private readonly projects: WorkspaceProject[];
   private readonly store?: ReturnType<typeof workspaceStore>;
   private storageFailed = false;
   private releaseWorkspaceState?: () => void;
   private storageReady = false;
+  /** The turn whose provider error reported the current usage limit. */
+  private limitTurnId?: string;
   private readonly sessions = new Map<string, AgentSession>();
   private readonly threadSessions = new Map<string, AgentSession>();
   private readonly listeners = new Set<(snapshot: WorkspaceSnapshot) => void>();
@@ -291,6 +331,7 @@ export class WorkspaceRuntime {
   private closed = false;
 
   private readonly createServer?: () => ProviderServer;
+  private readonly skillCatalogs = new Map<string, SkillCatalog>();
 
   constructor({ cwd, projects = [defaultProject(cwd)], demo = false, modelProvider = "openai", engine = "codex", store, createServer }: {
     cwd: string;
@@ -327,6 +368,8 @@ export class WorkspaceRuntime {
   }
 
   private setProvider(state: WorkspaceSnapshot["provider"]["state"], detail?: string) {
+    // The model list is fetched again once the provider is back.
+    if (state !== "ready") delete this.modelCatalog;
     this.state.provider = { name: this.state.provider.name, state, message: detail };
   }
 
@@ -340,9 +383,67 @@ export class WorkspaceRuntime {
     });
   }
 
+  /** Turns run in the task's repositories, or a temporary directory for a general chat, so project skills follow that scope. */
+  private skillCatalog(projectIds: readonly string[]) {
+    const ids = [...new Set(projectIds)];
+    const paths = new Map(this.projects.map(({ id, path }) => [id, path]));
+    if (ids.some((id) => !paths.has(id))) throw new Error("Unknown repository.");
+    // Claude Code loads project skills only from its working directory, the task's first repository;
+    // Codex loads them from every directory, so any order of the same repositories shares one list.
+    const scope = this.engine === "claude" ? ids.slice(0, 1) : ids.sort();
+    const cwds = scope.map((id) => paths.get(id)!);
+    if (!cwds.length) cwds.push(tmpdir());
+    const key = cwds.join("\n");
+    let catalog = this.skillCatalogs.get(key);
+    if (catalog) {
+      // Keep recently used scopes last so the least recently used one is evicted first.
+      this.skillCatalogs.delete(key);
+    } else {
+      catalog = new SkillCatalog(async () => normalizeSkills(
+        await this.server!.call<ProviderSkillsResponse>("skills/list", { cwds }, 30_000)));
+      if (this.skillCatalogs.size >= maxSkillCatalogs) this.skillCatalogs.delete(this.skillCatalogs.keys().next().value!);
+    }
+    this.skillCatalogs.set(key, catalog);
+    return catalog;
+  }
+
+  /** The skills and slash commands the engine offers for "/" autocomplete in a task with these repositories. */
+  async skills(projectIds: readonly string[] = []): Promise<WorkspaceSkill[]> {
+    if (this.demo) return demoSkills;
+    if (!this.server || this.closed) throw new Error(`${this.engineName} is still starting.`);
+    return this.skillCatalog(projectIds).list();
+  }
+
+  /** Message input; Codex also gets the skill item for a leading "/skill", since it does not parse slash names itself. */
+  private async userInput(session: AgentSession, text: string, message: string) {
+    if (this.engine !== "codex" || !message.startsWith("/")) return input(text);
+    const catalog = this.skillCatalog(session.agent.directTask?.projectIds ?? []);
+    // A scope nobody opened the menu for has no list yet; load it rather than silently dropping the skill.
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const skills = catalog.known ?? await Promise.race([
+      catalog.list().catch(() => undefined),
+      new Promise<undefined>((resolve) => { timer = setTimeout(resolve, skillLookupTimeoutMs); }),
+    ]);
+    clearTimeout(timer);
+    return [...input(text), ...skillInputFor(message, skills)];
+  }
+
   usageExport() {
     if (!this.usage) return undefined;
     return { version: 1, modelProvider: this.providerId, ...this.usage.snapshot() };
+  }
+
+  /** Directories the chat may show local images from: the agent's own task worktrees and repositories first, then every other configured repository and task worktree. */
+  imageRoots(agentId?: string) {
+    const agents = this.state.agents;
+    const worktrees = (agent: WorkspaceAgent) => [agent.candidate?.path, ...(agent.directCandidates ?? []).map(({ path }) => path),
+      ...(agent.scopedWorktrees ?? []).map(({ path }) => path), agent.integration?.path];
+    let owner = agents.find(({ id }) => id === agentId);
+    for (let depth = 0; owner?.parentId && depth < 16; depth++) owner = agents.find(({ id }) => id === owner!.parentId) ?? owner;
+    const own = owner ? [...worktrees(owner),
+      ...(owner.directTask?.projectIds ?? []).map((id) => this.projects.find((project) => project.id === id)?.path)] : [];
+    return [...new Set([...own, ...this.projects.map(({ path }) => path), ...agents.flatMap(worktrees)]
+      .filter((path): path is string => typeof path === "string" && path.length > 0))];
   }
 
   private trackUsage(update: (usage: WorkspaceUsage) => void) {
@@ -447,8 +548,10 @@ export class WorkspaceRuntime {
         }
       }
       if (!this.storageFailed && !this.closed) {
-        this.setProvider("ready");
+        if (this.state.provider.state !== "usage-limit") this.setProvider("ready");
         this.releaseSettledCheckouts();
+        // Listing Codex skills is cheap; knowing them lets a typed "/skill" message carry its skill item.
+        if (this.engine === "codex") void this.skills().catch(() => {});
       }
     } catch (error) {
       this.setProvider("error", errorText(error));
@@ -473,7 +576,7 @@ export class WorkspaceRuntime {
 
   async command(command: WorkspaceCommand) {
     if (this.closed) throw new Error("The workspace is closed.");
-    if (command.type === "createTask") return this.createDirectTask(command.name, command.projectIds);
+    if (command.type === "createTask") return this.createDirectTask(command.name, command.projectIds, command);
     const session = this.sessions.get(command.agentId);
     if (!session) throw new Error("This conversation no longer exists.");
     if (session.agent.nativeChild) throw new Error(`Use the owning task to interact with this ${this.engineName} subagent.`);
@@ -486,6 +589,10 @@ export class WorkspaceRuntime {
       return;
     }
     if (!this.isActive(session)) throw new Error("Restore this archived conversation before messaging it.");
+    if (command.type === "setModel") {
+      await this.setModel(session, command);
+      return;
+    }
     if (command.type === "resolveCommandApproval") {
       this.resolveCommandApproval(session, command.requestId, command.decision);
       return;
@@ -516,7 +623,11 @@ export class WorkspaceRuntime {
       throw new Error("Unknown workspace command.");
     }
     const text = typeof command.text === "string" ? command.text.trim() : "";
-    if (!text || text.length > 24_000) throw new Error("Enter a message of 1–24,000 characters.");
+    if (!text) throw new Error("Enter a message.");
+    const question = command.type === "answerProductQuestion"
+      ? session.agent.messages.find(({ id }) => id === command.questionId) : undefined;
+    const tooLong = messageLengthProblem(text, question ? messageLength(this.answerPrefix(question.text)) : 0);
+    if (tooLong) throw new Error(tooLong);
     if (command.type === "steer") {
       await this.steer(session, text);
       return;
@@ -575,7 +686,8 @@ export class WorkspaceRuntime {
     const run = session.run;
     if (!run?.turn || !this.acceptsLiveMessages(session)) return false;
     try {
-      await this.server!.call("turn/steer", { threadId: session.threadId, expectedTurnId: run.turn.id, input: input(text) });
+      const steerInput = await this.userInput(session, text, entry.text);
+      await this.server!.call("turn/steer", { threadId: session.threadId, expectedTurnId: run.turn.id, input: steerInput });
     } catch {
       return false;
     }
@@ -605,7 +717,67 @@ export class WorkspaceRuntime {
     this.publish(false);
   }
 
-  private async createDirectTask(name: string, projectIds: string[]) {
+  /** Applies a model or effort choice; on Codex a cleared effort becomes the new model's default. */
+  private async chooseModel(settings: ModelSettings, change: { model?: string | null; effort?: string | null }) {
+    const needsCatalog = (typeof change.effort === "string" && !knownEffort(change.effort)) ||
+      (this.engine !== "claude" && (change.model !== undefined || change.effort === null));
+    const catalog = needsCatalog ? await this.listModels() : undefined;
+    validateEffort(change.effort, catalog);
+    const next = chooseModelSettings(settings, change);
+    return this.engine === "claude" ? next : withDefaultEffort(next, catalog);
+  }
+
+  private async setModel({ agent }: AgentSession, change: { model?: string | null; effort?: string | null }) {
+    if (agent.lifecycleBusy) throw new Error("Wait for the current task action to finish before changing the model.");
+    const next = await this.chooseModel(agent.modelSettings ?? this.selectModelSettings(), change);
+    if (agent.lifecycleBusy) throw new Error("Wait for the current task action to finish before changing the model.");
+    const previous = agent.modelSettings;
+    agent.modelSettings = next;
+    if (!this.persist()) {
+      agent.modelSettings = previous;
+      this.publish(false);
+      throw new Error("Orchestra could not save the model choice.");
+    }
+    this.publish(false);
+  }
+
+  /**
+   * Lists the models and reasoning efforts the provider offers, for the picker. Concurrent requests share one
+   * provider call; a list is kept for ten minutes and a failure for ten seconds.
+   */
+  async listModels(): Promise<ModelCatalog> {
+    if (this.demo) return demoModelCatalog;
+    if (this.modelCatalog && Date.now() < this.modelCatalog.expiresAt) return this.modelCatalog.catalog;
+    if (!this.server || !this.available) return { models: [], error: `${this.engineName} is not connected.` };
+    const server = this.server;
+    this.modelCatalogRequest ??= (async () => {
+      let catalog: ModelCatalog;
+      let keepMs = modelCatalogMs;
+      // Codex 0.166 ignores modelProvider here and lists its own catalog; newer versions may scope the list.
+      const customProvider = this.engine !== "claude" && this.providerId !== "openai";
+      try {
+        const models: ProviderModel[] = [];
+        let cursor: string | null | undefined;
+        for (let page = 0; page < 10; page += 1) {
+          const response = await server.call<{ data?: ProviderModel[]; nextCursor?: string | null }>("model/list",
+            { includeHidden: false, ...(customProvider ? { modelProvider: this.providerId } : {}), ...(cursor ? { cursor } : {}) });
+          models.push(...(Array.isArray(response?.data) ? response.data : []));
+          cursor = response?.nextCursor;
+          if (!cursor) break;
+        }
+        catalog = { models: modelOptions(models),
+          ...(customProvider ? { note: `Codex may list models that ${this.providerId} does not offer.` } : {}) };
+      } catch (error) {
+        catalog = { models: [], error: `${this.engineName} did not list its models: ${errorText(error)}` };
+        keepMs = modelCatalogFailureMs;
+      }
+      if (this.server === server && this.available) this.modelCatalog = { catalog, expiresAt: Date.now() + keepMs };
+      return catalog;
+    })().finally(() => { this.modelCatalogRequest = undefined; });
+    return this.modelCatalogRequest;
+  }
+
+  private async createDirectTask(name: string, projectIds: string[], choice: { model?: string | null; effort?: string | null } = {}) {
     if (!this.available || this.demo || this.storageFailed) {
       throw new Error(`${this.engineName} must be ready to create a task.`);
     }
@@ -617,9 +789,12 @@ export class WorkspaceRuntime {
     if ([...this.sessions.values()].filter((entry) => this.isActive(entry)).length >= 30) {
       throw new Error("The workspace has reached its 30-session limit.");
     }
+    const modelSettings = choice.model !== undefined || choice.effort !== undefined
+      ? await this.chooseModel(this.selectModelSettings(), choice) : undefined;
     const session = this.createAgent(randomUUID(), title, "worker");
     session.agent.projectId = projectIds[0];
     session.agent.directTask = { projectIds: [...projectIds], phase: "planning" };
+    if (modelSettings) session.agent.modelSettings = modelSettings;
     try {
       await this.attachThread(session);
       if (this.storageFailed) throw new Error("Orchestra could not save the new task.");
@@ -667,14 +842,19 @@ export class WorkspaceRuntime {
       this.removePreparedWorktrees(created);
       throw new Error("Another task is already writing in an approved destination. Wait for it to finish.");
     }
+    if (messageLengthProblem(this.implementationInput(implementationApprovalText, request.text, roots))) {
+      this.removePreparedWorktrees(created);
+      throw new Error(`The implementation request is too long to send to ${this.engineName}. Ask the agent for a shorter request.`);
+    }
 
     const previousWorktrees = agent.scopedWorktrees;
     const previousCandidate = agent.candidate;
     const previousDirectCandidates = agent.directCandidates;
+    const previousCheckoutEdits = agent.checkoutEdits;
     const previousTask = { ...task };
     const previousStatus = agent.status;
     const previousIntegration = agent.integration;
-    const assignment = message("user", "I approve the requested implementation.");
+    const assignment = message("user", implementationApprovalText);
     const reservation = checkoutDirectories.length
       ? { id: assignment.id, pid: process.pid, directories: checkoutDirectories } : undefined;
     const automatic = roots.every(({ mode }) => mode === "automatic");
@@ -685,6 +865,11 @@ export class WorkspaceRuntime {
     } else if (created.length) {
       agent.scopedWorktrees = [...(agent.scopedWorktrees ?? []), ...created];
     }
+    for (const root of roots) {
+      if (root.mode === "checkout" && !agent.checkoutEdits?.some(({ projectId }) => projectId === root.projectId)) {
+        agent.checkoutEdits = [...(agent.checkoutEdits ?? []), { projectId: root.projectId, base: root.base }];
+      }
+    }
     approval.status = "approved";
     task.phase = "implementing";
     delete task.detail;
@@ -694,6 +879,7 @@ export class WorkspaceRuntime {
       agent.scopedWorktrees = previousWorktrees;
       agent.candidate = previousCandidate;
       agent.directCandidates = previousDirectCandidates;
+      agent.checkoutEdits = previousCheckoutEdits;
       agent.directTask = previousTask;
       agent.status = previousStatus;
       agent.integration = previousIntegration;
@@ -750,6 +936,37 @@ export class WorkspaceRuntime {
       if (mode === "worktree") removeRequestedWorktree(project, path, branch, base);
       else removeFeatureWorktree(project, path);
     }
+  }
+
+  /** Where a task's edits can be reviewed. Subagent chats show their task's changes. */
+  diffSources(agentId: string): DiffSource[] | "general" | undefined {
+    let session = this.sessions.get(agentId);
+    if (!session) return undefined;
+    const visited = new Set([agentId]);
+    while (!session.agent.directTask && session.agent.parentId && !visited.has(session.agent.parentId)) {
+      visited.add(session.agent.parentId);
+      const parent = this.sessions.get(session.agent.parentId);
+      if (!parent) break;
+      session = parent;
+    }
+    const { agent } = session;
+    if (!agent.directTask?.projectIds.length) return agent.directTask ? "general" : [];
+    const sources: DiffSource[] = [];
+    const add = (source: DiffSource) => {
+      if (!sources.some(({ path }) => path === source.path)) sources.push(source);
+    };
+    for (const projectId of agent.directTask.projectIds) {
+      const project = this.projects.find(({ id }) => id === projectId);
+      if (!project) continue;
+      const automatic = this.directTaskCandidates(session).find((entry) => entry.projectId === projectId);
+      if (automatic) add({ projectId, mode: "automatic", path: automatic.path, base: automatic.base });
+      for (const entry of agent.scopedWorktrees ?? []) {
+        if (entry.projectId === projectId) add({ projectId, mode: entry.mode, path: entry.path, base: entry.base });
+      }
+      const checkout = agent.checkoutEdits?.find((entry) => entry.projectId === projectId);
+      if (checkout) add({ projectId, mode: "checkout", path: project.path, base: checkout.base });
+    }
+    return sources;
   }
 
   private directTaskCandidates(session: AgentSession) {
@@ -1022,7 +1239,9 @@ export class WorkspaceRuntime {
   }
 
   private get available() {
-    return this.state.provider.state === "ready" || this.state.provider.state === "demo";
+    // A usage limit is reported per turn. Sending again is how the user retries, so it does not block.
+    const { state } = this.state.provider;
+    return state === "ready" || state === "demo" || state === "usage-limit";
   }
 
   private persist() {
@@ -1134,7 +1353,7 @@ export class WorkspaceRuntime {
     for (const { agent, threadId, run, toolVersion, checkoutReservation } of saved) {
       const session = this.createAgent(agent.id, agent.name, "worker", agent.parentId, agent.goal);
       Object.assign(session.agent, agent, {
-        projectId: agent.projectId, canSteer: false, canCancel: false, lifecycleBusy: undefined, awaitingSubagents: undefined,
+        projectId: agent.projectId, canSteer: false, canCancel: false, lifecycleBusy: undefined, awaitingSubagents: undefined, reconnecting: undefined,
       });
       session.threadId = agent.nativeChild || agent.archivedAt || run || hasSubmittedMessage(agent) ? threadId : undefined;
       session.toolVersion = toolVersion;
@@ -1411,9 +1630,11 @@ export class WorkspaceRuntime {
   private answerInput(session: AgentSession, entry: WorkspaceMessage) {
     if (!entry.answersProductQuestionId) return entry.text;
     const question = session.agent.messages.find(({ id }) => id === entry.answersProductQuestionId);
-    return question?.productQuestion
-      ? `My answer to this product decision:\n\n${question.text}\n\nAnswer: ${entry.text}`
-      : entry.text;
+    return question?.productQuestion ? this.answerPrefix(question.text) + entry.text : entry.text;
+  }
+
+  private answerPrefix(question: string) {
+    return `My answer to this product decision:\n\n${question}\n\nAnswer: `;
   }
 
   private implementationInput(text: string, approvedScope: string, roots: ImplementationRoot[]) {
@@ -1465,11 +1686,15 @@ export class WorkspaceRuntime {
       return;
     }
     try {
+      const turnInput = await this.userInput(session, implementation
+        ? this.implementationInput(next.text, implementation.summary, implementation.roots) : this.answerInput(session, next), next.text);
+      if (session.run !== run) return;
       const { turn } = await this.server!.call<{ turn: Turn }>("turn/start", {
         threadId: session.threadId,
         approvalPolicy: "on-request",
+        ...turnModelParams(session.agent.modelSettings),
         ...this.directTaskTurnScope(session, run.implementationRoots),
-        input: input(implementation ? this.implementationInput(next.text, implementation.summary, implementation.roots) : this.answerInput(session, next)),
+        input: turnInput,
         additionalContext: this.pendingQuestionContext(session, next, implementation !== undefined),
       });
       session.freshThread = false;
@@ -1518,10 +1743,12 @@ export class WorkspaceRuntime {
     }
     if (!this.demo) {
       try {
+        const expectedTurnId = session.run!.turn!.id;
+        const steerInput = await this.userInput(session, text, text);
         await this.server!.call("turn/steer", {
         threadId: session.threadId,
-        expectedTurnId: session.run!.turn!.id,
-        input: input(text),
+        expectedTurnId,
+        input: steerInput,
         });
       } catch (error) {
         if (errorText(error) === "Timed out calling turn/steer") {
@@ -1551,6 +1778,7 @@ export class WorkspaceRuntime {
     }
     delete session.run;
     delete session.agent.awaitingSubagents;
+    delete session.agent.reconnecting;
     if (session.agent.canCancel !== undefined) session.agent.canCancel = false;
     for (const entry of session.stream.values()) {
       if (completed) delete entry.state;
@@ -1568,6 +1796,20 @@ export class WorkspaceRuntime {
       session.agent.status = "error";
     }
     if (detail) session.agent.messages.push(message("system", detail, completed || cancelled ? "notice" : "error"));
+    if (!completed && session.queue.length) {
+      // Pause follow-ups, and put a failed plain message back first so Resume queue sends it in order.
+      session.agent.queuePaused = true;
+      const failed = directTaskRun?.message;
+      // Skip it when the outcome is uncertain (recovery pending): the turn may have run, so resending could repeat it.
+      if (!cancelled && !session.recovery && failed && !implementationRoots && failed.state === "failed" &&
+          !failed.answersProductQuestionId) {
+        const again: WorkspaceMessage = { ...message("user", failed.text), state: "queued" };
+        const position = session.agent.messages.indexOf(session.queue[0]);
+        session.queue.unshift(again);
+        if (position >= 0) session.agent.messages.splice(position, 0, again);
+        else session.agent.messages.push(again);
+      }
+    }
     this.releaseSettledCheckouts(session);
     if (!completed || !this.drain(session)) this.update(session);
     return completed;
@@ -1715,6 +1957,10 @@ export class WorkspaceRuntime {
   }
 
   private onEvent({ method, params }: Event) {
+    if (method === "skills/changed") {
+      for (const catalog of this.skillCatalogs.values()) catalog.invalidate();
+      return;
+    }
     const session = params.threadId ? this.threadSessions.get(params.threadId) : undefined;
     if (method === "serverRequest/resolved" && session?.run && params.requestId !== undefined) {
       const approval = session.run.commandApprovals?.get(params.requestId)?.message.commandApproval;
@@ -1751,14 +1997,18 @@ export class WorkspaceRuntime {
     }
     if (method === "error") {
       const detail = errorText(params.error?.message ?? params.message ?? `${this.engineName} reported an error.`);
-      if (/usage.?limit|rate.?limit|quota/i.test(detail)) {
-        this.setProvider("usage-limit", detail);
-        for (const session of this.sessions.values()) session.agent.canSteer = false;
-      } else if (params.willRetry && /reconnect/i.test(detail)) {
-        this.setProvider("connecting", detail);
-        for (const session of this.sessions.values()) session.agent.canSteer = false;
+      const limit = limitDetail(this.engineName, detail, params.error);
+      const run = session?.run;
+      const ownTurn = !!run && (!run.turn || !params.turnId || params.turnId === run.turn.id);
+      if (limit) {
+        // Keep the reason visible; the workspace stays usable and recovers on the next successful turn.
+        this.limitTurnId = typeof params.turnId === "string" ? params.turnId : run?.turn?.id;
+        this.setProvider("usage-limit", limit);
       }
-      this.publish();
+      // A retry belongs to one task's turn; the other tasks and the provider connection stay usable.
+      if (session && ownTurn && params.willRetry) session.agent.reconnecting = detail;
+      else if (session && ownTurn) delete session.agent.reconnecting;
+      this.publish(false);
       return;
     }
     if (!session?.run) return;
@@ -1784,9 +2034,14 @@ export class WorkspaceRuntime {
     if (method === "turn/completed" && params.turn && (!session.run.turn || params.turn.id === session.run.turn.id)) {
       const completed = params.turn.status === "completed";
       const cancelled = params.turn.status === "interrupted";
-      if (completed && this.state.provider.state === "connecting") this.setProvider("ready");
-      else if (!completed && this.state.provider.state === "connecting") {
-        this.setProvider("error", errorText(params.turn.error?.message ?? `${this.engineName} connection failed.`));
+      if (this.state.provider.state === "usage-limit") {
+        // Clear the limit after any successful turn, or when a later turn fails for another reason.
+        const limited = params.turn.id === this.limitTurnId ||
+          !!limitDetail(this.engineName, errorText(params.turn.error?.message ?? ""), params.turn.error);
+        if (completed || (!cancelled && !limited)) {
+          delete this.limitTurnId;
+          this.setProvider("ready");
+        }
       }
       if (cancelled) session.agent.queuePaused = session.queue.length > 0;
       const detail = params.turn.error?.message ?? (cancelled ? "The turn was interrupted." : "The turn did not complete.");
@@ -1794,6 +2049,11 @@ export class WorkspaceRuntime {
       return;
     }
     if (!session.run.turn || params.turnId !== session.run.turn.id) return;
+    if (session.agent.reconnecting && method !== "thread/status/changed") {
+      // Any progress on the turn means the provider retry succeeded.
+      delete session.agent.reconnecting;
+      this.publish(false);
+    }
     if (method === "item/started" && params.item?.type === "fileChange" && params.item.id && Array.isArray(params.item.changes)) {
       const files = params.item.changes.map((change) => change?.path);
       // An unlisted path leaves the request without a reviewable file list, so it is declined.

@@ -1,12 +1,14 @@
 import { OrbitSpinner } from "./workspace-orbit-spinner.tsx";
 import { needsUserInput } from "./workspace-status.ts";
 import { agentAppearance } from "./workspace-agent-appearance.ts";
-import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
-import type { FormEvent, KeyboardEvent, PointerEvent } from "react";
-import Markdown from "react-markdown";
-import type { Components } from "react-markdown";
-import { LuArrowUp, LuCheck, LuCopy, LuEllipsis, LuSquare } from "react-icons/lu";
+import { memo, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
+import type { FormEvent, KeyboardEvent, PointerEvent, ReactNode } from "react";
+import { LuArrowUp, LuEllipsis, LuSquare } from "react-icons/lu";
+import { CopyButton } from "./copy-button.tsx";
+import { ChatMarkdown, InlineCodeCopy } from "./workspace-markdown.tsx";
+import { useComposerAssist } from "./workspace-composer.tsx";
 import type { ApprovalChoice, PermissionApproval, SystemMessageKind, WorkspaceAgent, WorkspaceMessage } from "./workspace-runtime.ts";
+import { messageLengthProblem, OrderedSends, restoredDraft, retryableMessageId } from "./workspace-chat-recovery.ts";
 
 import "./workspace-chat.css";
 
@@ -22,12 +24,16 @@ type ChatProps = {
   taskPhase?: NonNullable<WorkspaceAgent["directTask"]>["phase"];
   taskDetail?: string;
   modelLabel?: string;
+  /** The model and effort picker, shown first in the composer toolbar. */
+  modelPicker?: ReactNode;
   usageLabel?: string;
   draft: string;
   composerHeight?: number;
   onComposerHeightChange: (height: number) => void;
   onDraftInput: (text: string) => void;
   onDraftChange: (text: string) => void;
+  /** Puts unsent texts back in front of the task's stored draft after this chat has closed. */
+  onDraftRestore?: (unsent: string[]) => void;
   onSend: (text: string) => Promise<void> | void;
   onSteer?: (text: string) => Promise<void> | void;
   onCancel?: () => Promise<void>;
@@ -38,8 +44,12 @@ type ChatProps = {
   onOpenAgent?: (id: string) => void;
   onRename?: (name: string) => Promise<void>;
   onLifecycle?: (action: "archive" | "restore" | "delete") => void;
+  /** Extra header controls shown before More actions. */
+  headerActions?: ReactNode;
   disabled?: boolean;
   disabledReason?: string;
+  /** A provider problem that does not block sending, such as a usage limit. */
+  providerNotice?: string;
   focusMessageId?: string;
   focusRequest?: number;
 };
@@ -60,15 +70,6 @@ const systemMessageLabels: Record<SystemMessageKind, string> = {
   warning: "Warning",
   notice: "Notice",
   success: "Success",
-};
-
-const markdownComponents: Components = {
-  a: ({ children, href }) => {
-    if (!href) return children;
-    const external = /^(?:https?:)?\/\//i.test(href);
-    return <a href={href} target={external ? "_blank" : undefined}
-      rel={external ? "noopener noreferrer" : undefined}>{children}</a>;
-  },
 };
 
 const messageTime = new Intl.DateTimeFormat(undefined, { hour: "numeric", minute: "2-digit" });
@@ -182,42 +183,27 @@ function CommandApprovalCard({ approval, requestId, blocked, onResolve }: {
   );
 }
 
-function MessageActions({ message }: { message: WorkspaceMessage }) {
-  const [copyStatus, setCopyStatus] = useState<"copied" | "failed">();
-  const reset = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
-  useEffect(() => () => clearTimeout(reset.current), []);
+// Snapshots replace every message object, so unchanged text skips Markdown parsing, which is slow for long pastes.
+const MessageMarkdown = memo(ChatMarkdown);
 
-  async function copy() {
-    try {
-      await navigator.clipboard.writeText(message.commandApproval?.command ?? message.text);
-      setCopyStatus("copied");
-    } catch {
-      setCopyStatus("failed");
-    }
-    clearTimeout(reset.current);
-    reset.current = setTimeout(() => setCopyStatus(undefined), 2000);
-  }
-
+function MessageActions({ message, onRetry, retrying, retryDisabled }: {
+  message: WorkspaceMessage; onRetry?: () => void; retrying?: boolean; retryDisabled?: boolean;
+}) {
   const time = message.createdAt === undefined ? undefined : new Date(message.createdAt);
-  const copyLabel = copyStatus === "copied" ? "Copied" : "Copy message";
   return (
-    <footer className="chat-message-actions">
+    <footer className={`chat-message-actions${onRetry ? " chat-message-actions--retry" : ""}`}>
+      {onRetry && <button type="button" className="chat-steer" disabled={retryDisabled || retrying}
+        onClick={onRetry}>{retrying ? "Retrying…" : "Retry"}</button>}
       {time && Number.isFinite(time.getTime()) &&
         <time dateTime={time.toISOString()} title={time.toLocaleString()}>{messageTime.format(time)}</time>}
-      <button type="button" className="chat-icon-button" aria-label={copyLabel}
-        title={copyLabel} onClick={() => void copy()}>
-        {copyStatus === "copied" ? <LuCheck aria-hidden="true" /> : <LuCopy aria-hidden="true" />}
-      </button>
-      <span role="status" className={copyStatus === "copied" ? "chat-copy-announcement" : undefined}>
-        {copyStatus === "failed" ? "Could not copy" : copyStatus === "copied" ? "Copied" : ""}
-      </span>
+      <CopyButton text={message.commandApproval?.command ?? message.text} label="Copy message" />
     </footer>
   );
 }
 
 function Conversation({
-  agent, projectLabel, repositoryScope, delivery, taskPhase, taskDetail, modelLabel, usageLabel, draft: initialDraft, composerHeight, onComposerHeightChange, onDraftInput, onDraftChange, onSend, onSteer, onCancel, onResumeQueue, onApproveImplementation, onClose,
-  disabled, disabledReason, focusMessageId, focusRequest, onOpenAgent, onLifecycle, onRename, onResolveCommandApproval,
+  agent, projectLabel, repositoryScope, delivery, taskPhase, taskDetail, modelLabel, usageLabel, draft: initialDraft, composerHeight, onComposerHeightChange, onDraftInput, onDraftChange, onDraftRestore, onSend, onSteer, onCancel, onResumeQueue, onApproveImplementation, onClose,
+  disabled, disabledReason, providerNotice, focusMessageId, focusRequest, onOpenAgent, onLifecycle, onRename, onResolveCommandApproval, modelPicker, headerActions,
 }: ChatProps) {
   const transcript = useRef<HTMLDivElement>(null);
   const actions = useRef<HTMLDivElement>(null);
@@ -258,12 +244,47 @@ function Conversation({
   const composer = useRef<HTMLFormElement>(null);
   const divider = useRef<HTMLDivElement>(null);
   const composerId = useId();
+  const composerInput = useRef<HTMLTextAreaElement>(null);
+  const composerBox = useRef<HTMLDivElement>(null);
   const resizeDrag = useRef<{ pointerId: number; start: number; height: number } | null>(null);
   const resizeFrame = useRef<number | null>(null);
   const pendingHeight = useRef<number | null>(null);
   const composerLimits = useRef({ min: 0, max: 0 });
   const messages = useRef(new Map<string, HTMLElement>());
   const pinToBottom = useRef(true);
+  // Images and diagrams grow after they load; keep a pinned transcript at the bottom when any message resizes.
+  const messageResizes = useRef<ResizeObserver | null>(null);
+  useEffect(() => {
+    const observer = new ResizeObserver(() => {
+      if (pinToBottom.current && transcript.current) transcript.current.scrollTop = transcript.current.scrollHeight;
+    });
+    messageResizes.current = observer;
+    for (const element of messages.current.values()) observer.observe(element);
+    return () => {
+      observer.disconnect();
+      messageResizes.current = null;
+    };
+  }, []);
+  // One stable ref callback per message, so re-rendering a streaming message does not re-register every article.
+  const messageRefs = useRef(new Map<string, (element: HTMLElement | null) => void>());
+  function messageRef(id: string) {
+    let callback = messageRefs.current.get(id);
+    if (!callback) {
+      callback = (element) => {
+        const previous = messages.current.get(id);
+        if (previous && previous !== element) messageResizes.current?.unobserve(previous);
+        if (element) {
+          messages.current.set(id, element);
+          messageResizes.current?.observe(element);
+        } else {
+          messages.current.delete(id);
+          messageRefs.current.delete(id);
+        }
+      };
+      messageRefs.current.set(id, callback);
+    }
+    return callback;
+  }
   const [showJumpToLatest, setShowJumpToLatest] = useState(false);
   const [draft, setDraft] = useState(initialDraft);
   const draftRef = useRef(initialDraft);
@@ -273,7 +294,11 @@ function Conversation({
   const mounted = useRef(true);
   draftChangeRef.current = onDraftChange;
   const [steerEnabled, setSteerEnabled] = useState(false);
-  const [sending, setSending] = useState(false);
+  const [pendingSends, setPendingSends] = useState(0);
+  const sends = useRef(new OrderedSends());
+  const [retrying, setRetrying] = useState(false);
+  const [retriedId, setRetriedId] = useState<string>();
+  const retriedRef = useRef<string>(undefined);
   const [cancelling, setCancelling] = useState(false);
   const [resumingQueue, setResumingQueue] = useState(false);
   const [approvingImplementation, setApprovingImplementation] = useState(false);
@@ -323,7 +348,10 @@ function Conversation({
   const recipient = `${projectLabel ? `${projectLabel} / ` : ""}${displayName}`;
   const archived = agent.archivedAt !== undefined;
   const blocked = Boolean(disabled || archived || agent.lifecycleBusy || agent.nativeChild);
-  const readyToSend = !blocked && !sending && Boolean(draft.trim());
+  const sending = pendingSends > 0;
+  const readyToSend = !blocked && Boolean(draft.trim());
+  const assist = useComposerAssist({ textarea: composerInput, anchor: composerBox, value: draft,
+    projectIds: repositoryScope?.map(({ id }) => id) ?? [], disabled: Boolean(agent.lifecycleBusy) });
   const hasFocusMessage = agent.messages.some((message) => message.id === focusMessageId);
   const shownInConversation = (detail: string) => agent.messages.some((message) =>
     message.role === "system" && Boolean(message.text) && (message.text.includes(detail) || detail.includes(message.text)));
@@ -458,8 +486,12 @@ function Conversation({
     }
   }, [agent.messages]);
 
+  const lastScrollTop = useRef(0);
   function syncPinState(element: HTMLDivElement) {
-    const pinned = element.scrollHeight - element.scrollTop - element.clientHeight < 36;
+    // Scroll events arrive a frame late, so content that grew meanwhile (images, diagrams) must not read as scrolling up.
+    const movedUp = element.scrollTop < lastScrollTop.current - 1;
+    lastScrollTop.current = element.scrollTop;
+    const pinned = element.scrollHeight - element.scrollTop - element.clientHeight < 36 || (pinToBottom.current && !movedUp);
     pinToBottom.current = pinned;
     setShowJumpToLatest(!pinned);
   }
@@ -488,28 +520,62 @@ function Conversation({
 
   async function send(action: (text: string) => Promise<void> | void) {
     if (!readyToSend) return;
-    const submitted = draft;
-    const revision = draftRevision.current;
+    const submitted = draftRef.current;
+    const tooLong = messageLengthProblem(submitted.trim());
+    if (tooLong) {
+      setError(tooLong);
+      return;
+    }
+    // Clear exactly the submitted text now, so typing during the request starts a new message.
+    // Sends run in order; a failure cancels later ones and puts every unsent text back in order.
+    updateDraft("");
     flushDraft();
-    setSending(true);
+    setPendingSends((count) => count + 1);
     setError("");
-    try {
-      await action(submitted);
-      if (mounted.current && draftRevision.current === revision) {
-        updateDraft("");
-      }
-      if (mounted.current) flushDraft();
+    const outcome = await sends.current.run(submitted, action);
+    setPendingSends((count) => count - 1);
+    if (outcome.sent) {
       pinToBottom.current = true;
       const element = transcript.current;
       if (element) element.scrollTop = element.scrollHeight;
-    } catch (failure) {
-      setError(failure instanceof Error ? failure.message : "Message could not be sent.");
-    } finally {
-      setSending(false);
+      return;
     }
+    if (!outcome.restore.length) return;
+    if (!mounted.current) {
+      // Another chat may own the composer now; merge into the stored draft instead of replacing it.
+      onDraftRestore?.(outcome.restore);
+      return;
+    }
+    updateDraft(restoredDraft(outcome.restore, draftRef.current));
+    flushDraft();
+    const failure = outcome.error;
+    setError(failure instanceof Error ? failure.message : "Message could not be sent.");
   }
 
   const steerAction = steerEnabled && agent.canSteer ? onSteer : undefined;
+  const retryId = retryableMessageId(agent.messages);
+  // A retried message stays disabled until the resent message replaces it as the latest one.
+  const retryDisabled = blocked || sending || retrying || retryId === retriedId || Boolean(agent.canCancel) ||
+    agent.queueDepth > 0 || agent.status === "working";
+
+  // Resends the failed message's text as a new message. The draft is left untouched.
+  const retry = useCallback(async (id: string, text: string) => {
+    // The ref also stops clicks that arrive before React re-renders the disabled button.
+    if (retryDisabled || retriedRef.current === id) return;
+    retriedRef.current = id;
+    setRetrying(true);
+    setRetriedId(id);
+    setError("");
+    try {
+      await onSend(text);
+    } catch (failure) {
+      retriedRef.current = undefined;
+      setRetriedId(undefined);
+      setError(failure instanceof Error ? failure.message : "Message could not be sent.");
+    } finally {
+      if (mounted.current) setRetrying(false);
+    }
+  }, [onSend, retryDisabled]);
 
   function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -543,6 +609,7 @@ function Conversation({
   }
 
   function handleComposerKey(event: KeyboardEvent<HTMLTextAreaElement>) {
+    if (assist.handleKey(event)) return;
     if (event.key !== "Enter" || event.shiftKey || event.nativeEvent.isComposing) return;
     event.preventDefault();
     void send(steerAction ?? onSend);
@@ -573,10 +640,7 @@ function Conversation({
             : undefined;
           return (
             <article key={message.id} tabIndex={-1} className={`chat-message chat-message--${message.role}${systemKind ? ` chat-message--${systemKind}` : ""}`}
-              ref={(element) => {
-                if (element) messages.current.set(message.id, element);
-                else messages.current.delete(message.id);
-              }}>
+              ref={messageRef(message.id)}>
               <div className="chat-message-content">
                 <div className="chat-message-header">
                   <strong><span aria-hidden="true">&gt; </span>{sender}:</strong>
@@ -597,7 +661,8 @@ function Conversation({
                 ) : <div className="chat-markdown">
                   {implementationRequest
                     ? <p className="chat-implementation-summary">{message.text}</p>
-                    : <Markdown skipHtml disallowedElements={["img"]} components={markdownComponents}>{message.text}</Markdown>}
+                    : <MessageMarkdown text={message.text} agentId={agent.id} idPrefix={message.id}
+                      streaming={message.state === "streaming"} />}
                   {message.state === "streaming" ? <span className="chat-stream-cursor" aria-label="Responding" /> : null}
                 </div>}
                 {implementationRequest && !!repositoryScope?.length &&
@@ -610,10 +675,11 @@ function Conversation({
                   </button>
                 )}
               </div>
-              <MessageActions message={message} />
+              <MessageActions message={message} retrying={retrying} retryDisabled={retryDisabled}
+                onRetry={message.id === retryId ? () => void retry(message.id, message.text) : undefined} />
             </article>
           );
-        }), [agent.messages, agent.canCancel, agent.queueDepth, approveImplementation, approvingImplementation, archived, blocked, hiddenMessages, onApproveImplementation, onResolveCommandApproval, repositoryScope]);
+        }), [retry, retryDisabled, retryId, retrying, agent.id, agent.messages, agent.canCancel, agent.queueDepth, approveImplementation, approvingImplementation, archived, blocked, hiddenMessages, onApproveImplementation, onResolveCommandApproval, repositoryScope]);
 
   const headerStatus = archived ? "Archived" : agent.lifecycleBusy ? "Updating…" : statusLabels[agent.status];
   const headerTone = archived || agent.lifecycleBusy ? "idle" : agent.status;
@@ -659,6 +725,7 @@ function Conversation({
             </div>
           </>}
         </div>
+        {headerActions}
         <div ref={actions} className="chat-lifecycle-menu">
           <button ref={actionsButton} className="interface-icon-button" type="button" aria-label="More actions"
             title="More actions" aria-expanded={actionsOpen} aria-controls={actionsId}
@@ -727,6 +794,7 @@ function Conversation({
             <p>Review and merge each repository separately.</p>
           </details>}
         </div>
+        <InlineCodeCopy transcript={transcript} />
         {showJumpToLatest && <button className="chat-jump-latest" type="button" onClick={scrollToLatest}
           aria-label="Jump to latest message" title="Jump to latest message">
           <span aria-hidden="true">↓</span>
@@ -743,6 +811,7 @@ function Conversation({
           <div className="chat-queue" aria-live="polite">
             {showWorkingIndicator && <OrbitSpinner />}
             {agent.queueDepth > 0 ? `${agent.queueDepth} queued${agent.queuePaused ? " · paused" : ""}`
+              : agent.reconnecting ? (/^reconnecting/i.test(agent.reconnecting) ? agent.reconnecting : `Reconnecting… ${agent.reconnecting}`)
               : agent.awaitingSubagents ? `Waiting for ${agent.awaitingSubagents} subagent${agent.awaitingSubagents === 1 ? "" : "s"} — your messages reach the agent now.`
               : steerAction ? "Agent is working — sending will steer the current turn." : "Agent is working — new messages will queue."}
             {agent.queuePaused && onResumeQueue && <button className="chat-steer" type="button"
@@ -750,16 +819,24 @@ function Conversation({
           </div>
         ) : null}
         {blocked && disabledReason && !shownInConversation(disabledReason) ? <p className="chat-disabled">{disabledReason}</p> : null}
+        {!blocked && providerNotice ? <p className="chat-disabled chat-provider-notice" role="status">{providerNotice}
+          {retryId && <button type="button" className="chat-steer" disabled={retryDisabled}
+            onClick={() => {
+              const failed = agent.messages.find(({ id }) => id === retryId);
+              if (failed) void retry(failed.id, failed.text);
+            }}>{retrying ? "Trying again…" : "Try again"}</button>}</p> : null}
         {error && !shownInConversation(error) ? <p className="chat-error" role="alert">{error}</p> : null}
-        <div className="chat-composer-box">
+        <div ref={composerBox} className="chat-composer-box">
           <div className="chat-composer-input">
             <span className="chat-input-prompt" aria-hidden="true">&gt;</span>
-            <textarea aria-label={`Message ${recipient}`} enterKeyHint="send"
+            <textarea ref={composerInput} aria-label={`Message ${recipient}`} enterKeyHint="send" {...assist.inputProps}
               placeholder={repositoryScope?.length ? "Ask a question or describe a change" : "Message the agent"} rows={2}
               disabled={Boolean(agent.lifecycleBusy)} value={draft}
-              onChange={(event) => updateDraft(event.target.value)} onBlur={flushDraft} onKeyDown={handleComposerKey} />
+              onChange={(event) => updateDraft(event.target.value)} onBlur={() => { assist.onBlur(); flushDraft(); }} onKeyDown={handleComposerKey} />
+            {assist.menu}
           </div>
           <div className="chat-composer-actions">
+            {modelPicker}
             {onSteer && <label className="chat-steer-toggle">
               <input type="checkbox" role="switch" aria-label="Steer active turn" checked={steerEnabled}
                 onChange={(event) => setSteerEnabled(event.target.checked)} />

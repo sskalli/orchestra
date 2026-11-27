@@ -1,0 +1,133 @@
+.chat-model-picker {
+  position: relative;
+  display: inline-flex;
+  flex: 0 1 auto;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  max-width: 100%;
+}
+
+/* Left-aligned in the composer toolbar; it takes the free space so the pill truncates instead of wrapping. */
+.chat-composer-actions > .chat-model-picker { flex: 1 1 0; }
+/* The container sits on the toolbar, not the composer: size containment would trap the composer's fixed slash menu. */
+.chat-composer-actions { container: chat-composer-actions / inline-size; }
+
+.chat-model-picker .chat-model-picker-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  max-width: 100%;
+  height: 22px;
+  padding: 0 6px 0 8px;
+  border: 1px solid var(--sw-line);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: .67rem;
+  cursor: pointer;
+}
+
+.chat-model-picker .chat-model-picker-button:not(:disabled):hover,
+.chat-model-picker .chat-model-picker-button[aria-expanded="true"] { background: var(--sw-control-hover); color: var(--text-primary); }
+.chat-model-picker .chat-model-picker-button:focus-visible { outline: 1px solid var(--control-highlight); outline-offset: 2px; }
+.chat-model-picker .chat-model-picker-button:disabled { opacity: .55; cursor: default; }
+.chat-model-picker .chat-model-picker-button svg { flex: none; width: 12px; height: 12px; }
+
+.chat-model-picker-label {
+  overflow: hidden;
+  min-width: 0;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat-model-picker-note,
+.chat-model-picker-error {
+  overflow: hidden;
+  min-width: 0;
+  font-size: .62rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat-model-picker-note { flex: none; color: var(--text-muted); }
+.chat-model-picker-error { color: #ff9393; }
+
+.chat-model-picker-menu {
+  position: fixed;
+  z-index: 1000;
+  width: max-content;
+  min-width: 170px;
+  max-width: min(280px, 80vw);
+  /* The model list scrolls on its own so the Effort group stays reachable in a short menu. */
+  display: flex;
+  flex-direction: column;
+  overflow: auto;
+  padding: 3px;
+  border: 1px solid var(--sw-line);
+  border-radius: var(--sw-popover-radius);
+  background: var(--sw-popover-bg);
+  box-shadow: 0 6px 16px #0006;
+  color: var(--sw-text);
+  font-family: "Orchestra Terminal", "IBM Plex Mono", ui-monospace, monospace;
+  font-size: var(--sw-popover-font);
+  line-height: 1.5;
+}
+
+.chat-model-picker-menu > * { flex: none; }
+.chat-model-picker-menu > .chat-model-picker-models { flex: 0 1 auto; min-height: 72px; overflow-y: auto; }
+.chat-model-picker-menu [role="group"] + [role="group"] { margin-top: 3px; padding-top: 3px; border-top: 1px solid var(--sw-line); }
+
+.chat-model-picker-heading,
+.chat-model-picker-status {
+  margin: 0;
+  padding: 4px 8px 2px;
+  color: var(--text-muted);
+  font-size: .62rem;
+}
+
+.chat-model-picker-status { padding-block: 6px; overflow-wrap: anywhere; }
+
+.chat-model-picker-menu [role="menuitemradio"] {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 5px 8px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: .68rem;
+  text-align: left;
+  cursor: pointer;
+}
+
+.chat-model-picker-menu [role="menuitemradio"]:hover,
+.chat-model-picker-menu [role="menuitemradio"]:focus-visible { background: var(--sw-control-hover); color: var(--text-primary); outline: none; }
+.chat-model-picker-menu [role="menuitemradio"][aria-checked="true"] { color: var(--text-primary); }
+.chat-model-picker-check { flex: none; width: 12px; height: 12px; visibility: hidden; }
+[aria-checked="true"] > .chat-model-picker-check { visibility: visible; }
+
+.chat-model-picker-retry {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--text-primary);
+  font: inherit;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+/* In the New session dialog the picker is a field row. */
+.new-session-field .chat-model-picker .chat-model-picker-button { height: 32px; padding-inline: 10px 8px; border-radius: 8px; background: var(--sw-inset); font-size: inherit; }
+.new-session-field .chat-model-picker { justify-self: start; }
+
+/* Narrow chats keep the controls on one row: the pill truncates and the steer label hides (its switch keeps its aria-label). */
+@container chat-composer-actions (max-width: 250px) {
+  .chat-steer-toggle > span { display: none; }
+  .chat-model-picker-note { display: none; }
+}

@@ -1,17 +1,20 @@
-import { LuArchive, LuMessageSquare, LuMessageSquareDot, LuPlus } from "react-icons/lu";
+import { LuArchive, LuMessageSquare, LuMessageSquareDot, LuPlus, LuTriangleAlert } from "react-icons/lu";
 import { agentAppearance } from "./workspace-agent-appearance.ts";
-import { effectiveAgentStatus, needsUserInput } from "./workspace-status.ts";
+import { documentTitle, effectiveAgentStatus, needsUserInput } from "./workspace-status.ts";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { WorkspaceCanvas } from "./workspace-canvas.tsx";
 import { WorkspaceChat } from "./workspace-chat.tsx";
+import { restoredDraft } from "./workspace-chat-recovery.ts";
 import { WorkspaceInbox } from "./workspace-inbox.tsx";
 import type { InboxEvent } from "./workspace-inbox.tsx";
 import { clearFlightLog, recordFlightLog } from "./workspace-flight-log.ts";
-import { workspacePreferences } from "./workspace-preferences.ts";
+import { nodePositions, workspacePreferences } from "./workspace-preferences.ts";
 import { useDockResizing } from "./use-dock-resizing.tsx";
 import { TaskLifecycleDialog } from "./workspace-task-dialogs.tsx";
 import { NewSessionComposer } from "./workspace-new-session.tsx";
+import { ModelPicker } from "./workspace-model-picker.tsx";
+import { DiffPanel, DiffToggle, useDiffPanel } from "./workspace-diff-panel.tsx";
 import type { AgentSignal, WorkspaceRuntime } from "./workspace-runtime.ts";
 import { createTask, send } from "./workspace-commands.ts";
 import "./workspace.css";
@@ -184,6 +187,7 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
   const [preferences] = useState(() => workspacePreferences(snapshot.workspaceKey, mode, snapshot.modelProvider));
   const [saved] = useState(preferences.readView);
   const [savedCamera] = useState(preferences.readCamera);
+  const [savedNodePositions] = useState(preferences.readNodePositions);
   const [composerSizes, setComposerSizes] = useState(preferences.readComposers);
   const composerSizesRef = useRef(composerSizes);
   const [leftOpen, setLeftOpen] = useState(saved.leftOpen);
@@ -205,13 +209,14 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
   const [newTaskId, setNewTaskId] = useState<string>();
   const [lifecycle, setLifecycle] = useState<{ action: "archive" | "restore" | "delete"; agentId: string }>();
   const chatWindowRef = useRef<HTMLElement>(null);
+  const diff = useDiffPanel(preferences, chatWindowRef, !newTaskOpen && agents.some((agent) => agent.id === selectedId), leftOpen);
   const archivedToggle = useRef<HTMLButtonElement>(null);
 
   useEffect(() => {
     const dismissOutside = (event: Event) => {
       const target = event.target;
       if (!(target instanceof Element)) return;
-      document.querySelectorAll<HTMLDetailsElement>(".sw-usage-menu[open]").forEach((menu) => {
+      document.querySelectorAll<HTMLDetailsElement>(".sw-usage-menu[open], .sw-provider-detail[open]").forEach((menu) => {
         if (!menu.contains(target)) menu.open = false;
       });
       if (!target.closest(".sw-project-menu")) setProjectDetails(false);
@@ -220,8 +225,8 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
     const dismissOnEscape = (event: globalThis.KeyboardEvent) => {
       if (event.key !== "Escape") return;
       const target = event.target instanceof Element ? event.target : undefined;
-      const menu = target?.closest<HTMLDetailsElement>(".sw-usage-menu[open]") ??
-        document.querySelector<HTMLDetailsElement>(".sw-usage-menu[open]");
+      const menu = target?.closest<HTMLDetailsElement>(".sw-usage-menu[open], .sw-provider-detail[open]") ??
+        document.querySelector<HTMLDetailsElement>(".sw-usage-menu[open], .sw-provider-detail[open]");
       const projectTrigger = document.querySelector<HTMLButtonElement>(".sw-project-button[aria-expanded='true']");
       if (menu) {
         menu.open = false;
@@ -283,9 +288,15 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
 
   const selected = agents.find((agent) => agent.id === selectedId);
   const dockAgent = agents.find((agent) => agent.id === dockId);
-  const blocked = !connected || !["ready", "demo"].includes(provider.state);
+  // A usage limit is reported in each chat with a way to try again; it never disables sending.
+  const blocked = !connected || !["ready", "demo", "usage-limit"].includes(provider.state);
+  const providerNotice = connected && provider.state === "usage-limit"
+    ? provider.message ?? providerLabel(provider) : undefined;
   const blockedReason = !connected ? "Reconnecting to the local workspace…" : provider.message ?? providerLabel(provider);
   const projectName = project.name;
+  // Workspace-level detail (sign-in steps, save or load failures, usage limits) stays readable without hovering.
+  const providerDetail = connected && provider.message && (blocked || provider.state === "usage-limit") ? provider.message : undefined;
+  const storageMessage = "Browser storage is unavailable. Drafts and layout changes may not survive reload.";
 
   const inboxEvents = useMemo(() => flightLogEvents(agents), [agents]);
 
@@ -311,6 +322,21 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
     activeConversations.has(event.agentId) && !pendingQuestionIds.has(event.id));
 
   useEffect(() => preferences.subscribeFlightLog(setFlightLog), [preferences]);
+
+  const agentIdKey = snapshot.agents.map(({ id }) => id).join("\n");
+  const agentIds = useMemo(() => new Set(agentIdKey ? agentIdKey.split("\n") : []), [agentIdKey]);
+  // Saved tasks are loaded once the engine starts connecting; before that, or after a failed load, the list is empty.
+  const tasksLoaded = connected && !["connecting", "error"].includes(provider.state);
+  useEffect(() => {
+    if (!tasksLoaded) return;
+    // Drop saved positions of tasks that no longer exist.
+    const stored = preferences.readNodePositions();
+    const kept = nodePositions(stored, agentIds);
+    if (Object.keys(kept).length !== Object.keys(stored).length) preferences.writeNodePositions(kept);
+  }, [preferences, agentIds, tasksLoaded]);
+
+  const title = documentTitle(snapshot.agents);
+  useEffect(() => { document.title = title; }, [title]);
 
   useEffect(() => {
     if (!connected || provider.state === "connecting" || (provider.state === "error" && !agents.length)) return;
@@ -354,6 +380,12 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
     const node = restoreFocus && selectedId ? document.querySelector<HTMLElement>(`[data-agent-id="${CSS.escape(selectedId)}"]`) : undefined;
     select(null);
     node?.focus({ preventScroll: true });
+  }
+
+  function closeDiff(restoreFocus: boolean) {
+    diff.setOpen(false);
+    // The chat dock may be inert until the panel stops covering it.
+    if (restoreFocus) setTimeout(() => document.querySelector<HTMLButtonElement>(".sw-right .sw-diff-toggle")?.focus());
   }
 
   function handleStatus(id: string) {
@@ -449,6 +481,7 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
       onOpenAgent={(id) => select(id)}
       onRename={agent.nativeChild ? undefined : (name) => send({ type: "rename", agentId: agent.id, name })}
       onLifecycle={agent.nativeChild ? undefined : (action) => requestLifecycle(action, agent.id)}
+      headerActions={<DiffToggle open={diff.showing} onToggle={diff.toggle} />}
       onApproveImplementation={agent.directTask?.projectIds.length
         ? (requestId) => send({ type: "approveImplementation", agentId: agent.id, requestId })
         : undefined}
@@ -464,6 +497,9 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
         taskChecks: agent.integration.validationEvidence?.summary,
       } : undefined}
       modelLabel={modelLabel}
+      modelPicker={agent.nativeChild || agent.archivedAt !== undefined ? undefined : <ModelPicker settings={agent.modelSettings}
+        busy={agent.status === "working" || Boolean(agent.canCancel)} disabled={Boolean(agent.lifecycleBusy)}
+        onChange={(change) => send({ type: "setModel", agentId: agent.id, ...change })} />}
       usageLabel={usage}
       draft={drafts[agent.id] ?? ""}
       composerHeight={composerSizes.agent}
@@ -478,13 +514,20 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
         draftRevisions.current[agent.id] = (draftRevisions.current[agent.id] ?? 0) + 1;
       }}
       onDraftChange={(value) => setDrafts((current) => ({ ...current, [agent.id]: value }))}
+      onDraftRestore={(unsent) => {
+        const restored = restoredDraft(unsent, draftsRef.current[agent.id] ?? "");
+        draftsRef.current = { ...draftsRef.current, [agent.id]: restored };
+        draftRevisions.current[agent.id] = (draftRevisions.current[agent.id] ?? 0) + 1;
+        setDrafts((current) => ({ ...current, [agent.id]: restored }));
+      }}
       onSend={(value) => submit("send", value)}
       onSteer={(value) => submit("steer", value)}
       onCancel={() => send({ type: "cancel", agentId: agent.id })}
       onResumeQueue={() => send({ type: "resumeQueue", agentId: agent.id })}
       onClose={() => closeAgent(true)}
       disabled={blocked || Boolean(agent.unavailableReason) || Boolean(agent.archivedAt) || Boolean(agent.lifecycleBusy)}
-      disabledReason={agent.unavailableReason ?? (blocked && !(connected && provider.state === "usage-limit") ? blockedReason : undefined)}
+      disabledReason={agent.unavailableReason ?? (blocked ? blockedReason : undefined)}
+      providerNotice={providerNotice}
       focusMessageId={focus.id}
       focusRequest={focus.count}
     />;
@@ -518,10 +561,17 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
           </div>}
         </div>
         <div className={`sw-provider sw-provider--${connected ? provider.state : "connecting"}`} role="status"><span aria-hidden="true" />{connected ? providerLabel(provider) : "Reconnecting"}</div>
+        {providerDetail && <details className="sw-provider-detail">
+          <summary title={providerDetail} aria-label={providerDetail}><LuTriangleAlert aria-hidden="true" /><span>{providerDetail}</span></summary>
+          <div className="sw-usage-details" role="note">{providerDetail}</div>
+        </details>}
+        {storageUnavailable && <span className="sw-storage-issue" role="status" aria-label={storageMessage} title={storageMessage}>
+          <LuTriangleAlert aria-hidden="true" /><span>Storage unavailable</span></span>}
         {snapshot.usage && <WorkspaceUsage usage={snapshot.usage} />}
       </header>
       <main ref={bodyRef} className={`sw-body ${chatOpen ? "is-agent-open" : ""} ${leftOpen ? "is-inbox-open" : ""} ${resizing ? "is-resizing" : ""}`}
-        style={dockStyle}>
+        style={{ ...dockStyle, ...diff.style }} data-diff-layout={diff.open ? diff.layout : undefined}
+        data-diff-tab={diff.open && diff.layout !== "floating" ? diff.tab : undefined}>
         {!leftOpen && inboxToggle}
         <aside id="workspace-inbox-window" className="sw-dock sw-left" aria-label="Inbox window" hidden={!leftOpen}>
           <div className="sw-dock-inner">
@@ -545,9 +595,10 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
               <LuPlus aria-hidden="true" />
             </button>}
           </div>
-          {(blocked || storageUnavailable) && <div className="sw-banner" role="status">{blocked ? blockedReason : "Browser storage is unavailable. Drafts and layout changes may not survive reload."}</div>}
           <WorkspaceCanvas agents={canvasAgents} signals={signals} selectedId={selectedId} onSelect={select} onStatus={handleStatus}
-            chatWindowRef={chatWindowRef} initialCamera={savedCamera} onCameraChange={preferences.writeCamera} />
+            chatWindowRef={chatWindowRef} emptyMessage={blocked ? blockedReason : undefined} initialCamera={savedCamera} onCameraChange={preferences.writeCamera}
+            initialTaskPositions={savedNodePositions} onTaskPositionsChange={(positions) =>
+              preferences.writeNodePositions(nodePositions(positions, agentIds))} />
           {archiveOpen && <section className="sw-archive-list" aria-label="Archived agents" onKeyDown={(event) => {
             if (event.key === "Escape") { event.stopPropagation(); setArchiveOpen(false); archivedToggle.current?.focus(); }
           }}>
@@ -573,10 +624,11 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
           </div>}
         </section>
         <aside ref={chatWindowRef} className="sw-dock sw-right" aria-label={newTaskOpen ? "Session composer" : "Agent chat"}
-          inert={!selected && !newTaskOpen} onKeyDown={(event) => {
+          inert={(!selected && !newTaskOpen) || diff.coversChat} onKeyDown={(event) => {
             if (event.key !== "Escape") return;
             event.stopPropagation();
-            if (!newTaskOpen) closeAgent(true);
+            if (diff.open) closeDiff(true);
+            else if (!newTaskOpen) closeAgent(true);
           }}>
           <div className="sw-dock-inner">
             <div className="sw-conversation" hidden={newTaskOpen}>{dockAgent && renderChat(dockAgent)}</div>
@@ -585,8 +637,11 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
               onSend={(agentId, text) => send({ type: "send", agentId, text })}
               onStarted={setNewTaskId} />
           </div>
-          {(selected || newTaskOpen) && resizeHandle("right")}
+          {/* Beside the changes panel, the panel's own handle sets the split; the chat keeps its saved width for later. */}
+          {(selected || newTaskOpen) && !(diff.open && diff.layout === "floating") && resizeHandle("right")}
         </aside>
+        <DiffPanel agent={dockAgent} open={diff.open} layout={diff.layout} tab={diff.tab} onTab={diff.setTab} resizing={diff.resizing}
+          resizeHandle={diff.resizeHandle} onClose={closeDiff} />
       </main>
       <TaskLifecycleDialog action={lifecycle?.action}
         agentName={lifecycleAgent && agentAppearance(lifecycleAgent).displayName}

@@ -17,3 +17,17 @@ dist/
 *.sqlite-*
 coverage/
 .DS_Store
+
+# Empty placeholders that agent sandboxes mount over protected paths
+/.bash_profile
+/.bashrc
+/.profile
+/.zprofile
+/.zshrc
+/.gitconfig
+/.gitmodules
+/.ripgreprc
+/.idea
+/.vscode
+/.mcp.json
+/.claude/

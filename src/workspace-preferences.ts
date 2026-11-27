@@ -5,7 +5,17 @@ export type Camera = { x: number; y: number; scale: number };
 export type PanelSizes = { left?: number; right?: number; leftHeight?: number; mobileLeft?: number; mobileLeftWidth?: number };
 export type ComposerSizes = { agent?: number };
 
+export type NodePositions = Record<string, { x: number; y: number }>;
+
 type View = { leftOpen: boolean; selectedId: string | null; drafts: Record<string, string> };
+
+// Keeps valid positions, limited to known ids when given.
+export function nodePositions(value: unknown, knownIds?: ReadonlySet<string>): NodePositions {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  return Object.fromEntries(Object.entries(value).flatMap(([id, point]) =>
+    point && Number.isFinite(point.x) && Number.isFinite(point.y) && (!knownIds || knownIds.has(id))
+      ? [[id, { x: point.x, y: point.y }]] : []));
+}
 
 export function workspacePreferences(projectPath: string, mode: "demo" | "codex" | "claude", modelProvider = "openai") {
   const customProvider = mode === "codex" && modelProvider !== "openai";
@@ -92,5 +102,12 @@ export function workspacePreferences(projectPath: string, mode: "demo" | "codex"
           Number.isFinite(value.scale) && value.scale >= 0.3 && value.scale <= 2.5) return value;
     },
     writeCamera: (camera: Camera) => write("camera", camera),
+    readNodePositions: () => nodePositions(read("node-positions")),
+    writeNodePositions: (positions: NodePositions) => write("node-positions", positions),
+    readDiffWidth(): number | undefined {
+      const value = read("diff-width");
+      return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : undefined;
+    },
+    writeDiffWidth: (width: number) => { write("diff-width", width); },
   };
 }

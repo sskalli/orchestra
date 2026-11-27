@@ -3,8 +3,13 @@ import { readFile } from "node:fs/promises";
 import { extname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { WorkspaceRuntime } from "./workspace-runtime.ts";
+import { safeError } from "./app-server.ts";
+import { diffScheduler, taskDiff } from "./workspace-diff.ts";
 import { workspaceStore } from "./workspace-store.ts";
+import { messageCharacterLimit } from "./workspace-chat-recovery.ts";
+import { modelChoice } from "./workspace-models.ts";
 import { parseWorkspaceArgs } from "./workspace-options.ts";
+import { loadLocalImage } from "./workspace-images.ts";
 import { defaultProject, resolveProjects, workspaceIdentity } from "./workspace-projects.ts";
 
 const { live, projectPath, projects: specifiedProjects, provider: modelProvider, engine } = parseWorkspaceArgs(process.argv.slice(2));
@@ -23,21 +28,47 @@ let host = `127.0.0.1:${port}`;
 let origin = `http://${host}`;
 const dist = fileURLToPath(new URL("../dist/", import.meta.url));
 let runtime: WorkspaceRuntime;
+// Concurrent requests for the same task's changes share one Git computation.
+const sharedDiff = diffScheduler((key) => taskDiff(JSON.parse(key)));
+
+// Fits the longest message Codex accepts even when every character is JSON-escaped.
+const commandByteLimit = messageCharacterLimit * 6 + 64 * 1024;
+
+class CommandTooLarge extends Error {}
 
 async function readCommand(request: IncomingMessage) {
   const chunks: Buffer[] = [];
   let size = 0;
-  for await (const chunk of request) {
-    size += chunk.length;
-    if (size > 64 * 1024) throw new Error("Message exceeds the workspace limit");
-    chunks.push(chunk);
+  await new Promise<void>((resolve, reject) => {
+    const onData = (chunk: Buffer) => {
+      size += chunk.length;
+      // Keep reading a slightly oversized body so the client receives the error instead of a reset connection.
+      if (size <= commandByteLimit) chunks.push(chunk);
+      else if (size > commandByteLimit * 2) {
+        // Stop reading without destroying the socket, so the 413 response can still be written.
+        request.off("data", onData);
+        request.pause();
+        resolve();
+      }
+    };
+    request.on("data", onData);
+    request.once("end", () => resolve());
+    request.once("error", reject);
+  });
+  if (size > commandByteLimit) {
+    throw new CommandTooLarge(`Message is too long (more than ${messageCharacterLimit.toLocaleString("en-US")} characters).`);
   }
   const command = JSON.parse(Buffer.concat(chunks).toString("utf8"));
   if (command?.type === "createTask" && typeof command.name === "string" &&
       Array.isArray(command.projectIds) && command.projectIds.every((id: unknown) => typeof id === "string")) {
-    return { type: "createTask" as const, name: command.name, projectIds: command.projectIds as string[] };
+    return { type: "createTask" as const, name: command.name, projectIds: command.projectIds as string[],
+      model: modelChoice(command.model, "model"), effort: modelChoice(command.effort, "reasoning effort") };
   }
   if (typeof command?.agentId !== "string") throw new Error("Invalid agent");
+  if (command.type === "setModel") {
+    return { type: "setModel" as const, agentId: command.agentId,
+      model: modelChoice(command.model, "model"), effort: modelChoice(command.effort, "reasoning effort") };
+  }
   if (command.type === "rename" && typeof command.name === "string") {
     return { type: "rename" as const, agentId: command.agentId, name: command.name };
   }
@@ -87,6 +118,64 @@ const server = createServer(async (request, response) => {
       .end(JSON.stringify(usage, null, 2));
     return;
   }
+  if (request.method === "GET" && path === "/api/image") {
+    // Other sites must not load these images, or they could probe which files exist.
+    response.setHeader("Cross-Origin-Resource-Policy", "same-origin");
+    const query = new URL(request.url ?? "", origin).searchParams;
+    const image = await loadLocalImage(query.get("path") ?? "", runtime.imageRoots(query.get("agent") ?? undefined));
+    if (!("body" in image)) {
+      response.writeHead(image.status, { "Content-Type": "text/plain; charset=utf-8" }).end(image.reason);
+      return;
+    }
+    // Revalidate every time so a screenshot regenerated under the same name shows its new contents.
+    const headers = { "Cache-Control": "no-cache", ETag: image.etag };
+    if (request.headers["if-none-match"] === image.etag) {
+      response.writeHead(304, headers).end();
+      return;
+    }
+    // A sandboxed, script-free policy keeps an SVG opened in its own tab from acting on the workspace origin.
+    response.writeHead(200, {
+      ...headers,
+      "Content-Type": image.type,
+      "Content-Security-Policy": "default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline'; sandbox; frame-ancestors 'none'",
+    }).end(image.body);
+    return;
+  }
+  if (request.method === "GET" && path === "/api/skills") {
+    const engineName = runtime.snapshot().provider.name === "claude" ? "Claude" : "Codex";
+    try {
+      const projects = new URL(request.url ?? "/", origin).searchParams.get("projects");
+      // Skill file paths stay on the server; the composer only needs names and descriptions.
+      const skills = (await runtime.skills(projects ? projects.split(",") : []))
+        .map(({ name, description, argumentHint }) => ({ name, description, argumentHint }));
+      response.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({ engine: engineName, skills }));
+    } catch (error) {
+      response.writeHead(503, { "Content-Type": "application/json" })
+        .end(JSON.stringify({ engine: engineName, error: error instanceof Error ? safeError(error.message) : "Skills could not be listed." }));
+    }
+    return;
+  }
+  if (request.method === "GET" && path === "/api/models") {
+    const catalog = await runtime.listModels();
+    response.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(catalog));
+    return;
+  }
+  if (request.method === "GET" && path === "/api/diff") {
+    const agentId = new URL(request.url ?? "", origin).searchParams.get("agentId");
+    const sources = agentId ? runtime.diffSources(agentId) : undefined;
+    if (!sources) {
+      response.writeHead(404, { "Content-Type": "application/json" }).end(JSON.stringify({ error: "This task is unavailable." }));
+      return;
+    }
+    try {
+      const diff = await sharedDiff(JSON.stringify(sources));
+      if (!response.destroyed) response.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(diff));
+    } catch (error) {
+      response.writeHead(500, { "Content-Type": "application/json" })
+        .end(JSON.stringify({ error: error instanceof Error ? safeError(error.message) : "Orchestra could not compute the changes." }));
+    }
+    return;
+  }
   if (request.method === "GET" && path === "/api/events") {
     response.writeHead(200, { "Content-Type": "text/event-stream" });
     const publish = (snapshot: ReturnType<typeof runtime.snapshot>) => response.write(`data: ${JSON.stringify(snapshot)}\n\n`);
@@ -113,7 +202,8 @@ const server = createServer(async (request, response) => {
         response.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({ agentId: result }));
       } else response.writeHead(204).end();
     } catch (error) {
-      response.writeHead(400, { "Content-Type": "application/json" })
+      const tooLarge = error instanceof CommandTooLarge;
+      response.writeHead(tooLarge ? 413 : 400, { "Content-Type": "application/json", ...(tooLarge ? { Connection: "close" } : {}) })
         .end(JSON.stringify({ error: error instanceof Error ? error.message : "Workspace command failed" }));
     }
     return;
