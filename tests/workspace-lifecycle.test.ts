@@ -392,3 +392,15 @@ test("agent replies without visible text are not kept as messages", async () => 
     assert.deepEqual(replies.map(({ text }) => text), ["Found it."]);
   } finally { await runtime.close(); }
 });
+
+test("the user can mark a pending product question resolved by hand", async () => {
+  const { runtime, pm } = fixture();
+  try {
+    pm.agent.messages.push({ id: "question", role: "system", kind: "action", text: "Product decision from Study: Ship it?",
+      productQuestion: { status: "pending" } });
+    const question = () => runtime.snapshot().agents.find(({ id }) => id === "pm")!.messages.find(({ id }) => id === "question");
+    await runtime.command({ type: "resolveProductQuestion", agentId: "pm", questionId: "question" });
+    assert.deepEqual(question()?.productQuestion, { status: "resolved" });
+    await assert.rejects(runtime.command({ type: "resolveProductQuestion", agentId: "pm", questionId: "question" }), /no longer pending/);
+  } finally { await runtime.close(); }
+});

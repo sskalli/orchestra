@@ -39,6 +39,8 @@ type ChatProps = {
   onCancel?: () => Promise<void>;
   onApproveImplementation?: (requestId: string) => Promise<void>;
   onResolveCommandApproval?: ResolveCommandApproval;
+  /** Clears a pending product question by hand. */
+  onResolveProductQuestion?: (questionId: string) => Promise<void>;
   onResumeQueue?: () => Promise<void>;
   onClose: () => void;
   onOpenAgent?: (id: string) => void;
@@ -208,7 +210,7 @@ function MessageActions({ message, onRetry, retrying, retryDisabled }: {
 
 function Conversation({
   agent, projectLabel, repositoryScope, delivery, taskPhase, taskDetail, modelLabel, usageLabel, draft: initialDraft, composerHeight, onComposerHeightChange, onDraftInput, onDraftChange, onDraftRestore, onSend, onSteer, onCancel, onResumeQueue, onApproveImplementation, onClose,
-  disabled, disabledReason, providerNotice, focusMessageId, focusRequest, onOpenAgent, onLifecycle, onRename, onResolveCommandApproval, modelPicker, headerActions,
+  disabled, disabledReason, providerNotice, focusMessageId, focusRequest, onOpenAgent, onLifecycle, onRename, onResolveCommandApproval, onResolveProductQuestion, modelPicker, headerActions,
 }: ChatProps) {
   const transcript = useRef<HTMLDivElement>(null);
   const actions = useRef<HTMLDivElement>(null);
@@ -633,11 +635,25 @@ function Conversation({
     }
   }, [agent.canCancel, agent.queueDepth, approvingImplementation, blocked, onApproveImplementation]);
 
+  const [resolvingQuestion, setResolvingQuestion] = useState<string>();
+  const resolveQuestion = useCallback(async (questionId: string) => {
+    if (!onResolveProductQuestion || blocked) return;
+    setResolvingQuestion(questionId);
+    setError("");
+    try {
+      await onResolveProductQuestion(questionId);
+    } catch (failure) {
+      setError(failure instanceof Error ? failure.message : "Could not resolve the question.");
+    } finally {
+      setResolvingQuestion(undefined);
+    }
+  }, [blocked, onResolveProductQuestion]);
+
   const messageElements = useMemo(() => agent.messages.filter((message) =>
     needsUserInput(message) || (!hiddenMessages.has(message.id) && !isBlankReply(message))).map((message) => {
           const sender = message.role === "user" ? "USER" : message.role === "system" ? "SYSTEM" : "COMPUTER";
           const { productQuestion, implementationRequest, commandApproval } = message;
-          const resolved = productQuestion?.status === "answered" ||
+          const resolved = (productQuestion && productQuestion.status !== "pending") ||
             (implementationRequest && implementationRequest.status !== "pending") ||
             (commandApproval && commandApproval.status !== "pending");
           const systemKind = message.role === "system"
@@ -650,7 +666,8 @@ function Conversation({
                 <div className="chat-message-header">
                   <strong><span aria-hidden="true">&gt; </span>{sender}:</strong>
                   {productQuestion ? (
-                    <span className="chat-message-state">{productQuestion.status === "pending" ? "Question awaiting answer" : "Question answered"}</span>
+                    <span className="chat-message-state">{productQuestion.status === "pending" ? "Question awaiting answer"
+                      : productQuestion.status === "resolved" ? "Question resolved" : "Question answered"}</span>
                   ) : implementationRequest ? <span className="chat-message-state">
                     {implementationRequest.status === "pending" ? "Awaiting your permission to edit files"
                       : implementationRequest.status === "approved" ? "Edits allowed" : "Request superseded"}
@@ -672,6 +689,13 @@ function Conversation({
                 </div>}
                 {implementationRequest && !!repositoryScope?.length &&
                   <ImplementationTargets request={implementationRequest} repositories={repositoryScope} />}
+                {productQuestion?.status === "pending" && onResolveProductQuestion && !archived && (
+                  <button className="chat-steer" type="button" disabled={blocked || resolvingQuestion === message.id}
+                    title="Clear this question if you already answered it or it no longer applies."
+                    onClick={() => void resolveQuestion(message.id)}>
+                    {resolvingQuestion === message.id ? "Resolving…" : "Mark resolved"}
+                  </button>
+                )}
                 {implementationRequest?.status === "pending" && onApproveImplementation && !archived && (
                   <button className="chat-steer" type="button"
                     disabled={blocked || approvingImplementation || Boolean(agent.canCancel) || agent.queueDepth > 0}
@@ -684,7 +708,7 @@ function Conversation({
                 onRetry={message.id === retryId ? () => void retry(message.id, message.text) : undefined} />
             </article>
           );
-        }), [retry, retryDisabled, retryId, retrying, agent.id, agent.messages, agent.canCancel, agent.queueDepth, approveImplementation, approvingImplementation, archived, blocked, hiddenMessages, onApproveImplementation, onResolveCommandApproval, repositoryScope]);
+        }), [retry, retryDisabled, retryId, retrying, agent.id, agent.messages, agent.canCancel, agent.queueDepth, approveImplementation, approvingImplementation, archived, blocked, hiddenMessages, onApproveImplementation, onResolveCommandApproval, onResolveProductQuestion, resolveQuestion, resolvingQuestion, repositoryScope]);
 
   const headerStatus = archived ? "Archived" : agent.lifecycleBusy ? "Updating…" : statusLabels[agent.status];
   const headerTone = archived || agent.lifecycleBusy ? "idle" : agent.status;

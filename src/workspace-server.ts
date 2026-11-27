@@ -87,6 +87,9 @@ async function readCommand(request: IncomingMessage) {
       typeof command.text === "string" && command.text.trim()) {
     return { type: "answerProductQuestion" as const, agentId: command.agentId, questionId: command.questionId, text: command.text };
   }
+  if (command.type === "resolveProductQuestion" && typeof command.questionId === "string" && command.questionId) {
+    return { type: "resolveProductQuestion" as const, agentId: command.agentId, questionId: command.questionId };
+  }
   if (command.type === "resolveCommandApproval" && typeof command.requestId === "string" && command.requestId &&
       (command.decision === "approve" || command.decision === "approveForSession" || command.decision === "decline")) {
     return { type: "resolveCommandApproval" as const, agentId: command.agentId, requestId: command.requestId,

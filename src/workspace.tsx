@@ -518,6 +518,8 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
       onApproveImplementation={agent.directTask?.projectIds.length
         ? (requestId) => send({ type: "approveImplementation", agentId: agent.id, requestId })
         : undefined}
+      onResolveProductQuestion={agent.directTask && !agent.nativeChild
+        ? (questionId) => send({ type: "resolveProductQuestion", agentId: agent.id, questionId }) : undefined}
       onResolveCommandApproval={agent.directTask && !agent.nativeChild
         ? (requestId, decision) => send({ type: "resolveCommandApproval", agentId: agent.id, requestId, decision })
         : undefined}
