@@ -107,7 +107,7 @@ export function NewSessionComposer({ open, blocked, projects, onCancel, onCreate
           onChange={(event) => setName(event.target.value)} disabled={pending || Boolean(createdId)} />
       </label>
       <div className="new-session-field" role="group" aria-label="Model">Model
-        <ModelPicker placement="below" disabled={pending || Boolean(createdId)}
+        <ModelPicker placement="below" newTask disabled={pending || Boolean(createdId)}
           settings={chooseModelSettings({ source: "provider-default" }, modelChoice)}
           onChange={(change) => setModelChoice((current) => ({ ...current, ...change }))} />
       </div>

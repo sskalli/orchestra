@@ -70,3 +70,20 @@ test("efforts are checked against known levels and the provider list, and Codex 
   const unlisted = { requestedModel: "other", source: "override" as const };
   assert.equal(withDefaultEffort(unlisted, catalog), unlisted);
 });
+
+test("new tasks start at medium effort when the model offers it", async () => {
+  const { newTaskEffortFor, currentModelChoice } = await import("../src/workspace-models.ts");
+  const catalog = { models: [
+    { id: "big", label: "Big", efforts: ["low", "medium", "high"], defaultEffort: "high", isDefault: true },
+    { id: "small", label: "Small", efforts: ["low"], defaultEffort: "low" },
+    { id: "plain", label: "Plain", efforts: [] },
+  ] };
+  assert.equal(newTaskEffortFor(undefined, catalog), "medium");
+  assert.equal(newTaskEffortFor("small", catalog), undefined);
+  assert.equal(newTaskEffortFor("plain", catalog), undefined);
+  assert.equal(newTaskEffortFor("unlisted", catalog), "medium", "an unlisted custom model still gets the default");
+  assert.equal(newTaskEffortFor(undefined, { models: [] }), "medium");
+  assert.equal(currentModelChoice({ source: "provider-default" }, catalog.models, true).effort, "medium");
+  assert.equal(currentModelChoice({ source: "provider-default" }, catalog.models).effort, "high");
+  assert.equal(currentModelChoice({ requestedModel: "small", source: "override" }, catalog.models, true).effort, "low");
+});
