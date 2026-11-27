@@ -8,7 +8,7 @@ import { WorkspaceChat } from "./workspace-chat.tsx";
 import { restoredDraft } from "./workspace-chat-recovery.ts";
 import { WorkspaceInbox } from "./workspace-inbox.tsx";
 import type { InboxEvent } from "./workspace-inbox.tsx";
-import { clearFlightLog, recordFlightLog } from "./workspace-flight-log.ts";
+import { clearFlightLog, recordFlightLog, unreadInbox } from "./workspace-flight-log.ts";
 import { nodePositions, workspacePreferences } from "./workspace-preferences.ts";
 import { useDockResizing } from "./use-dock-resizing.tsx";
 import { TaskLifecycleDialog } from "./workspace-task-dialogs.tsx";
@@ -225,6 +225,7 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
   const composerSizesRef = useRef(composerSizes);
   const [leftOpen, setLeftOpen] = useState(saved.leftOpen);
   const [inboxReadSequence, setInboxReadSequence] = useState(preferences.readInboxReadSequence);
+  const [inboxAcknowledged, setInboxAcknowledged] = useState(preferences.readInboxAcknowledged);
   const [flightLog, setFlightLog] = useState(preferences.readFlightLog);
   const [selectedId, setSelectedId] = useState(saved.selectedId);
   const [dockId, setDockId] = useState(saved.selectedId);
@@ -368,8 +369,6 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
     if (Object.keys(kept).length !== Object.keys(stored).length) preferences.writeNodePositions(kept);
   }, [preferences, agentIds, tasksLoaded]);
 
-  const title = documentTitle(snapshot.agents);
-  useEffect(() => { document.title = title; }, [title]);
 
   useEffect(() => {
     if (!connected || provider.state === "connecting" || (provider.state === "error" && !agents.length)) return;
@@ -384,11 +383,30 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
     setFlightLog(next);
   }
 
-  const hasUnreadNotifications = flightLog.entries.some(({ sequence, event }) =>
-    sequence > inboxReadSequence && activeConversations.has(event.agentId));
-  const hasUnresolvedRequest = agents.some((agent) => !agent.archivedAt &&
-    (agent.status === "attention" || agent.status === "awaiting-confirmation" || agent.directTask?.phase === "ready-for-review"));
-  const inboxHasActivity = hasUnreadNotifications || hasUnresolvedRequest;
+  // Notifications stay in the Inbox until cleared, but count as seen once the Inbox or the task's chat was open.
+  const rootOf = (agentId: string) => {
+    let owner = activeConversations.get(agentId);
+    const visited = new Set<string>();
+    while (owner?.parentId && !visited.has(owner.id) && activeConversations.has(owner.parentId)) {
+      visited.add(owner.id);
+      owner = activeConversations.get(owner.parentId);
+    }
+    return owner?.id;
+  };
+  const activeConversationKey = [...activeConversations.keys()].join("\n");
+  const activeConversationIds = useMemo(() => new Set(activeConversationKey.split("\n")), [activeConversationKey]);
+  const unseen = unreadInbox(flightLog, inboxReadSequence, inboxAcknowledged, rootOf);
+  const inboxHasActivity = unseen.unread;
+  const title = documentTitle(unseen.alerts);
+  useEffect(() => { document.title = title; }, [title]);
+  const selectedRoot = chatOpen && selectedId ? rootOf(selectedId) : undefined;
+  useEffect(() => {
+    if (!selectedRoot || (inboxAcknowledged[selectedRoot] ?? 0) >= flightLog.sequence) return;
+    const kept = Object.entries(inboxAcknowledged).filter(([id]) => activeConversationIds.has(id));
+    const next = { ...Object.fromEntries(kept), [selectedRoot]: flightLog.sequence };
+    setInboxAcknowledged(next);
+    preferences.writeInboxAcknowledged(next);
+  }, [selectedRoot, flightLog.sequence, inboxAcknowledged, preferences, activeConversationIds]);
 
   useEffect(() => {
     if (!leftOpen || flightLog.sequence === inboxReadSequence) return;

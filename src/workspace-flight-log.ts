@@ -87,3 +87,17 @@ export function clearFlightLog(log: FlightLog, pendingQuestionIds: ReadonlySet<s
   });
   return { ...log, entries };
 }
+
+/** What the Inbox has not shown the user yet: an entry is seen once the Inbox was open or its task's chat was open. */
+export function unreadInbox(log: FlightLog, readSequence: number, acknowledged: Readonly<Record<string, number>>,
+  rootOf: (agentId: string) => string | undefined) {
+  const alertedRoots = new Set<string>();
+  let unread = false;
+  for (const { sequence, event } of log.entries) {
+    const root = rootOf(event.agentId);
+    if (!root || sequence <= readSequence || sequence <= (acknowledged[root] ?? 0)) continue;
+    unread = true;
+    if (event.tone === "attention" || event.tone === "error") alertedRoots.add(root);
+  }
+  return { unread, alerts: alertedRoots.size };
+}
