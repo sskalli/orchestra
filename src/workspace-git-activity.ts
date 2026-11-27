@@ -74,3 +74,43 @@ export function describeGitActivity(repository: string, label: string, before: R
   }
   return notes;
 }
+
+export type WorktreeEntry = { path: string; head?: string; branch?: string };
+
+/** The repository's linked worktrees, without the main checkout. */
+export function listLinkedWorktrees(repository: string): WorktreeEntry[] | undefined {
+  try {
+    const entries: WorktreeEntry[] = [];
+    for (const block of git(repository, "worktree", "list", "--porcelain").split("\n\n")) {
+      const entry: WorktreeEntry = { path: "" };
+      for (const line of block.split("\n")) {
+        if (line.startsWith("worktree ")) entry.path = line.slice("worktree ".length);
+        else if (line.startsWith("HEAD ")) entry.head = line.slice("HEAD ".length);
+        else if (line.startsWith("branch ")) entry.branch = line.slice("branch refs/heads/".length);
+      }
+      if (entry.path) entries.push(entry);
+    }
+    // Git lists the main worktree first.
+    return entries.slice(1);
+  } catch {
+    return undefined;
+  }
+}
+
+/** The commit a checkout has checked out, if Git can read it. */
+export function headRevision(repository: string) {
+  try {
+    return git(repository, "rev-parse", "--verify", "HEAD^{commit}").trim() || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Where a worktree's branch left the line it was cut from, to diff only its own changes. */
+export function forkPoint(repository: string, head: string, from: string) {
+  try {
+    return git(repository, "merge-base", head, from).trim() || undefined;
+  } catch {
+    return undefined;
+  }
+}

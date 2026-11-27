@@ -11,7 +11,7 @@ import { ClaudeAppServer, claudeProviderId } from "./claude-app-server.ts";
 import type { Event, Id, Thread, Turn } from "./app-server.ts";
 import { createFeatureWorktree, removeFeatureWorktree } from "./workspace-worktree.ts";
 import { fingerprintCandidate, fingerprintCheckout, fingerprintMemberSnapshots, hasWorktreeChanges, pinApprovedCandidate, pinDirectCandidates, validateCandidateWorktree, type IntegrationMember } from "./workspace-integration.ts";
-import { describeGitActivity, gitCommonDirectory, readRefState } from "./workspace-git-activity.ts";
+import { describeGitActivity, forkPoint, gitCommonDirectory, headRevision, listLinkedWorktrees, readRefState } from "./workspace-git-activity.ts";
 import type { RefState } from "./workspace-git-activity.ts";
 import { chooseModelSettings, modelOptions, newTaskEffortFor, recordReportedModel, selectModelSettings, turnModelParams, validateEffort, withDefaultEffort } from "./workspace-models.ts";
 import type { ModelCatalog, ModelSettings, ProviderModel, ReportedModel } from "./workspace-models.ts";
@@ -76,6 +76,10 @@ export type WorkspaceAgent = {
   checkoutEdits?: { projectId: string; base: string }[];
   /** Folders outside the selected repositories that the user allowed this task to write for the rest of the task. */
   grantedPaths?: string[];
+  /** The commit each selected checkout had when the task first ran, to show the task's edits there. */
+  checkoutBases?: { projectId: string; base: string }[];
+  /** Linked worktrees that appeared while the task or its subagents ran, with the commit each one forked from. */
+  taskWorktrees?: { projectId: string; path: string; base: string; branch?: string }[];
   integration?: { id: string; path: string; base: string; fingerprint: string; sources: { agentId: string; submissionId: string; head: string; fingerprint?: string; projectId?: string }[]; members?: IntegrationMember[]; validationEvidence?: CheckResult };
   status: AgentStatus;
   messages: WorkspaceMessage[];
@@ -152,6 +156,8 @@ type AgentSession = {
   stream: Map<string, WorkspaceMessage>;
   /** Branch tips of the task's repositories when Orchestra last looked, to report commits and pushes. */
   gitRefs?: Map<string, RefState>;
+  /** Linked worktree paths of each repository at turn start, to notice the ones the task creates. */
+  gitWorktrees?: Map<string, Set<string>>;
 };
 
 const questionResolutionToolVersion = 14;
@@ -987,8 +993,12 @@ export class WorkspaceRuntime {
       for (const entry of agent.scopedWorktrees ?? []) {
         if (entry.projectId === projectId) add({ projectId, mode: entry.mode, path: entry.path, base: entry.base });
       }
-      const checkout = agent.checkoutEdits?.find((entry) => entry.projectId === projectId);
+      const checkout = agent.checkoutEdits?.find((entry) => entry.projectId === projectId) ??
+        agent.checkoutBases?.find((entry) => entry.projectId === projectId);
       if (checkout) add({ projectId, mode: "checkout", path: project.path, base: checkout.base });
+      for (const entry of agent.taskWorktrees ?? []) {
+        if (entry.projectId === projectId) add({ projectId, mode: "worktree", path: entry.path, base: entry.base, ...(entry.branch ? { branch: entry.branch } : {}) });
+      }
     }
     return sources;
   }
@@ -1817,6 +1827,7 @@ export class WorkspaceRuntime {
     this.settleStream(session, completed ? undefined : cancelled ? "cancelled" : "failed");
     this.reportGitActivity(session);
     delete session.gitRefs;
+    delete session.gitWorktrees;
     session.agent.status = completed ? "done" : cancelled ? "idle" : "error";
     if (directTaskRun && implementationRoots) {
       completed = this.finishDirectTask(session, implementationRoots, directTaskRun.check,
@@ -2325,17 +2336,44 @@ export class WorkspaceRuntime {
   /** Remembers the repositories' branch tips so later readings can report commits and pushes made since. */
   private watchGitActivity(session: AgentSession) {
     const refs = new Map<string, RefState>();
-    for (const projectId of session.agent.directTask?.projectIds ?? []) {
-      const state = readRefState(this.projectById(projectId).path);
+    const worktrees = new Map<string, Set<string>>();
+    const { agent } = session;
+    for (const projectId of agent.directTask?.projectIds ?? []) {
+      const repository = this.projectById(projectId).path;
+      const state = readRefState(repository);
       if (state) refs.set(projectId, state);
+      const linked = listLinkedWorktrees(repository);
+      if (linked) worktrees.set(projectId, new Set(linked.map(({ path }) => path)));
+      const head = agent.checkoutBases?.some((entry) => entry.projectId === projectId) ? undefined : headRevision(repository);
+      if (head) agent.checkoutBases = [...(agent.checkoutBases ?? []), { projectId, base: head }];
     }
     session.gitRefs = refs;
+    session.gitWorktrees = worktrees;
+  }
+
+  /** Records linked worktrees created since the turn started, so the changes panel can show them. */
+  private recordTaskWorktrees(session: AgentSession) {
+    let found = false;
+    for (const [projectId, known] of session.gitWorktrees ?? []) {
+      const repository = this.projectById(projectId).path;
+      const from = session.agent.checkoutBases?.find((entry) => entry.projectId === projectId)?.base;
+      for (const { path, head, branch } of listLinkedWorktrees(repository) ?? []) {
+        if (known.has(path) || !head) continue;
+        known.add(path);
+        if (session.agent.taskWorktrees?.some((entry) => entry.path === path)) continue;
+        const base = (from && forkPoint(repository, head, from)) || head;
+        session.agent.taskWorktrees = [...(session.agent.taskWorktrees ?? []),
+          { projectId, path, base, ...(branch ? { branch } : {}) }];
+        found = true;
+      }
+    }
+    return found;
   }
 
   /** Reports new commits and pushed branches in the task's repositories since the last reading. */
   private reportGitActivity(session: AgentSession) {
-    if (!session.gitRefs?.size) return false;
-    let reported = false;
+    let reported = this.recordTaskWorktrees(session);
+    if (!session.gitRefs?.size) return reported;
     for (const [projectId, before] of session.gitRefs) {
       const repository = this.projectById(projectId).path;
       const after = readRefState(repository);

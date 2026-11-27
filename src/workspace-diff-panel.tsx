@@ -10,11 +10,11 @@ export type DiffLayout = "floating" | "tabs" | "overlay";
 type DiffPreferences = { readDiffWidth(): number | undefined; writeDiffWidth(width: number): void };
 
 const panelId = "workspace-diff-panel";
-const minWidth = 320;
-const defaultWidth = 520;
+const minWidth = 280;
+const defaultWidth = 380;
 /** Narrowest the chat is squeezed to so the panel fits beside it. */
-const minChatWidth = 420;
-const minMap = 300;
+const minChatWidth = 340;
+const minMap = 120;
 
 function clamp(value: number, min: number, max: number) {
   return Math.max(min, Math.min(max, value));
@@ -39,9 +39,9 @@ function naturalChatWidth(body: HTMLElement) {
 
 /**
  * Open state, placement and width of the changes panel. On desktop widths the panel sits right of the
- * chat and pushes it left, narrowing the chat (to 420px at least) while open. When even the minimum
- * widths do not fit, or the Inbox is open, it becomes a Changes tab over the chat dock; phones get a
- * full-screen version of those tabs.
+ * chat and pushes it left, narrowing the chat (to 340px at least) while open, also beside an open Inbox.
+ * Only when even the minimum widths do not fit does it become a Changes tab over the chat dock; phones
+ * get a full-screen version of those tabs.
  */
 export function useDiffPanel(preferences: DiffPreferences, chatWindowRef: RefObject<HTMLElement | null>,
   active: boolean, inboxOpen: boolean) {
@@ -65,8 +65,11 @@ export function useDiffPanel(preferences: DiffPreferences, chatWindowRef: RefObj
       const style = getComputedStyle(body);
       const inset = parseFloat(style.getPropertyValue("--window-inset")) || 0;
       const gap = parseFloat(style.getPropertyValue("--panel-gap")) || 0;
-      const next = { viewport: window.innerWidth, room: body.getBoundingClientRect().width - 2 * inset - gap - minMap,
-        chat: naturalChatWidth(body) };
+      // An open Inbox takes its own width and a gap out of the room for the chat and the panel.
+      const inbox = document.getElementById("workspace-inbox-window");
+      const inboxWidth = inboxOpen && inbox && !inbox.hidden ? inbox.getBoundingClientRect().width + gap : 0;
+      const next = { viewport: window.innerWidth,
+        room: body.getBoundingClientRect().width - 2 * inset - gap - Math.max(minMap, inboxWidth), chat: naturalChatWidth(body) };
       setSpace((current) => current.viewport === next.viewport && current.room === next.room && current.chat === next.chat
         ? current : next);
     };
@@ -74,6 +77,8 @@ export function useDiffPanel(preferences: DiffPreferences, chatWindowRef: RefObj
     const observer = new ResizeObserver(measure);
     observer.observe(body);
     observer.observe(chat);
+    const inbox = document.getElementById("workspace-inbox-window");
+    if (inbox) observer.observe(inbox);
     // The chat's own resize handle changes this inline size.
     const mutations = new MutationObserver(measure);
     mutations.observe(body, { attributes: true, attributeFilter: ["style"] });
@@ -83,10 +88,10 @@ export function useDiffPanel(preferences: DiffPreferences, chatWindowRef: RefObj
       mutations.disconnect();
       window.removeEventListener("resize", measure);
     };
-  }, [chatWindowRef]);
+  }, [chatWindowRef, inboxOpen]);
 
   const fits = space.room >= Math.min(space.chat, minChatWidth) + minWidth;
-  const layout: DiffLayout = space.viewport <= 650 ? "overlay" : inboxOpen || !fits ? "tabs" : "floating";
+  const layout: DiffLayout = space.viewport <= 650 ? "overlay" : !fits ? "tabs" : "floating";
   // When the window or the Inbox takes away the room beside the chat, keep the chat in front instead of
   // covering it (and the composer focus) with the Changes tab.
   const [previousLayout, setPreviousLayout] = useState(layout);
@@ -198,11 +203,18 @@ function splitPath(path: string) {
 }
 
 function fileKey(group: DiffGroup, file: DiffFile) {
-  return `${group.projectId}\0${group.mode}\0${file.path}`;
+  return `${groupKey(group)}\0${file.path}`;
 }
 
 function groupKey(group: DiffGroup) {
-  return `${group.projectId}\0${group.mode}`;
+  return `${group.projectId}\0${group.mode}\0${group.path ?? ""}`;
+}
+
+/** Names a location in the source picker and group titles: the local checkout, or a worktree by its branch or folder. */
+function groupLabel(group: DiffGroup) {
+  if (group.mode === "checkout") return `${group.projectId} · local checkout`;
+  const place = group.branch ?? (group.path ? splitPath(group.path).name : undefined);
+  return `${group.projectId} · ${place ? `${modeNames[group.mode]} ${place}` : modeNames[group.mode]}`;
 }
 
 function Counts({ additions, deletions }: { additions: number; deletions: number }) {
@@ -271,7 +283,7 @@ function visibleItems(groups: DiffGroup[], collapsed: Set<string>) {
   };
   groups.forEach((group, index) => {
     const key = groupKey(group);
-    items.push({ key, level: 1, setSize: groups.length, position: index + 1, kind: "repo", name: group.projectId, group,
+    items.push({ key, level: 1, setSize: groups.length, position: index + 1, kind: "repo", name: groups.length > 1 ? groupLabel(group) : group.projectId, group,
       additions: group.files.reduce((sum, file) => sum + file.additions, 0),
       deletions: group.files.reduce((sum, file) => sum + file.deletions, 0), expandable: true });
     if (!collapsed.has(key)) walk(groupTree(group), group, 2, key);
@@ -381,6 +393,7 @@ export function DiffPanel({ agent, open, layout, tab, onTab, resizing, resizeHan
   const [refreshing, setRefreshing] = useState(false);
   const [selected, setSelected] = useState<string>();
   const [collapsed, setCollapsed] = useState(() => new Set<string>());
+  const [source, setSource] = useState("all");
   const request = useRef(0);
   const scroller = useRef<HTMLDivElement>(null);
   const panel = useRef<HTMLElement>(null);
@@ -411,6 +424,7 @@ export function DiffPanel({ agent, open, layout, tab, onTab, resizing, resizeHan
   useEffect(() => {
     setSelected(undefined);
     setCollapsed(new Set());
+    setSource("all");
     setState({ status: "loading" });
     request.current++;
   }, [agentId]);
@@ -421,7 +435,8 @@ export function DiffPanel({ agent, open, layout, tab, onTab, resizing, resizeHan
 
   // Refresh when a turn finishes or the task's edit destinations change, keeping the scroll position.
   const isRunning = agent ? running(agent) : false;
-  const destinations = agent ? JSON.stringify([agent.candidate, agent.directCandidates, agent.scopedWorktrees, agent.checkoutEdits, agent.directTask?.phase]) : "";
+  const destinations = agent ? JSON.stringify([agent.candidate, agent.directCandidates, agent.scopedWorktrees, agent.checkoutEdits,
+    agent.checkoutBases, agent.taskWorktrees, agent.directTask?.phase]) : "";
   const previous = useRef({ isRunning, destinations });
   useEffect(() => {
     const before = previous.current;
@@ -438,7 +453,10 @@ export function DiffPanel({ agent, open, layout, tab, onTab, resizing, resizeHan
   }
 
   const diff = state.status === "ready" ? state.diff : undefined;
-  const groups = diff?.kind === "repositories" ? diff.groups : [];
+  const allGroups = diff?.kind === "repositories" ? diff.groups : [];
+  // With several locations, the picker shows one of them or all of them.
+  const picked = allGroups.find((group) => groupKey(group) === source);
+  const groups = picked ? [picked] : allGroups;
   const files = groups.flatMap(({ files }) => files);
   const additions = files.reduce((sum, file) => sum + file.additions, 0);
   const deletions = files.reduce((sum, file) => sum + file.deletions, 0);
@@ -457,7 +475,7 @@ export function DiffPanel({ agent, open, layout, tab, onTab, resizing, resizeHan
   else if (!groups.length) {
     // Tasks saved before Orchestra recorded checkout edits can have approved edits with nothing to diff.
     const approved = agent?.messages.some(({ implementationRequest }) => implementationRequest?.status === "approved");
-    body = <p className="sw-diff-empty">{approved ? "No reviewable changes for this task." : "No changes yet. Edits start after Allow edits."}</p>;
+    body = <p className="sw-diff-empty">{approved ? "No reviewable changes for this task." : "No changes yet."}</p>;
   }
   else {
     if (files.length) {
@@ -472,13 +490,13 @@ export function DiffPanel({ agent, open, layout, tab, onTab, resizing, resizeHan
     }
     body = <>
       {failed.length > 0 && <div className="sw-diff-failure" role="alert">
-        {failed.map((group) => <p key={groupKey(group)}><strong>{group.projectId}</strong>: {group.error}</p>)}
+        {failed.map((group) => <p key={groupKey(group)}><strong>{groupLabel(group)}</strong>: {group.error}</p>)}
         <button type="button" className="sw-diff-button" onClick={() => void load(false)}>Retry</button>
       </div>}
       {!files.length && !failed.length && <p className="sw-diff-empty">No changes yet.</p>}
       {groups.map((group) => group.files.length > 0 && <div key={groupKey(group)} className="sw-diff-group">
         {groups.length > 1 && <h3 className="sw-diff-group-title">
-          {group.projectId} <span className="sw-diff-dir">· {modeNames[group.mode]} · base <code>{shortRevision(group.base)}</code></span>
+          {groupLabel(group)} <span className="sw-diff-dir">· base <code>{shortRevision(group.base)}</code></span>
         </h3>}
         {group.notices?.map((notice) => <p key={notice} className="sw-diff-note">{notice}</p>)}
         {group.mode === "checkout" && <p className="sw-diff-note">Edits in the local checkout. Uncommitted changes that were already there are included.</p>}
@@ -532,6 +550,19 @@ export function DiffPanel({ agent, open, layout, tab, onTab, resizing, resizeHan
           <LuX aria-hidden="true" strokeWidth={1.5} />
         </button>
       </header>
+      {allGroups.length > 1 && <label className="sw-diff-source">
+        <span>Location</span>
+        <select value={picked ? source : "all"} onChange={(event) => {
+          setSource(event.target.value);
+          setSelected(undefined);
+          scroller.current?.scrollTo({ top: 0 });
+        }}>
+          <option value="all">All locations ({allGroups.reduce((sum, group) => sum + group.files.length, 0)} files)</option>
+          {allGroups.map((group) => <option key={groupKey(group)} value={groupKey(group)}>
+            {groupLabel(group)} ({group.error ? "unavailable" : `${group.files.length} ${group.files.length === 1 ? "file" : "files"}`})
+          </option>)}
+        </select>
+      </label>}
       {tree && <div className="sw-diff-tree-wrap">{tree}</div>}
       <div ref={scroller} className="sw-diff-body" aria-busy={refreshing}>{body}</div>
       </div>

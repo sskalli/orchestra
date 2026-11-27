@@ -1,6 +1,6 @@
 /* Changes panel: floats right of the chat and pushes it left, or becomes a tab over the chat dock when space is short. */
 .sw-body {
-  --diff-width: var(--diff-size, 520px);
+  --diff-width: var(--diff-size, 380px);
   --diff-add-bg: #263d2d;
   --diff-del-bg: #482729;
   --diff-add-text: #68ca84;
@@ -68,6 +68,8 @@
 .sw-diff-status[data-status="D"] { color: var(--diff-del-text); }
 .sw-diff-status[data-status="R"], .sw-diff-status[data-status="C"] { color: #7fb2ff; }
 
+.sw-diff-source { display: flex; align-items: center; gap: 8px; padding: 6px 14px; border-bottom: 1px solid var(--sw-line); font-size: .72rem; color: var(--text-secondary); }
+.sw-diff-source select { flex: 1; min-width: 0; padding: 4px 6px; border: 1px solid var(--sw-line); border-radius: 6px; background: var(--panel-input-bg); color: var(--sw-text); font: inherit; }
 .sw-diff-tree-wrap { flex: 0 1 auto; max-height: 35%; overflow: auto; border-bottom: 1px solid var(--sw-line); padding: 4px 0; }
 .sw-diff-tree, .sw-diff-tree ul { list-style: none; margin: 0; padding: 0; }
 .sw-diff-tree [role="treeitem"] { outline: none; cursor: pointer; }
