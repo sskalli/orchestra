@@ -7,7 +7,6 @@ import { join } from "node:path";
 import { execFileSync } from "node:child_process";
 import { WorkspaceRuntime } from "../src/workspace-runtime.ts";
 import { workspaceStore } from "../src/workspace-store.ts";
-import { createFeatureWorktree } from "../src/workspace-worktree.ts";
 import { parseWorkspaceArgs } from "../src/workspace-options.ts";
 import { workspacePreferences } from "../src/workspace-preferences.ts";
 import { resolveProjects, workspaceIdentity } from "../src/workspace-projects.ts";
@@ -83,7 +82,8 @@ test("worktree changes stay isolated and saved state is project scoped", () => {
     git("-C", repository, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
       "-c", "commit.gpgsign=false", "commit", "--allow-empty", "-qm", "Baseline");
     assert.throws(() => resolveProjects([{ id: "a", path: repository }, { id: "b", path: repository }]), /different Git repository/);
-    const linkedCheckout = createFeatureWorktree(repository).path;
+    const linkedCheckout = join(directory, "linked", "candidate");
+    git("-C", repository, "worktree", "add", "-q", "--detach", linkedCheckout);
     candidate = linkedCheckout;
     assert.throws(() => resolveProjects([{ id: "a", path: repository }, { id: "b", path: linkedCheckout }]),
       /Projects 'a' and 'b' share one/);

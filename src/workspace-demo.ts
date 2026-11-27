@@ -1,37 +1,15 @@
 import type { WorkspaceAgent } from "./workspace-runtime.ts";
 
 type DemoTask = Pick<WorkspaceAgent, "id" | "name" | "messages"> &
-  Partial<Pick<WorkspaceAgent, "parentId" | "nativeChild" | "directTask" | "duty" | "status" | "integration">>;
+  Partial<Pick<WorkspaceAgent, "parentId" | "nativeChild" | "directTask" | "duty" | "status">>;
 
 export function demoTasks(projectId: string): DemoTask[] {
-  const delivery = {
-    id: "demo-delivery",
-    path: "/demo/worktrees/dashboard",
-    base: "demo-base",
-    fingerprint: "demo-candidate",
-    sources: [],
-    members: [{
-      projectId,
-      path: "/demo/worktrees/dashboard",
-      base: "demo-base",
-      fingerprint: "demo-candidate",
-      revision: "demo-revision",
-    }],
-    validationEvidence: {
-      submissionId: "demo-delivery",
-      candidateFingerprint: "demo-candidate",
-      outcome: "passed" as const,
-      summary: "Dashboard smoke tests passed (simulated).",
-      recordedAt: 0,
-    },
-  };
-
   const tasks: DemoTask[] = [
     {
       id: "demo-release",
       name: "Release notes",
       status: "done",
-      directTask: { projectIds: [], phase: "planning" },
+      directTask: { projectIds: [] },
       messages: [
         { id: "demo-release-request", role: "user", text: "Draft a release note for the workspace updates." },
         { id: "demo-release-draft", role: "assistant", text: "The draft covers task sessions, native subagents, and the workspace inbox." },
@@ -52,10 +30,12 @@ export function demoTasks(projectId: string): DemoTask[] {
       id: "demo-delivery",
       name: "Dashboard empty state",
       duty: "coder",
-      status: "awaiting-confirmation",
-      directTask: { projectIds: [], phase: "ready-for-review" },
-      integration: delivery,
-      messages: [{ id: "demo-delivery-report", role: "assistant", text: "The empty state is ready for review. Open the delivery details to see the simulated snapshot and checks." }],
+      status: "done",
+      directTask: { projectIds: [] },
+      messages: [
+        { id: "demo-delivery-report", role: "assistant", text: "The empty state is done on its own branch and committed." },
+        { id: "demo-delivery-branch", role: "system", kind: "git", text: "Created branch `dashboard-empty-state` in demo at `1a2b3c4` Add dashboard empty state" },
+      ],
     },
     {
       id: "demo-dashboard-lead",
@@ -97,7 +77,7 @@ export function demoTasks(projectId: string): DemoTask[] {
       id: "demo-investigation",
       name: "Investigate slow search",
       status: "working",
-      directTask: { projectIds: [], phase: "planning" },
+      directTask: { projectIds: [] },
       messages: [
         { id: "demo-investigation-request", role: "user", text: "Find out why filtering a large list feels slow. Save the profile under /demo/profiles." },
         { id: "demo-investigation-access", role: "system", kind: "action", text: "Permission requested to run a command outside the sandbox.",
@@ -127,7 +107,7 @@ export function demoTasks(projectId: string): DemoTask[] {
       id: "demo-export",
       name: "Review CSV export",
       status: "error",
-      directTask: { projectIds: [], phase: "planning" },
+      directTask: { projectIds: [] },
       messages: [
         { id: "demo-export-request", role: "user", text: "Review the CSV export for edge cases.", state: "failed" },
         { id: "demo-export-error", role: "system", kind: "error", text: "The session timed out while waiting for a response. Send a follow-up to retry." },
@@ -137,7 +117,7 @@ export function demoTasks(projectId: string): DemoTask[] {
       id: "demo-recipe",
       name: "Weeknight dinner",
       status: "done",
-      directTask: { projectIds: [], phase: "planning" },
+      directTask: { projectIds: [] },
       messages: [
         { id: "demo-recipe-request", role: "user", text: "Give me a quick dinner for two with chickpeas, plus ideas for leftovers." },
         { id: "demo-recipe-result", role: "assistant", text: [

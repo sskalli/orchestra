@@ -97,6 +97,7 @@ test("custom Codex providers ask for their own model list, share one request and
   const [first, second] = await Promise.all([runtime.listModels(), runtime.listModels()]);
   assert.equal(first, second);
   assert.match(first.note ?? "", /company/);
+  assert.ok(first.models.every(({ isDefault }) => !isDefault), "Codex's default model is not presented as the custom provider's");
   await runtime.listModels();
   const calls = readFileSync(tracePath, "utf8").trim().split("\n").map((line) => JSON.parse(line))
     .filter(({ method }) => method === "model/list");

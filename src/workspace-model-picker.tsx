@@ -63,13 +63,15 @@ type ModelPickerProps = {
   disabled?: boolean;
   /** A turn is running, so a change applies from the next turn. */
   busy?: boolean;
+  /** The New session dialog: an unchosen effort shows the one a new task starts with. */
+  newTask?: boolean;
   /** Where the menu opens relative to the button. */
   placement?: "above" | "below";
   className?: string;
 };
 
 /** A model and reasoning-effort menu. Choices apply to the task's next turn. */
-export function ModelPicker({ settings, onChange, disabled, busy, placement = "above", className }: ModelPickerProps) {
+export function ModelPicker({ settings, onChange, disabled, busy, newTask, placement = "above", className }: ModelPickerProps) {
   const { catalog, reload } = useModelCatalog();
   const [open, setOpen] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -83,7 +85,7 @@ export function ModelPicker({ settings, onChange, disabled, busy, placement = "a
   const busyNoteId = useId();
 
   const listed = catalog?.models ?? [];
-  const { modelId, option, effort } = currentModelChoice(settings, listed);
+  const { modelId, option, effort } = currentModelChoice(settings, listed, newTask && Boolean(catalog));
   // A model the provider did not list (a custom provider or an environment override) stays selectable as it is.
   const models: ModelOption[] = option || !modelId ? listed : [{ id: modelId, label: modelId, efforts: [] }, ...listed];
   const selected = option ?? models.find((entry) => entry.id === modelId);

@@ -87,13 +87,13 @@ async function readCommand(request: IncomingMessage) {
       typeof command.text === "string" && command.text.trim()) {
     return { type: "answerProductQuestion" as const, agentId: command.agentId, questionId: command.questionId, text: command.text };
   }
+  if (command.type === "resolveProductQuestion" && typeof command.questionId === "string" && command.questionId) {
+    return { type: "resolveProductQuestion" as const, agentId: command.agentId, questionId: command.questionId };
+  }
   if (command.type === "resolveCommandApproval" && typeof command.requestId === "string" && command.requestId &&
       (command.decision === "approve" || command.decision === "approveForSession" || command.decision === "decline")) {
     return { type: "resolveCommandApproval" as const, agentId: command.agentId, requestId: command.requestId,
       decision: command.decision as "approve" | "approveForSession" | "decline" };
-  }
-  if (command.type === "approveImplementation" && typeof command.requestId === "string" && command.requestId) {
-    return { type: "approveImplementation" as const, agentId: command.agentId, requestId: command.requestId };
   }
   throw new Error("Invalid workspace command");
 }
@@ -182,7 +182,8 @@ const server = createServer(async (request, response) => {
     const unsubscribe = runtime.subscribe(publish);
     const unsubscribeSignals = runtime.subscribeSignals((signal) => response.write(`event: agent-signal\ndata: ${JSON.stringify(signal)}\n\n`));
     publish(runtime.snapshot());
-    const heartbeat = setInterval(() => response.write(": heartbeat\n\n"), 15_000);
+    // A named event, unlike an SSE comment, reaches the page, which reconnects when heartbeats stop.
+    const heartbeat = setInterval(() => response.write("event: heartbeat\ndata: {}\n\n"), 15_000);
     response.on("close", () => {
       clearInterval(heartbeat);
       unsubscribe();

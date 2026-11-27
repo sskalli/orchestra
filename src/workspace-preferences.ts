@@ -63,6 +63,13 @@ export function workspacePreferences(projectPath: string, mode: "demo" | "codex"
       return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : 0;
     },
     writeInboxReadSequence: (sequence: number) => write("inbox-read-sequence", sequence),
+    /** The Inbox sequence each task's chat was last open at, so its notifications count as seen. */
+    readInboxAcknowledged(): Record<string, number> {
+      const value = read("inbox-acknowledged");
+      if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+      return Object.fromEntries(Object.entries(value).filter(([, sequence]) => Number.isSafeInteger(sequence)));
+    },
+    writeInboxAcknowledged: (acknowledged: Record<string, number>) => write("inbox-acknowledged", acknowledged),
     readFlightLog: readLatestFlightLog,
     async updateFlightLog(update: (log: FlightLog) => FlightLog) {
       function commit() {

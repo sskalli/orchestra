@@ -20,9 +20,6 @@ type ChatProps = {
   agent: ChatAgent;
   projectLabel?: string;
   repositoryScope?: RepositoryScope[];
-  delivery?: { members: { projectId: string; path: string; revision?: string }[]; taskChecks?: string };
-  taskPhase?: NonNullable<WorkspaceAgent["directTask"]>["phase"];
-  taskDetail?: string;
   modelLabel?: string;
   /** The model and effort picker, shown first in the composer toolbar. */
   modelPicker?: ReactNode;
@@ -37,8 +34,9 @@ type ChatProps = {
   onSend: (text: string) => Promise<void> | void;
   onSteer?: (text: string) => Promise<void> | void;
   onCancel?: () => Promise<void>;
-  onApproveImplementation?: (requestId: string) => Promise<void>;
   onResolveCommandApproval?: ResolveCommandApproval;
+  /** Clears a pending product question by hand. */
+  onResolveProductQuestion?: (questionId: string) => Promise<void>;
   onResumeQueue?: () => Promise<void>;
   onClose: () => void;
   onOpenAgent?: (id: string) => void;
@@ -58,7 +56,6 @@ const statusLabels = {
   idle: "Idle",
   working: "Working",
   attention: "Needs attention",
-  "awaiting-confirmation": "Awaiting confirmation",
   done: "Complete",
   error: "Failed",
   notice: "Update available",
@@ -70,39 +67,10 @@ const systemMessageLabels: Record<SystemMessageKind, string> = {
   warning: "Warning",
   notice: "Notice",
   success: "Success",
+  git: "Git",
 };
 
 const messageTime = new Intl.DateTimeFormat(undefined, { hour: "numeric", minute: "2-digit" });
-
-function ImplementationTargets({ request, repositories }: {
-  request: NonNullable<WorkspaceMessage["implementationRequest"]>;
-  repositories: RepositoryScope[];
-}) {
-  return (
-    <dl className="chat-implementation-targets" aria-label="Write scope">
-      {repositories.map(({ id, path }) => {
-        const target = request.targets?.find(({ projectId }) => projectId === id);
-        const worktree = target?.mode === "worktree" ? target : undefined;
-        const checkout = target?.mode === "checkout";
-        const location = checkout ? path : worktree?.path;
-        return (
-          <div key={id}>
-            <dt>{id}</dt>
-            <dd>
-              <span>{checkout ? "Configured checkout" : worktree ? "New linked worktree" : "Isolated worktree"}</span>
-              {location && <code>{location}</code>}
-              {worktree && (worktree.branch ? <span>Branch <code>{worktree.branch}</code></span> : <span>Detached HEAD</span>)}
-              {checkout && <span className="chat-implementation-checkout-warning">
-                Edits apply directly to this checkout.
-              </span>}
-              {!target && <span>Path assigned by Orchestra.</span>}
-            </dd>
-          </div>
-        );
-      })}
-    </dl>
-  );
-}
 
 const commandApprovalLabels: Record<PermissionApproval["status"], string> = {
   pending: "Approval required",
@@ -119,9 +87,15 @@ const approvalChoiceLabels: Record<ApprovalChoice, [idle: string, busy: string]>
   approve: ["Approve once", "Approving…"],
 };
 
+/** A finished agent reply without visible text, such as one a provider saved before a tool call. */
+function isBlankReply(message: WorkspaceMessage) {
+  return message.role === "assistant" && message.state !== "streaming" && !message.text.trim();
+}
+
 function approvalWarning(approval: PermissionApproval) {
+  const folders = approval.grantPaths?.length ? ", and later turns of this task can write the folders listed under Allow for this task" : "";
   const session = approval.choices?.includes("approveForSession")
-    ? " Allow for this task also covers similar requests until Orchestra restarts." : "";
+    ? ` Allow for this task also covers similar requests until Orchestra restarts${folders}.` : "";
   if (approval.kind === "fileChange") return "Approving lets the agent apply these file changes outside its current write access." + session;
   if (approval.kind === "permissions") return "Approving extends the agent’s sandbox with the access listed below." + session;
   return "Approving runs this command outside the sandbox with your local account’s access." + session;
@@ -164,6 +138,7 @@ function CommandApprovalCard({ approval, requestId, blocked, onResolve }: {
         {approval.writePaths && <div><dt>Write access</dt><dd><PathList paths={approval.writePaths} /></dd></div>}
         {approval.readPaths && <div><dt>Read access</dt><dd><PathList paths={approval.readPaths} /></dd></div>}
         {approval.network && <div><dt>Network</dt><dd>{approval.network}</dd></div>}
+        {approval.grantPaths && approval.status === "pending" && <div><dt>Allow for this task</dt><dd><PathList paths={approval.grantPaths} /></dd></div>}
         {approval.cwd && <div><dt>Working directory</dt><dd><code>{approval.cwd}</code></dd></div>}
         {approval.reason && <div><dt>Reason</dt><dd>{approval.reason}</dd></div>}
       </dl>
@@ -202,8 +177,8 @@ function MessageActions({ message, onRetry, retrying, retryDisabled }: {
 }
 
 function Conversation({
-  agent, projectLabel, repositoryScope, delivery, taskPhase, taskDetail, modelLabel, usageLabel, draft: initialDraft, composerHeight, onComposerHeightChange, onDraftInput, onDraftChange, onDraftRestore, onSend, onSteer, onCancel, onResumeQueue, onApproveImplementation, onClose,
-  disabled, disabledReason, providerNotice, focusMessageId, focusRequest, onOpenAgent, onLifecycle, onRename, onResolveCommandApproval, modelPicker, headerActions,
+  agent, projectLabel, repositoryScope, modelLabel, usageLabel, draft: initialDraft, composerHeight, onComposerHeightChange, onDraftInput, onDraftChange, onDraftRestore, onSend, onSteer, onCancel, onResumeQueue, onClose,
+  disabled, disabledReason, providerNotice, focusMessageId, focusRequest, onOpenAgent, onLifecycle, onRename, onResolveCommandApproval, onResolveProductQuestion, modelPicker, headerActions,
 }: ChatProps) {
   const transcript = useRef<HTMLDivElement>(null);
   const actions = useRef<HTMLDivElement>(null);
@@ -301,7 +276,6 @@ function Conversation({
   const retriedRef = useRef<string>(undefined);
   const [cancelling, setCancelling] = useState(false);
   const [resumingQueue, setResumingQueue] = useState(false);
-  const [approvingImplementation, setApprovingImplementation] = useState(false);
   const [error, setError] = useState("");
   const { displayName } = agentAppearance(agent);
   const title = useRef<HTMLHeadingElement>(null);
@@ -615,25 +589,25 @@ function Conversation({
     void send(steerAction ?? onSend);
   }
 
-  const approveImplementation = useCallback(async (requestId: string) => {
-    if (!onApproveImplementation || approvingImplementation || blocked || agent.canCancel || agent.queueDepth) return;
-    setApprovingImplementation(true);
+  const [resolvingQuestion, setResolvingQuestion] = useState<string>();
+  const resolveQuestion = useCallback(async (questionId: string) => {
+    if (!onResolveProductQuestion || blocked) return;
+    setResolvingQuestion(questionId);
     setError("");
     try {
-      await onApproveImplementation(requestId);
+      await onResolveProductQuestion(questionId);
     } catch (failure) {
-      setError(failure instanceof Error ? failure.message : "Could not allow edits.");
+      setError(failure instanceof Error ? failure.message : "Could not resolve the question.");
     } finally {
-      setApprovingImplementation(false);
+      setResolvingQuestion(undefined);
     }
-  }, [agent.canCancel, agent.queueDepth, approvingImplementation, blocked, onApproveImplementation]);
+  }, [blocked, onResolveProductQuestion]);
 
   const messageElements = useMemo(() => agent.messages.filter((message) =>
-    needsUserInput(message) || !hiddenMessages.has(message.id)).map((message) => {
+    needsUserInput(message) || (!hiddenMessages.has(message.id) && !isBlankReply(message))).map((message) => {
           const sender = message.role === "user" ? "USER" : message.role === "system" ? "SYSTEM" : "COMPUTER";
-          const { productQuestion, implementationRequest, commandApproval } = message;
-          const resolved = productQuestion?.status === "answered" ||
-            (implementationRequest && implementationRequest.status !== "pending") ||
+          const { productQuestion, commandApproval } = message;
+          const resolved = (productQuestion && productQuestion.status !== "pending") ||
             (commandApproval && commandApproval.status !== "pending");
           const systemKind = message.role === "system"
             ? resolved ? "notice" : commandApproval ? "action" : message.kind
@@ -645,11 +619,9 @@ function Conversation({
                 <div className="chat-message-header">
                   <strong><span aria-hidden="true">&gt; </span>{sender}:</strong>
                   {productQuestion ? (
-                    <span className="chat-message-state">{productQuestion.status === "pending" ? "Question awaiting answer" : "Question answered"}</span>
-                  ) : implementationRequest ? <span className="chat-message-state">
-                    {implementationRequest.status === "pending" ? "Awaiting your permission to edit files"
-                      : implementationRequest.status === "approved" ? "Edits allowed" : "Request superseded"}
-                  </span> : commandApproval ? <span className="chat-message-state">{commandApprovalLabels[commandApproval.status]}</span>
+                    <span className="chat-message-state">{productQuestion.status === "pending" ? "Question awaiting answer"
+                      : productQuestion.status === "resolved" ? "Question resolved" : "Question answered"}</span>
+                  ) : commandApproval ? <span className="chat-message-state">{commandApprovalLabels[commandApproval.status]}</span>
                     : systemKind ? <span className="chat-message-state">{systemMessageLabels[systemKind]}</span> : null}
                   {message.state === "queued" ? <span className="chat-message-state">Queued</span> : null}
                   {message.state === "failed" ? <span className="chat-message-state chat-message-state--failed">Failed</span> : null}
@@ -659,19 +631,15 @@ function Conversation({
                   <CommandApprovalCard approval={commandApproval} requestId={message.id} blocked={blocked}
                     onResolve={onResolveCommandApproval} />
                 ) : <div className="chat-markdown">
-                  {implementationRequest
-                    ? <p className="chat-implementation-summary">{message.text}</p>
-                    : <MessageMarkdown text={message.text} agentId={agent.id} idPrefix={message.id}
-                      streaming={message.state === "streaming"} />}
+                  <MessageMarkdown text={message.text} agentId={agent.id} idPrefix={message.id}
+                    streaming={message.state === "streaming"} />
                   {message.state === "streaming" ? <span className="chat-stream-cursor" aria-label="Responding" /> : null}
                 </div>}
-                {implementationRequest && !!repositoryScope?.length &&
-                  <ImplementationTargets request={implementationRequest} repositories={repositoryScope} />}
-                {implementationRequest?.status === "pending" && onApproveImplementation && !archived && (
-                  <button className="chat-steer" type="button"
-                    disabled={blocked || approvingImplementation || Boolean(agent.canCancel) || agent.queueDepth > 0}
-                    onClick={() => void approveImplementation(message.id)}>
-                    {approvingImplementation ? "Allowing edits…" : "Allow edits"}
+                {productQuestion?.status === "pending" && onResolveProductQuestion && !archived && (
+                  <button className="chat-steer" type="button" disabled={blocked || resolvingQuestion === message.id}
+                    title="Clear this question if you already answered it or it no longer applies."
+                    onClick={() => void resolveQuestion(message.id)}>
+                    {resolvingQuestion === message.id ? "Resolving…" : "Mark resolved"}
                   </button>
                 )}
               </div>
@@ -679,7 +647,7 @@ function Conversation({
                 onRetry={message.id === retryId ? () => void retry(message.id, message.text) : undefined} />
             </article>
           );
-        }), [retry, retryDisabled, retryId, retrying, agent.id, agent.messages, agent.canCancel, agent.queueDepth, approveImplementation, approvingImplementation, archived, blocked, hiddenMessages, onApproveImplementation, onResolveCommandApproval, repositoryScope]);
+        }), [retry, retryDisabled, retryId, retrying, agent.id, agent.messages, archived, blocked, hiddenMessages, onResolveCommandApproval, onResolveProductQuestion, resolveQuestion, resolvingQuestion]);
 
   const headerStatus = archived ? "Archived" : agent.lifecycleBusy ? "Updating…" : statusLabels[agent.status];
   const headerTone = archived || agent.lifecycleBusy ? "idle" : agent.status;
@@ -688,7 +656,7 @@ function Conversation({
   const nameTooltip = [
     projectLabel && `Project: ${projectLabel}`,
     repositoryScope && `Repositories: ${repositoryScope.map(({ id }) => id).join(", ")}`,
-    taskPhase === "planning" && (repositoryScope ? "Planning · read-only" : "General chat"),
+    agent.directTask && (repositoryScope ? "Read & write in selected repositories" : "General chat"),
     modelLabel,
     usageLabel,
   ].filter(Boolean).join("\n");
@@ -779,20 +747,6 @@ function Conversation({
             </p>
           ) : null}
           {messageElements}
-          {taskDetail && !shownInConversation(taskDetail) && <p className="chat-task-detail" role="status">{taskDetail}</p>}
-          {delivery && <details className="chat-delivery">
-            <summary>Delivery snapshots · Ready for review</summary>
-            <ul>
-              {delivery.members.map(({ projectId, path, revision }) => <li key={projectId}>
-                <label>{projectId}<input aria-label={`${projectId} candidate worktree`} value={path} readOnly
-                  onFocus={(event) => event.currentTarget.select()} /></label>
-                {revision && <label>Revision<input aria-label={`${projectId} candidate revision`} value={revision} readOnly
-                  onFocus={(event) => event.currentTarget.select()} /></label>}
-              </li>)}
-            </ul>
-            {delivery.taskChecks && <p className="chat-delivery-checks">Checks: {delivery.taskChecks}</p>}
-            <p>Review and merge each repository separately.</p>
-          </details>}
         </div>
         <InlineCodeCopy transcript={transcript} />
         {showJumpToLatest && <button className="chat-jump-latest" type="button" onClick={scrollToLatest}

@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
 /** Where a task's edits live: an isolated worktree, or a configured checkout edited in place. */
-export type DiffSource = { projectId: string; mode: "automatic" | "worktree" | "checkout"; path: string; base: string };
+export type DiffSource = { projectId: string; mode: "worktree" | "checkout"; path: string; base: string; branch?: string };
 export type DiffLineKind = "+" | "-" | " " | "@" | "\\";
 /** One rendered diff line: kind, text, then old and new line numbers where they apply. */
 export type DiffLine = [kind: DiffLineKind, text: string, oldLine?: number | null, newLine?: number | null];
@@ -27,6 +27,9 @@ export type DiffFile = {
 export type DiffGroup = {
   projectId: string;
   mode: DiffSource["mode"];
+  /** Where the changes are, to tell several worktrees of one repository apart. */
+  path?: string;
+  branch?: string;
   base: string;
   files: DiffFile[];
   /** More files changed than were listed. */
@@ -272,7 +275,8 @@ async function untrackedFiles(root: string, run: (args: string[], options?: Part
 
 /** Diff the current contents of one worktree, including untracked files Git does not ignore, against its base commit. */
 export async function diffSource(source: DiffSource, deadline = Date.now() + diffLimits.timeoutMs): Promise<DiffGroup> {
-  const group: DiffGroup = { projectId: source.projectId, mode: source.mode, base: source.base, files: [] };
+  const group: DiffGroup = { projectId: source.projectId, mode: source.mode, path: source.path,
+    ...(source.branch ? { branch: source.branch } : {}), base: source.base, files: [] };
   if (!shaPattern.test(source.base)) return { ...group, error: "The task's base revision is invalid." };
   let temporary: string | undefined;
   try {

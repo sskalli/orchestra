@@ -107,7 +107,7 @@ test("an isolated worktree diff includes commits, uncommitted and untracked file
   const objects = objectCount(fixture.path);
   const index = statSync(join(fixture.path, ".git", "worktrees", "candidate", "index")).mtimeMs;
 
-  const group = await diffSource({ projectId: "app", mode: "automatic", path: worktree, base: fixture.base });
+  const group = await diffSource({ projectId: "app", mode: "worktree", path: worktree, base: fixture.base });
   assert.equal(group.error, undefined);
   const byPath = new Map(group.files.map((file) => [file.path, file]));
   assert.deepEqual([...byPath.keys()].sort(), ["committed.txt", "image.bin", "new untracked.md", "remove-me.txt",
@@ -276,21 +276,21 @@ test("large diffs are truncated per file and omitted past the byte limit", async
 test("an unchanged source reports no files and unavailable sources report errors", async (t) => {
   const fixture = repository(t, { "a.txt": "a\n" });
   if (!fixture) return;
-  assert.deepEqual(await diffSource({ projectId: "app", mode: "automatic", path: fixture.path, base: fixture.base }),
-    { projectId: "app", mode: "automatic", base: fixture.base, files: [] });
-  const missing = await diffSource({ projectId: "app", mode: "automatic", path: join(fixture.root, "gone"), base: fixture.base });
+  assert.deepEqual(await diffSource({ projectId: "app", mode: "worktree", path: fixture.path, base: fixture.base }),
+    { projectId: "app", mode: "worktree", path: fixture.path, base: fixture.base, files: [] });
+  const missing = await diffSource({ projectId: "app", mode: "worktree", path: join(fixture.root, "gone"), base: fixture.base });
   assert.match(missing.error ?? "", /no longer exists/);
-  const invalid = await diffSource({ projectId: "app", mode: "automatic", path: fixture.path, base: "--output=/tmp/x" });
+  const invalid = await diffSource({ projectId: "app", mode: "worktree", path: fixture.path, base: "--output=/tmp/x" });
   assert.match(invalid.error ?? "", /invalid/);
-  const unknown = await diffSource({ projectId: "app", mode: "automatic", path: fixture.path, base: "a".repeat(40) });
+  const unknown = await diffSource({ projectId: "app", mode: "worktree", path: fixture.path, base: "a".repeat(40) });
   assert.match(unknown.error ?? "", /no longer available/);
   mkdirSync(join(fixture.path, "sub"));
-  const nested = await diffSource({ projectId: "app", mode: "automatic", path: join(fixture.path, "sub"), base: fixture.base });
+  const nested = await diffSource({ projectId: "app", mode: "worktree", path: join(fixture.path, "sub"), base: fixture.base });
   assert.match(nested.error ?? "", /complete Git worktree/);
   assert.deepEqual(await taskDiff("general"), { kind: "general" });
 });
 
-test("the runtime reports a task's worktree and checkout edits as diff sources", async (t) => {
+test("the runtime reports a task's checkouts and the worktrees it creates as diff sources", async (t) => {
   const api = repository(t, { "index.mjs": "export default null;\n" });
   const ui = repository(t, { "index.mjs": "export default null;\n" });
   if (!api || !ui) return;
@@ -328,32 +328,39 @@ test("the runtime reports a task's worktree and checkout edits as diff sources",
   const agentId = await runtime.command({ type: "createTask", name: "Edit", projectIds: ["api", "ui"] }) as string;
   assert.deepEqual(runtime.diffSources(agentId), []);
   const task = internal.sessions.get(agentId);
+  // An edit that was already in the checkout before the task's first turn is not the task's change.
+  writeFileSync(join(ui.path, "index.mjs"), "export default 'already there';\n");
   await runtime.command({ type: "send", agentId, text: "Plan the edit." });
-  await internal.onRequest({ id: "request", method: "item/tool/call", params: {
-    threadId: task.threadId, turnId: task.run.turn.id, tool: "request_implementation",
-    arguments: { summary: "Edit both.", targets: [{ projectId: "api", mode: "checkout" }] },
-  } });
-  const reply = replies.get("request");
-  assert.equal(reply.success, true, reply.contentItems[0].text);
-  internal.onEvent({ method: "turn/completed", params: {
-    threadId: task.threadId, turn: { id: task.run.turn.id, status: "completed" },
-  } });
-  await runtime.command({ type: "approveImplementation", agentId, requestId: JSON.parse(reply.contentItems[0].text).requestId });
-
   const sources = runtime.diffSources(agentId);
   assert.ok(Array.isArray(sources));
-  assert.deepEqual(sources.map(({ projectId, mode, base }) => [projectId, mode, base]),
-    [["api", "checkout", api.base], ["ui", "automatic", ui.base]]);
+  assert.deepEqual(sources.map(({ projectId, mode }) => [projectId, mode]), [["api", "checkout"], ["ui", "checkout"]],
+    "the local checkouts the task runs in are listed");
+  assert.equal(sources[0].base, api.base, "a clean checkout is diffed from its commit");
+  assert.notEqual(sources[1].base, ui.base, "a checkout with edits is diffed from a snapshot of them");
   assert.equal(sources[0].path, api.path);
-  assert.deepEqual(runtime.snapshot().agents.find(({ id }) => id === agentId)?.checkoutEdits, [{ projectId: "api", base: api.base }]);
 
   writeFileSync(join(api.path, "index.mjs"), "export default 'api';\n");
-  writeFileSync(join(sources[1].path, "index.mjs"), "export default 'ui';\n");
   const diff = await taskDiff(sources);
   assert.equal(diff.kind, "repositories");
   assert.deepEqual(diff.kind === "repositories" && diff.groups.map(({ projectId, files }) =>
     [projectId, files.map(({ path, additions, deletions }) => [path, additions, deletions])]),
-  [["api", [["index.mjs", 1, 1]]], ["ui", [["index.mjs", 1, 1]]]]);
+  [["api", [["index.mjs", 1, 1]]], ["ui", []]]);
+
+  // A worktree the agent creates itself during a turn becomes a source, diffed from where it forked.
+  internal.onEvent({ method: "turn/completed", params: { threadId: task.threadId, turn: { id: task.run.turn.id, status: "completed" } } });
+  await runtime.command({ type: "send", agentId, text: "Make a feature branch in ui." });
+  const own = join(ui.path, ".worktrees", "feature");
+  git(ui.path, "worktree", "add", "-b", "feature", own);
+  writeFileSync(join(own, "index.mjs"), "export default 'feature';\n");
+  internal.onEvent({ method: "turn/completed", params: { threadId: task.threadId, turn: { id: task.run.turn.id, status: "completed" } } });
+  await Promise.all([...internal.gitChecks]);
+  assert.deepEqual(runtime.snapshot().agents.find(({ id }) => id === agentId)?.taskWorktrees,
+    [{ projectId: "ui", path: own, base: ui.base, branch: "feature" }]);
+  const withOwn = runtime.diffSources(agentId);
+  assert.ok(Array.isArray(withOwn));
+  const ownDiff = await taskDiff(withOwn.filter(({ path }) => path === own));
+  assert.deepEqual(ownDiff.kind === "repositories" && ownDiff.groups.map(({ mode, branch, files }) => [mode, branch, files.length]),
+    [["worktree", "feature", 1]]);
   } finally {
     await cleanup();
   }

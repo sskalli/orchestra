@@ -4,7 +4,7 @@
 
 - Direct Codex and Claude sessions with optional repository scope and native child transcripts.
 - One `orchestra codex|claude` launcher with sign-in checks and automatic ports.
-- Same-thread planning and approved implementation with isolated, pinned delivery.
+- Repository tasks with read and write access from the start, an agent-run worktree workflow, and commit and push notes in the chat.
 - Multi-repository workspaces, an agent map, and an inbox linked to task conversations.
 - Persistent product questions, restart recovery, queueing, and observable token usage.
 

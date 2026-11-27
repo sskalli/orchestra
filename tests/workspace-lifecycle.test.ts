@@ -247,8 +247,7 @@ test("a resumed provider thread with an active turn remains protected even witho
 test("a saved turn without an ID can be retried after Codex explicitly reports idle", async () => {
   const { runtime, internal, pm } = fixture();
   const sent = { id: "sent", role: "user", text: "Consider a change.", state: "failed" };
-  const request = { id: "request", role: "system", text: "Edit the checkout.", implementationRequest: { status: "pending" } };
-  pm.agent.messages.push(sent, request);
+  pm.agent.messages.push(sent);
   pm.recovery = { messageId: sent.id };
   internal.threadSessions.delete(pm.threadId);
   const saved = { agent: pm.agent, threadId: pm.threadId, toolVersion: 16, run: pm.recovery };
@@ -267,14 +266,12 @@ test("a saved turn without an ID can be retried after Codex explicitly reports i
     await internal.resumeThread(saved);
     assert(pm.recovery);
     assert.match(pm.agent.unavailableReason, /not confirmed/i);
-    assert.equal(request.implementationRequest.status, "pending");
 
     status = "idle";
     await internal.resumeThread(saved);
     assert.equal(pm.recovery, undefined);
     assert.equal(pm.agent.unavailableReason, undefined);
     assert.equal(sent.state, "failed");
-    assert.equal(request.implementationRequest.status, "superseded");
     assert.match(pm.agent.messages.at(-1).text, /did not confirm whether the previous message ran/i);
   } finally { await runtime.close(); }
 });
@@ -372,4 +369,35 @@ test("archive and deletion persist across a saved workspace reload", async () =>
     await runtime.close(); await reopened?.close();
     rmSync(directory, { recursive: true, force: true });
   }
+});
+
+test("agent replies without visible text are not kept as messages", async () => {
+  const { runtime, internal, pm } = fixture();
+  try {
+    const prompt = { id: "prompt", role: "user", text: "Look into it" };
+    pm.agent.messages.push(prompt);
+    pm.run = { message: prompt, turn: { id: "turn-1", status: "inProgress" } };
+    const event = (method: string, params: Record<string, unknown>) =>
+      internal.onEvent({ method, params: { threadId: pm.threadId, turnId: "turn-1", ...params } });
+    event("item/agentMessage/delta", { itemId: "blank", delta: "\n\n" });
+    event("item/completed", { item: { type: "agentMessage", id: "blank", text: " \n" } });
+    event("item/completed", { item: { type: "agentMessage", id: "empty", text: "" } });
+    event("item/agentMessage/delta", { itemId: "unfinished", delta: "  " });
+    event("item/agentMessage/delta", { itemId: "reply", delta: "Found it." });
+    event("turn/completed", { turn: { id: "turn-1", status: "completed" } });
+    const replies = runtime.snapshot().agents.find(({ id }) => id === "pm")!.messages.filter(({ role }) => role === "assistant");
+    assert.deepEqual(replies.map(({ text }) => text), ["Found it."]);
+  } finally { await runtime.close(); }
+});
+
+test("the user can mark a pending product question resolved by hand", async () => {
+  const { runtime, pm } = fixture();
+  try {
+    pm.agent.messages.push({ id: "question", role: "system", kind: "action", text: "Product decision from Study: Ship it?",
+      productQuestion: { status: "pending" } });
+    const question = () => runtime.snapshot().agents.find(({ id }) => id === "pm")!.messages.find(({ id }) => id === "question");
+    await runtime.command({ type: "resolveProductQuestion", agentId: "pm", questionId: "question" });
+    assert.deepEqual(question()?.productQuestion, { status: "resolved" });
+    await assert.rejects(runtime.command({ type: "resolveProductQuestion", agentId: "pm", questionId: "question" }), /no longer pending/);
+  } finally { await runtime.close(); }
 });

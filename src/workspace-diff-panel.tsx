@@ -10,11 +10,11 @@ export type DiffLayout = "floating" | "tabs" | "overlay";
 type DiffPreferences = { readDiffWidth(): number | undefined; writeDiffWidth(width: number): void };
 
 const panelId = "workspace-diff-panel";
-const minWidth = 320;
-const defaultWidth = 520;
+const minWidth = 280;
+const defaultWidth = 380;
 /** Narrowest the chat is squeezed to so the panel fits beside it. */
-const minChatWidth = 420;
-const minMap = 300;
+const minChatWidth = 340;
+const minMap = 120;
 
 function clamp(value: number, min: number, max: number) {
   return Math.max(min, Math.min(max, value));
@@ -28,6 +28,27 @@ export function DiffToggle({ open, onToggle }: { open: boolean; onToggle: () => 
   </button>;
 }
 
+/**
+ * Switches between the chat and the changes when there is no room to show them side by side. It sits in the
+ * top bar of whichever view is showing, so the two bars look the same.
+ */
+export function DiffViewSwitch({ tab, onTab, focusRef }: {
+  tab: "chat" | "changes"; onTab: (tab: "chat" | "changes") => void; focusRef?: RefObject<HTMLButtonElement | null>;
+}) {
+  return <div className="sw-diff-switch" role="tablist" aria-label="Chat view" onKeyDown={(event) => {
+    if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+    event.preventDefault();
+    onTab(tab === "chat" ? "changes" : "chat");
+  }}>
+    {(["chat", "changes"] as const).map((entry) => <button key={entry} ref={entry === tab ? focusRef : undefined}
+      type="button" role="tab" data-tab={entry} aria-selected={entry === tab} tabIndex={entry === tab ? 0 : -1}
+      aria-controls={entry === "changes" ? `${panelId}-content` : undefined}
+      onClick={() => { if (entry !== tab) onTab(entry); }}>
+      {entry === "chat" ? "Chat" : "Changes"}
+    </button>)}
+  </div>;
+}
+
 type Space = { viewport: number; room: number; chat: number };
 
 /** The chat's own width from its CSS rule (65vw by default, or the size the user dragged it to). */
@@ -39,9 +60,9 @@ function naturalChatWidth(body: HTMLElement) {
 
 /**
  * Open state, placement and width of the changes panel. On desktop widths the panel sits right of the
- * chat and pushes it left, narrowing the chat (to 420px at least) while open. When even the minimum
- * widths do not fit, or the Inbox is open, it becomes a Changes tab over the chat dock; phones get a
- * full-screen version of those tabs.
+ * chat and pushes it left, narrowing the chat (to 340px at least) while open, also beside an open Inbox.
+ * Only when even the minimum widths do not fit does it become a Changes tab over the chat dock; phones
+ * get a full-screen version of those tabs.
  */
 export function useDiffPanel(preferences: DiffPreferences, chatWindowRef: RefObject<HTMLElement | null>,
   active: boolean, inboxOpen: boolean) {
@@ -65,8 +86,11 @@ export function useDiffPanel(preferences: DiffPreferences, chatWindowRef: RefObj
       const style = getComputedStyle(body);
       const inset = parseFloat(style.getPropertyValue("--window-inset")) || 0;
       const gap = parseFloat(style.getPropertyValue("--panel-gap")) || 0;
-      const next = { viewport: window.innerWidth, room: body.getBoundingClientRect().width - 2 * inset - gap - minMap,
-        chat: naturalChatWidth(body) };
+      // An open Inbox takes its own width and a gap out of the room for the chat and the panel.
+      const inbox = document.getElementById("workspace-inbox-window");
+      const inboxWidth = inboxOpen && inbox && !inbox.hidden ? inbox.getBoundingClientRect().width + gap : 0;
+      const next = { viewport: window.innerWidth,
+        room: body.getBoundingClientRect().width - 2 * inset - gap - Math.max(minMap, inboxWidth), chat: naturalChatWidth(body) };
       setSpace((current) => current.viewport === next.viewport && current.room === next.room && current.chat === next.chat
         ? current : next);
     };
@@ -74,6 +98,8 @@ export function useDiffPanel(preferences: DiffPreferences, chatWindowRef: RefObj
     const observer = new ResizeObserver(measure);
     observer.observe(body);
     observer.observe(chat);
+    const inbox = document.getElementById("workspace-inbox-window");
+    if (inbox) observer.observe(inbox);
     // The chat's own resize handle changes this inline size.
     const mutations = new MutationObserver(measure);
     mutations.observe(body, { attributes: true, attributeFilter: ["style"] });
@@ -83,10 +109,10 @@ export function useDiffPanel(preferences: DiffPreferences, chatWindowRef: RefObj
       mutations.disconnect();
       window.removeEventListener("resize", measure);
     };
-  }, [chatWindowRef]);
+  }, [chatWindowRef, inboxOpen]);
 
   const fits = space.room >= Math.min(space.chat, minChatWidth) + minWidth;
-  const layout: DiffLayout = space.viewport <= 650 ? "overlay" : inboxOpen || !fits ? "tabs" : "floating";
+  const layout: DiffLayout = space.viewport <= 650 ? "overlay" : !fits ? "tabs" : "floating";
   // When the window or the Inbox takes away the room beside the chat, keep the chat in front instead of
   // covering it (and the composer focus) with the Changes tab.
   const [previousLayout, setPreviousLayout] = useState(layout);
@@ -190,7 +216,7 @@ function shortRevision(revision: string) {
 }
 
 const statusNames = { A: "Added", M: "Modified", D: "Deleted", R: "Renamed", C: "Copied", T: "Type changed" } as const;
-const modeNames = { automatic: "isolated worktree", worktree: "linked worktree", checkout: "local checkout" } as const;
+const modeNames = { worktree: "linked worktree", checkout: "local checkout" } as const;
 
 function splitPath(path: string) {
   const index = path.lastIndexOf("/");
@@ -198,11 +224,18 @@ function splitPath(path: string) {
 }
 
 function fileKey(group: DiffGroup, file: DiffFile) {
-  return `${group.projectId}\0${group.mode}\0${file.path}`;
+  return `${groupKey(group)}\0${file.path}`;
 }
 
 function groupKey(group: DiffGroup) {
-  return `${group.projectId}\0${group.mode}`;
+  return `${group.projectId}\0${group.mode}\0${group.path ?? ""}`;
+}
+
+/** Names a location in the source picker and group titles: the local checkout, or a worktree by its branch or folder. */
+function groupLabel(group: DiffGroup) {
+  if (group.mode === "checkout") return `${group.projectId} · local checkout`;
+  const place = group.branch ?? (group.path ? splitPath(group.path).name : undefined);
+  return `${group.projectId} · ${place ? `${modeNames[group.mode]} ${place}` : modeNames[group.mode]}`;
 }
 
 function Counts({ additions, deletions }: { additions: number; deletions: number }) {
@@ -271,7 +304,7 @@ function visibleItems(groups: DiffGroup[], collapsed: Set<string>) {
   };
   groups.forEach((group, index) => {
     const key = groupKey(group);
-    items.push({ key, level: 1, setSize: groups.length, position: index + 1, kind: "repo", name: group.projectId, group,
+    items.push({ key, level: 1, setSize: groups.length, position: index + 1, kind: "repo", name: groups.length > 1 ? groupLabel(group) : group.projectId, group,
       additions: group.files.reduce((sum, file) => sum + file.additions, 0),
       deletions: group.files.reduce((sum, file) => sum + file.deletions, 0), expandable: true });
     if (!collapsed.has(key)) walk(groupTree(group), group, 2, key);
@@ -381,6 +414,7 @@ export function DiffPanel({ agent, open, layout, tab, onTab, resizing, resizeHan
   const [refreshing, setRefreshing] = useState(false);
   const [selected, setSelected] = useState<string>();
   const [collapsed, setCollapsed] = useState(() => new Set<string>());
+  const [source, setSource] = useState("all");
   const request = useRef(0);
   const scroller = useRef<HTMLDivElement>(null);
   const panel = useRef<HTMLElement>(null);
@@ -411,6 +445,7 @@ export function DiffPanel({ agent, open, layout, tab, onTab, resizing, resizeHan
   useEffect(() => {
     setSelected(undefined);
     setCollapsed(new Set());
+    setSource("all");
     setState({ status: "loading" });
     request.current++;
   }, [agentId]);
@@ -421,7 +456,7 @@ export function DiffPanel({ agent, open, layout, tab, onTab, resizing, resizeHan
 
   // Refresh when a turn finishes or the task's edit destinations change, keeping the scroll position.
   const isRunning = agent ? running(agent) : false;
-  const destinations = agent ? JSON.stringify([agent.candidate, agent.directCandidates, agent.scopedWorktrees, agent.checkoutEdits, agent.directTask?.phase]) : "";
+  const destinations = agent ? JSON.stringify([agent.checkoutBases, agent.taskWorktrees]) : "";
   const previous = useRef({ isRunning, destinations });
   useEffect(() => {
     const before = previous.current;
@@ -438,7 +473,10 @@ export function DiffPanel({ agent, open, layout, tab, onTab, resizing, resizeHan
   }
 
   const diff = state.status === "ready" ? state.diff : undefined;
-  const groups = diff?.kind === "repositories" ? diff.groups : [];
+  const allGroups = diff?.kind === "repositories" ? diff.groups : [];
+  // With several locations, the picker shows one of them or all of them.
+  const picked = allGroups.find((group) => groupKey(group) === source);
+  const groups = picked ? [picked] : allGroups;
   const files = groups.flatMap(({ files }) => files);
   const additions = files.reduce((sum, file) => sum + file.additions, 0);
   const deletions = files.reduce((sum, file) => sum + file.deletions, 0);
@@ -455,9 +493,7 @@ export function DiffPanel({ agent, open, layout, tab, onTab, resizing, resizeHan
     </div>;
   } else if (diff?.kind === "general") body = <p className="sw-diff-empty">General chat — no repository changes</p>;
   else if (!groups.length) {
-    // Tasks saved before Orchestra recorded checkout edits can have approved edits with nothing to diff.
-    const approved = agent?.messages.some(({ implementationRequest }) => implementationRequest?.status === "approved");
-    body = <p className="sw-diff-empty">{approved ? "No reviewable changes for this task." : "No changes yet. Edits start after Allow edits."}</p>;
+    body = <p className="sw-diff-empty">No changes yet.</p>;
   }
   else {
     if (files.length) {
@@ -472,13 +508,13 @@ export function DiffPanel({ agent, open, layout, tab, onTab, resizing, resizeHan
     }
     body = <>
       {failed.length > 0 && <div className="sw-diff-failure" role="alert">
-        {failed.map((group) => <p key={groupKey(group)}><strong>{group.projectId}</strong>: {group.error}</p>)}
+        {failed.map((group) => <p key={groupKey(group)}><strong>{groupLabel(group)}</strong>: {group.error}</p>)}
         <button type="button" className="sw-diff-button" onClick={() => void load(false)}>Retry</button>
       </div>}
       {!files.length && !failed.length && <p className="sw-diff-empty">No changes yet.</p>}
       {groups.map((group) => group.files.length > 0 && <div key={groupKey(group)} className="sw-diff-group">
         {groups.length > 1 && <h3 className="sw-diff-group-title">
-          {group.projectId} <span className="sw-diff-dir">· {modeNames[group.mode]} · base <code>{shortRevision(group.base)}</code></span>
+          {groupLabel(group)} <span className="sw-diff-dir">· base <code>{shortRevision(group.base)}</code></span>
         </h3>}
         {group.notices?.map((notice) => <p key={notice} className="sw-diff-note">{notice}</p>)}
         {group.mode === "checkout" && <p className="sw-diff-note">Edits in the local checkout. Uncommitted changes that were already there are included.</p>}
@@ -491,38 +527,30 @@ export function DiffPanel({ agent, open, layout, tab, onTab, resizing, resizeHan
     </>;
   }
 
-  const covered = layout !== "floating" && tab === "chat";
+  const switched = layout !== "floating";
+  const covered = switched && tab === "chat";
   const changesTab = useRef<HTMLButtonElement>(null);
-  // In the tab layouts the panel covers the chat, so focus moves into it when it appears.
-  const visibleOverChat = open && layout !== "floating" && !covered;
+  // In the switched layouts the panel covers the chat, so focus moves into it when it appears.
+  const visibleOverChat = open && switched && !covered;
   useEffect(() => {
     if (visibleOverChat) changesTab.current?.focus();
   }, [visibleOverChat]);
 
-  return <aside ref={panel} id={panelId} className="sw-diff" data-layout={layout} data-tab={layout === "floating" ? undefined : tab}
-    aria-label="Changes" hidden={!open} data-resizing={resizing || undefined}
+  return <aside ref={panel} id={panelId} className="sw-diff" data-layout={layout}
+    aria-label="Changes" hidden={!open || covered} data-resizing={resizing || undefined}
     onKeyDown={(event) => {
       if (event.key !== "Escape" || event.nativeEvent.isComposing) return;
       event.stopPropagation();
       onClose(true);
     }}>
     <div className="sw-diff-inner">
-      {layout !== "floating" && <div className="sw-diff-tabs" role="tablist" aria-label="Chat view" onKeyDown={(event) => {
-        if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
-        event.preventDefault();
-        const next = tab === "chat" ? "changes" : "chat";
-        onTab(next);
-        (event.currentTarget.querySelector<HTMLElement>(`[data-tab="${next}"]`))?.focus();
-      }}>
-        <button type="button" role="tab" data-tab="chat" aria-selected={covered} tabIndex={covered ? 0 : -1}
-          onClick={() => onTab("chat")}>Chat</button>
-        <button ref={changesTab} type="button" role="tab" data-tab="changes" aria-selected={!covered} tabIndex={covered ? -1 : 0}
-          aria-controls={`${panelId}-content`} onClick={() => onTab("changes")}>Changes</button>
-      </div>}
-      <div id={`${panelId}-content`} className="sw-diff-content" hidden={covered}>
+      <div id={`${panelId}-content`} className="sw-diff-content">
       <header className="sw-diff-header">
+        {switched && <DiffViewSwitch tab="changes" onTab={onTab} focusRef={changesTab} />}
         <div className="sw-diff-title">
-          <h2>{bases.length === 1 ? <>Changes vs base <code>{shortRevision(bases[0])}</code></> : "Changes"}</h2>
+          {/* Beside the Chat/Changes switch the word Changes would repeat it. */}
+          <h2>{bases.length === 1 ? <>{switched ? "vs base" : "Changes vs base"} <code>{shortRevision(bases[0])}</code></>
+            : switched ? null : "Changes"}</h2>
           {files.length > 0 && <span className="sw-diff-summary">
             <Counts additions={additions} deletions={deletions} /> · {files.length} {files.length === 1 ? "file" : "files"}
           </span>}
@@ -532,6 +560,19 @@ export function DiffPanel({ agent, open, layout, tab, onTab, resizing, resizeHan
           <LuX aria-hidden="true" strokeWidth={1.5} />
         </button>
       </header>
+      {allGroups.length > 1 && <label className="sw-diff-source">
+        <span>Location</span>
+        <select value={picked ? source : "all"} onChange={(event) => {
+          setSource(event.target.value);
+          setSelected(undefined);
+          scroller.current?.scrollTo({ top: 0 });
+        }}>
+          <option value="all">All locations ({allGroups.reduce((sum, group) => sum + group.files.length, 0)} files)</option>
+          {allGroups.map((group) => <option key={groupKey(group)} value={groupKey(group)}>
+            {groupLabel(group)} ({group.error ? "unavailable" : `${group.files.length} ${group.files.length === 1 ? "file" : "files"}`})
+          </option>)}
+        </select>
+      </label>}
       {tree && <div className="sw-diff-tree-wrap">{tree}</div>}
       <div ref={scroller} className="sw-diff-body" aria-busy={refreshing}>{body}</div>
       </div>

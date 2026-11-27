@@ -83,6 +83,21 @@ export function chooseModelSettings(settings: ModelSettings, change: { model?: s
   return next;
 }
 
+/** The reasoning effort a new task starts with unless the user picks another. */
+export const newTaskEffort = "medium";
+
+/**
+ * The effort a new task starts with: medium when the model offers it, or when the list does not describe the
+ * model (an unlisted custom model, or no list). A listed model without medium keeps its own default.
+ */
+export function newTaskEffortFor(model: string | null | undefined, catalog: ModelCatalog | undefined) {
+  const option = model
+    ? catalog?.models.find((entry) => entry.id === model || entry.aliases?.includes(model))
+    : catalog?.models.find((entry) => entry.isDefault);
+  if (!option) return newTaskEffort;
+  return option.efforts.includes(newTaskEffort) ? newTaskEffort : undefined;
+}
+
 /** Reasoning efforts Orchestra accepts without a provider listing them. */
 export const knownEfforts = ["none", "minimal", "low", "medium", "high", "xhigh", "max"];
 
@@ -133,11 +148,12 @@ export function modelOptions(models: ProviderModel[]): ModelOption[] {
 }
 
 /** Resolves what the picker shows for a task: the chosen model, else the reported one, else the provider default. */
-export function currentModelChoice(settings: ModelSettings | undefined, models: ModelOption[]) {
+export function currentModelChoice(settings: ModelSettings | undefined, models: ModelOption[], newTask = false) {
   const modelId = settings?.requestedModel ?? settings?.reportedModel;
   const option = modelId
     ? models.find((entry) => entry.id === modelId || entry.aliases?.includes(modelId))
     : models.find((entry) => entry.isDefault);
-  const effort = settings?.requestedEffort ?? settings?.reportedEffort ?? option?.defaultEffort;
+  const effort = settings?.requestedEffort ?? settings?.reportedEffort ??
+    (newTask ? newTaskEffortFor(modelId, { models }) : undefined) ?? option?.defaultEffort;
   return { modelId, option, effort };
 }

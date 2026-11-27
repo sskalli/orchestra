@@ -10,8 +10,8 @@ Top-level tasks have large nodes. Native children appear on successive rings as 
 
 ## Task sessions
 
-A session can handle a general conversation, a read-only investigation, or work across one or more repositories. Keep planning, user decisions, delivery, and follow-up in the same task chat. The session can delegate through its engine's subagents and report results from its children. Child chats are available for inspection.
+A session can handle a general conversation, a read-only investigation, or work across one or more repositories. Keep planning, user decisions, changes, and follow-up in the same task chat. The session can delegate through its engine's subagents and report results from its children. Child chats are available for inspection.
 
-Explicit implementation approval lets a task edit the selected repositories in isolated worktrees by default. The user can approve a configured checkout or a requested linked worktree for a specific repository. Show which scope the approval grants. Record verification against the exact edited contents and show pinned revisions for isolated changes that still need integration.
+A task can read and write its selected repositories from the start. The agent applies a worktree workflow itself: a linked worktree and branch per change, with commits there and no pull requests. Show each commit, new branch, push, and published branch the task made in its chat, and leave out what Orchestra cannot attribute to it. Access outside the selected repositories needs the user's approval, and one approval can cover a folder for the rest of the task instead of each command.
 
 Persist open questions and task history. Make provider failures and interrupted work visible and allow the user to recover without losing the plan or transcript.

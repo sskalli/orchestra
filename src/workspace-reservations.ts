@@ -2,16 +2,9 @@ import { execFileSync } from "node:child_process";
 import { mkdtempSync, realpathSync, renameSync, rmdirSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
-export type CheckoutReservation = { id: string; pid: number; directories: string[] };
+export type PathReservation = { id: string; pid: number; directories: string[] };
 
-export function checkoutReservationDirectory(checkout: string) {
-  const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith("GIT_")));
-  const gitDirectory = realpathSync(execFileSync("git", ["rev-parse", "--absolute-git-dir"],
-    { cwd: checkout, env, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim());
-  return join(gitDirectory, "orchestra-checkout-write");
-}
-
-export function acquirePathReservations({ id, directories }: Pick<CheckoutReservation, "id" | "directories">) {
+export function acquirePathReservations({ id, directories }: Pick<PathReservation, "id" | "directories">) {
   const acquired: string[] = [];
   try {
     for (const directory of directories) {
@@ -36,7 +29,7 @@ export function acquirePathReservations({ id, directories }: Pick<CheckoutReserv
   }
 }
 
-export function releasePathReservations({ id, directories }: Pick<CheckoutReservation, "id" | "directories">) {
+export function releasePathReservations({ id, directories }: Pick<PathReservation, "id" | "directories">) {
   let released = true;
   for (const directory of directories) {
     try {
@@ -51,7 +44,7 @@ export function releasePathReservations({ id, directories }: Pick<CheckoutReserv
   return released;
 }
 
-export function reservationOwnerAlive({ pid }: Pick<CheckoutReservation, "pid">) {
+export function reservationOwnerAlive({ pid }: Pick<PathReservation, "pid">) {
   try {
     process.kill(pid, 0);
     return true;
