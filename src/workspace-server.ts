@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import { WorkspaceRuntime } from "./workspace-runtime.ts";
 import { workspaceStore } from "./workspace-store.ts";
 import { parseWorkspaceArgs } from "./workspace-options.ts";
+import { loadLocalImage } from "./workspace-images.ts";
 import { defaultProject, resolveProjects, workspaceIdentity } from "./workspace-projects.ts";
 
 const { live, projectPath, projects: specifiedProjects, provider: modelProvider, engine } = parseWorkspaceArgs(process.argv.slice(2));
@@ -85,6 +86,29 @@ const server = createServer(async (request, response) => {
     }
     response.writeHead(200, { "Content-Type": "application/json", "Content-Disposition": 'attachment; filename="orchestra-usage.json"' })
       .end(JSON.stringify(usage, null, 2));
+    return;
+  }
+  if (request.method === "GET" && path === "/api/image") {
+    // Other sites must not load these images, or they could probe which files exist.
+    response.setHeader("Cross-Origin-Resource-Policy", "same-origin");
+    const query = new URL(request.url ?? "", origin).searchParams;
+    const image = await loadLocalImage(query.get("path") ?? "", runtime.imageRoots(query.get("agent") ?? undefined));
+    if (!("body" in image)) {
+      response.writeHead(image.status, { "Content-Type": "text/plain; charset=utf-8" }).end(image.reason);
+      return;
+    }
+    // Revalidate every time so a screenshot regenerated under the same name shows its new contents.
+    const headers = { "Cache-Control": "no-cache", ETag: image.etag };
+    if (request.headers["if-none-match"] === image.etag) {
+      response.writeHead(304, headers).end();
+      return;
+    }
+    // A sandboxed, script-free policy keeps an SVG opened in its own tab from acting on the workspace origin.
+    response.writeHead(200, {
+      ...headers,
+      "Content-Type": image.type,
+      "Content-Security-Policy": "default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline'; sandbox; frame-ancestors 'none'",
+    }).end(image.body);
     return;
   }
   if (request.method === "GET" && path === "/api/events") {
