@@ -28,16 +28,29 @@ let runtime: WorkspaceRuntime;
 // Fits the longest message Codex accepts even when every character is JSON-escaped.
 const commandByteLimit = messageCharacterLimit * 6 + 64 * 1024;
 
+class CommandTooLarge extends Error {}
+
 async function readCommand(request: IncomingMessage) {
   const chunks: Buffer[] = [];
   let size = 0;
-  for await (const chunk of request) {
-    size += chunk.length;
-    // Keep reading so the client receives the error instead of a reset connection.
-    if (size <= commandByteLimit) chunks.push(chunk);
-  }
+  await new Promise<void>((resolve, reject) => {
+    const onData = (chunk: Buffer) => {
+      size += chunk.length;
+      // Keep reading a slightly oversized body so the client receives the error instead of a reset connection.
+      if (size <= commandByteLimit) chunks.push(chunk);
+      else if (size > commandByteLimit * 2) {
+        // Stop reading without destroying the socket, so the 413 response can still be written.
+        request.off("data", onData);
+        request.pause();
+        resolve();
+      }
+    };
+    request.on("data", onData);
+    request.once("end", () => resolve());
+    request.once("error", reject);
+  });
   if (size > commandByteLimit) {
-    throw new Error(`Message is too long (more than ${messageCharacterLimit.toLocaleString("en-US")} characters).`);
+    throw new CommandTooLarge(`Message is too long (more than ${messageCharacterLimit.toLocaleString("en-US")} characters).`);
   }
   const command = JSON.parse(Buffer.concat(chunks).toString("utf8"));
   if (command?.type === "createTask" && typeof command.name === "string" &&
@@ -120,7 +133,8 @@ const server = createServer(async (request, response) => {
         response.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({ agentId: result }));
       } else response.writeHead(204).end();
     } catch (error) {
-      response.writeHead(400, { "Content-Type": "application/json" })
+      const tooLarge = error instanceof CommandTooLarge;
+      response.writeHead(tooLarge ? 413 : 400, { "Content-Type": "application/json", ...(tooLarge ? { Connection: "close" } : {}) })
         .end(JSON.stringify({ error: error instanceof Error ? error.message : "Workspace command failed" }));
     }
     return;

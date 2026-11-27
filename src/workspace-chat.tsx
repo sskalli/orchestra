@@ -285,8 +285,11 @@ function Conversation({
   const mounted = useRef(true);
   draftChangeRef.current = onDraftChange;
   const [steerEnabled, setSteerEnabled] = useState(false);
-  const [sending, setSending] = useState(false);
+  const [pendingSends, setPendingSends] = useState(0);
+  const sendChain = useRef<Promise<unknown>>(Promise.resolve());
   const [retrying, setRetrying] = useState(false);
+  const [retriedId, setRetriedId] = useState<string>();
+  const retriedRef = useRef<string>(undefined);
   const [cancelling, setCancelling] = useState(false);
   const [resumingQueue, setResumingQueue] = useState(false);
   const [approvingImplementation, setApprovingImplementation] = useState(false);
@@ -336,7 +339,8 @@ function Conversation({
   const recipient = `${projectLabel ? `${projectLabel} / ` : ""}${displayName}`;
   const archived = agent.archivedAt !== undefined;
   const blocked = Boolean(disabled || archived || agent.lifecycleBusy || agent.nativeChild);
-  const readyToSend = !blocked && !sending && Boolean(draft.trim());
+  const sending = pendingSends > 0;
+  const readyToSend = !blocked && Boolean(draft.trim());
   const hasFocusMessage = agent.messages.some((message) => message.id === focusMessageId);
   const shownInConversation = (detail: string) => agent.messages.some((message) =>
     message.role === "system" && Boolean(message.text) && (message.text.includes(detail) || detail.includes(message.text)));
@@ -501,49 +505,59 @@ function Conversation({
 
   async function send(action: (text: string) => Promise<void> | void) {
     if (!readyToSend) return;
-    const submitted = draft;
+    const submitted = draftRef.current;
     const tooLong = messageLengthProblem(submitted.trim());
     if (tooLong) {
       setError(tooLong);
       return;
     }
-    const revision = draftRevision.current;
+    // Clear exactly the submitted text now, so typing during the request starts a new message.
+    // Sends run in order; a failed one puts its text back in front of whatever was typed since.
+    updateDraft("");
     flushDraft();
-    setSending(true);
+    setPendingSends((count) => count + 1);
     setError("");
+    const request = sendChain.current.then(() => action(submitted));
+    sendChain.current = request.catch(() => undefined);
     try {
-      await action(submitted);
-      if (mounted.current && draftRevision.current === revision) {
-        updateDraft("");
-      }
-      if (mounted.current) flushDraft();
+      await request;
       pinToBottom.current = true;
       const element = transcript.current;
       if (element) element.scrollTop = element.scrollHeight;
     } catch (failure) {
+      const typed = draftRef.current;
+      updateDraft(typed.trim() ? `${submitted}\n${typed}` : submitted);
+      flushDraft();
       setError(failure instanceof Error ? failure.message : "Message could not be sent.");
     } finally {
-      setSending(false);
+      setPendingSends((count) => count - 1);
     }
   }
 
   const steerAction = steerEnabled && agent.canSteer ? onSteer : undefined;
   const retryId = retryableMessageId(agent.messages);
-  const retryDisabled = blocked || sending || Boolean(agent.canCancel) || agent.queueDepth > 0 || agent.status === "working";
+  // A retried message stays disabled until the resent message replaces it as the latest one.
+  const retryDisabled = blocked || sending || retrying || retryId === retriedId || Boolean(agent.canCancel) ||
+    agent.queueDepth > 0 || agent.status === "working";
 
   // Resends the failed message's text as a new message. The draft is left untouched.
-  const retry = useCallback(async (text: string) => {
-    if (retryDisabled || retrying) return;
+  const retry = useCallback(async (id: string, text: string) => {
+    // The ref also stops clicks that arrive before React re-renders the disabled button.
+    if (retryDisabled || retriedRef.current === id) return;
+    retriedRef.current = id;
     setRetrying(true);
+    setRetriedId(id);
     setError("");
     try {
       await onSend(text);
     } catch (failure) {
+      retriedRef.current = undefined;
+      setRetriedId(undefined);
       setError(failure instanceof Error ? failure.message : "Message could not be sent.");
     } finally {
       if (mounted.current) setRetrying(false);
     }
-  }, [onSend, retryDisabled, retrying]);
+  }, [onSend, retryDisabled]);
 
   function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -645,7 +659,7 @@ function Conversation({
                 )}
               </div>
               <MessageActions message={message} retrying={retrying} retryDisabled={retryDisabled}
-                onRetry={message.id === retryId ? () => void retry(message.text) : undefined} />
+                onRetry={message.id === retryId ? () => void retry(message.id, message.text) : undefined} />
             </article>
           );
         }), [retry, retryDisabled, retryId, retrying, agent.messages, agent.canCancel, agent.queueDepth, approveImplementation, approvingImplementation, archived, blocked, hiddenMessages, onApproveImplementation, onResolveCommandApproval, repositoryScope]);
@@ -778,6 +792,7 @@ function Conversation({
           <div className="chat-queue" aria-live="polite">
             {showWorkingIndicator && <OrbitSpinner />}
             {agent.queueDepth > 0 ? `${agent.queueDepth} queued${agent.queuePaused ? " · paused" : ""}`
+              : agent.reconnecting ? (/^reconnecting/i.test(agent.reconnecting) ? agent.reconnecting : `Reconnecting… ${agent.reconnecting}`)
               : agent.awaitingSubagents ? `Waiting for ${agent.awaitingSubagents} subagent${agent.awaitingSubagents === 1 ? "" : "s"} — your messages reach the agent now.`
               : steerAction ? "Agent is working — sending will steer the current turn." : "Agent is working — new messages will queue."}
             {agent.queuePaused && onResumeQueue && <button className="chat-steer" type="button"
@@ -786,10 +801,10 @@ function Conversation({
         ) : null}
         {blocked && disabledReason && !shownInConversation(disabledReason) ? <p className="chat-disabled">{disabledReason}</p> : null}
         {!blocked && providerNotice ? <p className="chat-disabled chat-provider-notice" role="status">{providerNotice}
-          {retryId && <button type="button" className="chat-steer" disabled={retryDisabled || retrying}
+          {retryId && <button type="button" className="chat-steer" disabled={retryDisabled}
             onClick={() => {
               const failed = agent.messages.find(({ id }) => id === retryId);
-              if (failed) void retry(failed.text);
+              if (failed) void retry(failed.id, failed.text);
             }}>{retrying ? "Trying again…" : "Try again"}</button>}</p> : null}
         {error && !shownInConversation(error) ? <p className="chat-error" role="alert">{error}</p> : null}
         <div className="chat-composer-box">
