@@ -5,6 +5,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { WorkspaceCanvas } from "./workspace-canvas.tsx";
 import { WorkspaceChat } from "./workspace-chat.tsx";
+import { restoredDraft } from "./workspace-chat-recovery.ts";
 import { WorkspaceInbox } from "./workspace-inbox.tsx";
 import type { InboxEvent } from "./workspace-inbox.tsx";
 import { clearFlightLog, recordFlightLog } from "./workspace-flight-log.ts";
@@ -284,7 +285,10 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
 
   const selected = agents.find((agent) => agent.id === selectedId);
   const dockAgent = agents.find((agent) => agent.id === dockId);
-  const blocked = !connected || !["ready", "demo"].includes(provider.state);
+  // A usage limit is reported in each chat with a way to try again; it never disables sending.
+  const blocked = !connected || !["ready", "demo", "usage-limit"].includes(provider.state);
+  const providerNotice = connected && provider.state === "usage-limit"
+    ? provider.message ?? providerLabel(provider) : undefined;
   const blockedReason = !connected ? "Reconnecting to the local workspace…" : provider.message ?? providerLabel(provider);
   const projectName = project.name;
   // Workspace-level detail (sign-in steps, save or load failures, usage limits) stays readable without hovering.
@@ -497,13 +501,20 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
         draftRevisions.current[agent.id] = (draftRevisions.current[agent.id] ?? 0) + 1;
       }}
       onDraftChange={(value) => setDrafts((current) => ({ ...current, [agent.id]: value }))}
+      onDraftRestore={(unsent) => {
+        const restored = restoredDraft(unsent, draftsRef.current[agent.id] ?? "");
+        draftsRef.current = { ...draftsRef.current, [agent.id]: restored };
+        draftRevisions.current[agent.id] = (draftRevisions.current[agent.id] ?? 0) + 1;
+        setDrafts((current) => ({ ...current, [agent.id]: restored }));
+      }}
       onSend={(value) => submit("send", value)}
       onSteer={(value) => submit("steer", value)}
       onCancel={() => send({ type: "cancel", agentId: agent.id })}
       onResumeQueue={() => send({ type: "resumeQueue", agentId: agent.id })}
       onClose={() => closeAgent(true)}
       disabled={blocked || Boolean(agent.unavailableReason) || Boolean(agent.archivedAt) || Boolean(agent.lifecycleBusy)}
-      disabledReason={agent.unavailableReason ?? (blocked && !(connected && provider.state === "usage-limit") ? blockedReason : undefined)}
+      disabledReason={agent.unavailableReason ?? (blocked ? blockedReason : undefined)}
+      providerNotice={providerNotice}
       focusMessageId={focus.id}
       focusRequest={focus.count}
     />;

@@ -18,6 +18,7 @@ import { checkoutBaseline, createRequestedWorktree, removeRequestedWorktree, res
 import type { WriteTarget } from "./workspace-write-scope.ts";
 import { defaultProject, workspaceIdentity } from "./workspace-projects.ts";
 import type { WorkspaceProject } from "./workspace-projects.ts";
+import { implementationApprovalText, messageLength, messageLengthProblem } from "./workspace-chat-recovery.ts";
 
 export type AgentStatus = "idle" | "working" | "attention" | "awaiting-confirmation" | "done" | "error" | "notice";
 export type AgentRole = "worker";
@@ -74,6 +75,8 @@ export type WorkspaceAgent = {
   canCancel?: boolean;
   /** The agent ended its response and its turn stays open for this many background subagents. */
   awaitingSubagents?: number;
+  /** The provider is retrying this task's current turn, for example after a dropped stream. */
+  reconnecting?: string;
   archivedAt?: number;
   lifecycleBusy?: boolean;
   lifecycleBlockedReason?: string;
@@ -215,6 +218,21 @@ function errorText(error: unknown) {
   return safeError(error instanceof Error ? error.message : error);
 }
 
+/**
+ * Recognizes rate and usage limits. Codex reports an HTTP 429 from a provider as
+ * "exceeded retry limit, last status: 429 Too Many Requests" with structured codexErrorInfo.
+ */
+function limitDetail(engineName: string, detail: string, error: unknown) {
+  const info = (error as { codexErrorInfo?: unknown } | undefined)?.codexErrorInfo;
+  const structured = info === "usageLimitExceeded" || (!!info && typeof info === "object" &&
+    Object.entries(info).some(([kind, value]) => kind === "usageLimitExceeded" ||
+      (value as { httpStatusCode?: unknown } | null)?.httpStatusCode === 429));
+  const phrase = /\b(usage|rate) limit\b|too many requests|insufficient_quota|exceeded your current quota|last status: 429\b/i;
+  if (!structured && !phrase.test(detail)) return undefined;
+  if (/\b(usage|rate) limit\b/i.test(detail)) return detail;
+  return `${engineName} hit a rate or usage limit. ${detail}`;
+}
+
 // Characters that can hide or reorder what the user reviews on an approval card.
 const unsafeDisplayText = /[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u061c\u200b-\u200f\u2028-\u202e\u2060-\u2069\ufeff]/;
 
@@ -278,6 +296,8 @@ export class WorkspaceRuntime {
   private storageFailed = false;
   private releaseWorkspaceState?: () => void;
   private storageReady = false;
+  /** The turn whose provider error reported the current usage limit. */
+  private limitTurnId?: string;
   private readonly sessions = new Map<string, AgentSession>();
   private readonly threadSessions = new Map<string, AgentSession>();
   private readonly listeners = new Set<(snapshot: WorkspaceSnapshot) => void>();
@@ -460,7 +480,7 @@ export class WorkspaceRuntime {
         }
       }
       if (!this.storageFailed && !this.closed) {
-        this.setProvider("ready");
+        if (this.state.provider.state !== "usage-limit") this.setProvider("ready");
         this.releaseSettledCheckouts();
       }
     } catch (error) {
@@ -529,7 +549,11 @@ export class WorkspaceRuntime {
       throw new Error("Unknown workspace command.");
     }
     const text = typeof command.text === "string" ? command.text.trim() : "";
-    if (!text || text.length > 24_000) throw new Error("Enter a message of 1–24,000 characters.");
+    if (!text) throw new Error("Enter a message.");
+    const question = command.type === "answerProductQuestion"
+      ? session.agent.messages.find(({ id }) => id === command.questionId) : undefined;
+    const tooLong = messageLengthProblem(text, question ? messageLength(this.answerPrefix(question.text)) : 0);
+    if (tooLong) throw new Error(tooLong);
     if (command.type === "steer") {
       await this.steer(session, text);
       return;
@@ -680,6 +704,10 @@ export class WorkspaceRuntime {
       this.removePreparedWorktrees(created);
       throw new Error("Another task is already writing in an approved destination. Wait for it to finish.");
     }
+    if (messageLengthProblem(this.implementationInput(implementationApprovalText, request.text, roots))) {
+      this.removePreparedWorktrees(created);
+      throw new Error(`The implementation request is too long to send to ${this.engineName}. Ask the agent for a shorter request.`);
+    }
 
     const previousWorktrees = agent.scopedWorktrees;
     const previousCandidate = agent.candidate;
@@ -687,7 +715,7 @@ export class WorkspaceRuntime {
     const previousTask = { ...task };
     const previousStatus = agent.status;
     const previousIntegration = agent.integration;
-    const assignment = message("user", "I approve the requested implementation.");
+    const assignment = message("user", implementationApprovalText);
     const reservation = checkoutDirectories.length
       ? { id: assignment.id, pid: process.pid, directories: checkoutDirectories } : undefined;
     const automatic = roots.every(({ mode }) => mode === "automatic");
@@ -1035,7 +1063,9 @@ export class WorkspaceRuntime {
   }
 
   private get available() {
-    return this.state.provider.state === "ready" || this.state.provider.state === "demo";
+    // A usage limit is reported per turn. Sending again is how the user retries, so it does not block.
+    const { state } = this.state.provider;
+    return state === "ready" || state === "demo" || state === "usage-limit";
   }
 
   private persist() {
@@ -1147,7 +1177,7 @@ export class WorkspaceRuntime {
     for (const { agent, threadId, run, toolVersion, checkoutReservation } of saved) {
       const session = this.createAgent(agent.id, agent.name, "worker", agent.parentId, agent.goal);
       Object.assign(session.agent, agent, {
-        projectId: agent.projectId, canSteer: false, canCancel: false, lifecycleBusy: undefined, awaitingSubagents: undefined,
+        projectId: agent.projectId, canSteer: false, canCancel: false, lifecycleBusy: undefined, awaitingSubagents: undefined, reconnecting: undefined,
       });
       session.threadId = agent.nativeChild || agent.archivedAt || run || hasSubmittedMessage(agent) ? threadId : undefined;
       session.toolVersion = toolVersion;
@@ -1424,9 +1454,11 @@ export class WorkspaceRuntime {
   private answerInput(session: AgentSession, entry: WorkspaceMessage) {
     if (!entry.answersProductQuestionId) return entry.text;
     const question = session.agent.messages.find(({ id }) => id === entry.answersProductQuestionId);
-    return question?.productQuestion
-      ? `My answer to this product decision:\n\n${question.text}\n\nAnswer: ${entry.text}`
-      : entry.text;
+    return question?.productQuestion ? this.answerPrefix(question.text) + entry.text : entry.text;
+  }
+
+  private answerPrefix(question: string) {
+    return `My answer to this product decision:\n\n${question}\n\nAnswer: `;
   }
 
   private implementationInput(text: string, approvedScope: string, roots: ImplementationRoot[]) {
@@ -1564,6 +1596,7 @@ export class WorkspaceRuntime {
     }
     delete session.run;
     delete session.agent.awaitingSubagents;
+    delete session.agent.reconnecting;
     if (session.agent.canCancel !== undefined) session.agent.canCancel = false;
     for (const entry of session.stream.values()) {
       if (completed) delete entry.state;
@@ -1581,6 +1614,20 @@ export class WorkspaceRuntime {
       session.agent.status = "error";
     }
     if (detail) session.agent.messages.push(message("system", detail, completed || cancelled ? "notice" : "error"));
+    if (!completed && session.queue.length) {
+      // Pause follow-ups, and put a failed plain message back first so Resume queue sends it in order.
+      session.agent.queuePaused = true;
+      const failed = directTaskRun?.message;
+      // Skip it when the outcome is uncertain (recovery pending): the turn may have run, so resending could repeat it.
+      if (!cancelled && !session.recovery && failed && !implementationRoots && failed.state === "failed" &&
+          !failed.answersProductQuestionId) {
+        const again: WorkspaceMessage = { ...message("user", failed.text), state: "queued" };
+        const position = session.agent.messages.indexOf(session.queue[0]);
+        session.queue.unshift(again);
+        if (position >= 0) session.agent.messages.splice(position, 0, again);
+        else session.agent.messages.push(again);
+      }
+    }
     this.releaseSettledCheckouts(session);
     if (!completed || !this.drain(session)) this.update(session);
     return completed;
@@ -1764,14 +1811,18 @@ export class WorkspaceRuntime {
     }
     if (method === "error") {
       const detail = errorText(params.error?.message ?? params.message ?? `${this.engineName} reported an error.`);
-      if (/usage.?limit|rate.?limit|quota/i.test(detail)) {
-        this.setProvider("usage-limit", detail);
-        for (const session of this.sessions.values()) session.agent.canSteer = false;
-      } else if (params.willRetry && /reconnect/i.test(detail)) {
-        this.setProvider("connecting", detail);
-        for (const session of this.sessions.values()) session.agent.canSteer = false;
+      const limit = limitDetail(this.engineName, detail, params.error);
+      const run = session?.run;
+      const ownTurn = !!run && (!run.turn || !params.turnId || params.turnId === run.turn.id);
+      if (limit) {
+        // Keep the reason visible; the workspace stays usable and recovers on the next successful turn.
+        this.limitTurnId = typeof params.turnId === "string" ? params.turnId : run?.turn?.id;
+        this.setProvider("usage-limit", limit);
       }
-      this.publish();
+      // A retry belongs to one task's turn; the other tasks and the provider connection stay usable.
+      if (session && ownTurn && params.willRetry) session.agent.reconnecting = detail;
+      else if (session && ownTurn) delete session.agent.reconnecting;
+      this.publish(false);
       return;
     }
     if (!session?.run) return;
@@ -1797,9 +1848,14 @@ export class WorkspaceRuntime {
     if (method === "turn/completed" && params.turn && (!session.run.turn || params.turn.id === session.run.turn.id)) {
       const completed = params.turn.status === "completed";
       const cancelled = params.turn.status === "interrupted";
-      if (completed && this.state.provider.state === "connecting") this.setProvider("ready");
-      else if (!completed && this.state.provider.state === "connecting") {
-        this.setProvider("error", errorText(params.turn.error?.message ?? `${this.engineName} connection failed.`));
+      if (this.state.provider.state === "usage-limit") {
+        // Clear the limit after any successful turn, or when a later turn fails for another reason.
+        const limited = params.turn.id === this.limitTurnId ||
+          !!limitDetail(this.engineName, errorText(params.turn.error?.message ?? ""), params.turn.error);
+        if (completed || (!cancelled && !limited)) {
+          delete this.limitTurnId;
+          this.setProvider("ready");
+        }
       }
       if (cancelled) session.agent.queuePaused = session.queue.length > 0;
       const detail = params.turn.error?.message ?? (cancelled ? "The turn was interrupted." : "The turn did not complete.");
@@ -1807,6 +1863,11 @@ export class WorkspaceRuntime {
       return;
     }
     if (!session.run.turn || params.turnId !== session.run.turn.id) return;
+    if (session.agent.reconnecting && method !== "thread/status/changed") {
+      // Any progress on the turn means the provider retry succeeded.
+      delete session.agent.reconnecting;
+      this.publish(false);
+    }
     if (method === "item/started" && params.item?.type === "fileChange" && params.item.id && Array.isArray(params.item.changes)) {
       const files = params.item.changes.map((change) => change?.path);
       // An unlisted path leaves the request without a reviewable file list, so it is declined.
