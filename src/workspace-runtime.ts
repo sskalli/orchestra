@@ -2,11 +2,11 @@ import { demoTasks } from "./workspace-demo.ts";
 import { WorkspaceUsage } from "./workspace-usage.ts";
 import { randomUUID } from "node:crypto";
 import { basename, dirname, isAbsolute, relative, resolve, sep } from "node:path";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { AppServer, codexCommand, safeError, type ProviderServer } from "./app-server.ts";
 import { ClaudeAppServer, claudeProviderId } from "./claude-app-server.ts";
 import type { Event, Id, Thread, Turn } from "./app-server.ts";
-import { describeGitActivity, forkPoint, gitCommonDirectory, headRevision, listLinkedWorktrees, readRefState } from "./workspace-git-activity.ts";
+import { deleteRef, describeGitActivity, forkPoint, gitCommonDirectory, listWorktrees, readRefState, snapshotCheckout } from "./workspace-git-activity.ts";
 import type { RefState } from "./workspace-git-activity.ts";
 import { chooseModelSettings, modelOptions, newTaskEffortFor, recordReportedModel, selectModelSettings, turnModelParams, validateEffort, withDefaultEffort } from "./workspace-models.ts";
 import type { ModelCatalog, ModelSettings, ProviderModel, ReportedModel } from "./workspace-models.ts";
@@ -47,6 +47,8 @@ export type PermissionApproval = {
   writePaths?: string[];
   readPaths?: string[];
   network?: string;
+  /** Folders that Allow for this task also lets later turns write, shown on the card before the user decides. */
+  grantPaths?: string[];
   choices?: ApprovalChoice[];
   declineStopsTurn?: boolean;
 };
@@ -129,11 +131,22 @@ type AgentSession = {
   opening?: boolean;
   queue: WorkspaceMessage[];
   stream: Map<string, WorkspaceMessage>;
-  /** Branch tips of the task's repositories when Orchestra last looked, to report commits and pushes. */
-  gitRefs?: Map<string, RefState>;
-  /** Linked worktree paths of each repository at turn start, to notice the ones the task creates. */
-  gitWorktrees?: Map<string, Set<string>>;
+  /** What Orchestra last read from the task's repositories during the current turn. */
+  gitWatch?: GitWatch;
+  /** The task's Git readings, run one after another, including a finished turn's last one. */
+  gitChain?: Promise<void>;
 };
+type GitWatch = {
+  /** Branch tips per repository, to report commits and pushes made since. */
+  refs: Map<string, RefState>;
+  /** Linked worktree paths per repository, to notice the ones the task creates. */
+  worktrees: Map<string, Set<string>>;
+  timer?: ReturnType<typeof setTimeout>;
+};
+/** Commands often come in bursts; one reading covers the commands that finish within this window. */
+const gitCheckDelayMs = 300;
+/** Where a task keeps the snapshot of a checkout's contents at its first turn, per repository. */
+const taskStartRef = (agentId: string) => `refs/orchestra/task-start/${agentId}`;
 
 const questionResolutionToolVersion = 14;
 /** New threads get Orchestra's question tools only; versions up to 16 also had implementation and check tools. */
@@ -312,6 +325,10 @@ export class WorkspaceRuntime {
 
   private readonly createServer?: () => ProviderServer;
   private readonly skillCatalogs = new Map<string, SkillCatalog>();
+  /** Each repository's shared Git directory, read once. */
+  private readonly gitDirectories = new Map<string, string | undefined>();
+  /** Git readings in progress, so closing and tests can wait for them. */
+  private readonly gitChecks = new Set<Promise<void>>();
 
   constructor({ cwd, projects = [defaultProject(cwd)], demo = false, modelProvider = "openai", engine = "codex", store, createServer }: {
     cwd: string;
@@ -905,6 +922,12 @@ export class WorkspaceRuntime {
           throw new Error("Deletion could not be saved. The conversations were kept; resolve the storage failure before trying again.");
         }
         this.trackUsage((usage) => usage.removeAgents([...ids]));
+        for (const entry of affected) {
+          for (const projectId of entry.agent.directTask?.projectIds ?? []) {
+            const project = this.projects.find(({ id }) => id === projectId);
+            if (project) void deleteRef(project.path, taskStartRef(entry.agent.id));
+          }
+        }
       } else {
         const archiveDates = affected.map((entry) => entry.agent.archivedAt);
         for (const entry of affected) {
@@ -1247,7 +1270,7 @@ export class WorkspaceRuntime {
    */
   private directTaskWriteRoots(session: AgentSession) {
     const repositories = this.directTaskReadRoots(session);
-    const gitDirectories = repositories.map(gitCommonDirectory).filter((path): path is string => Boolean(path));
+    const gitDirectories = repositories.map((path) => this.gitDirectories.get(path)).filter((path): path is string => Boolean(path));
     return [...new Set([...repositories, ...gitDirectories, ...(session.agent.grantedPaths ?? [])])];
   }
 
@@ -1337,7 +1360,15 @@ export class WorkspaceRuntime {
       this.scheduleDemo(session, run);
       return;
     }
-    this.watchGitActivity(session);
+    await this.watchGitActivity(session);
+    if (session.run !== run) return;
+    const neighbours = this.concurrentTasks(session);
+    if (neighbours.length) {
+      session.agent.messages.push(message("system", `${neighbours.map(({ agent }) => agent.name).join(", ")} ${neighbours.length === 1 ? "is" : "are"} also working in ${
+        [...new Set(neighbours.flatMap(({ agent }) => agent.directTask!.projectIds).filter((id) => session.agent.directTask?.projectIds.includes(id)))].join(", ")
+      }. This task was asked to work only in its own worktree and leave the local checkout alone meanwhile.`, "warning"));
+      this.publish();
+    }
     try {
       const turnInput = await this.userInput(session, this.answerInput(session, next), next.text);
       if (session.run !== run) return;
@@ -1347,7 +1378,7 @@ export class WorkspaceRuntime {
         ...turnModelParams(session.agent.modelSettings),
         ...this.directTaskTurnScope(session),
         input: turnInput,
-        additionalContext: this.pendingQuestionContext(session, next),
+        additionalContext: { ...this.pendingQuestionContext(session, next), ...this.concurrencyContext(neighbours) },
       });
       session.freshThread = false;
       if (session.threadId) this.trackTurn(session, session.threadId, turn.id, next);
@@ -1427,9 +1458,12 @@ export class WorkspaceRuntime {
     delete session.agent.reconnecting;
     if (session.agent.canCancel !== undefined) session.agent.canCancel = false;
     this.settleStream(session, completed ? undefined : cancelled ? "cancelled" : "failed");
-    this.reportGitActivity(session);
-    delete session.gitRefs;
-    delete session.gitWorktrees;
+    const watch = session.gitWatch;
+    delete session.gitWatch;
+    if (watch) {
+      clearTimeout(watch.timer);
+      this.queueGitCheck(session, watch);
+    }
     session.agent.status = completed ? "done" : cancelled ? "idle" : "error";
     if (detail) session.agent.messages.push(message("system", detail, completed || cancelled ? "notice" : "error"));
     if (!completed && session.queue.length) {
@@ -1723,7 +1757,7 @@ export class WorkspaceRuntime {
       entry.text += delta;
       this.publish(false);
     }
-    if (method === "item/completed" && params.item?.type === "commandExecution" && this.reportGitActivity(session)) this.publish();
+    if (method === "item/completed" && params.item?.type === "commandExecution") this.scheduleGitCheck(session);
     if (method === "item/completed" && params.item?.type === "agentMessage") {
       const { id, text } = params.item as typeof params.item & { id?: string };
       if (typeof text !== "string") return;
@@ -1814,9 +1848,10 @@ export class WorkspaceRuntime {
       return;
     }
     const choices = (["approve", "approveForSession", "decline"] as const).filter((choice) => offer.responses[choice]);
+    const grantPaths = choices.includes("approveForSession") ? this.grantFolders(session, offer.view) : [];
     const request: WorkspaceMessage = {
       ...message("system", approvalSummary(offer.view.kind!), "action"),
-      commandApproval: { status: "pending", ...offer.view, choices },
+      commandApproval: { status: "pending", ...offer.view, ...(grantPaths.length ? { grantPaths } : {}), choices },
     };
     (run.commandApprovals ??= new Map()).set(id, { message: request, responses: offer.responses });
     session.agent.messages.push(request);
@@ -1848,7 +1883,8 @@ export class WorkspaceRuntime {
     const granting = decision !== "decline";
     // Allowing a request for the task also lets later turns write its folders without asking again.
     const previousGrants = session.agent.grantedPaths;
-    const folders = decision === "approveForSession" ? this.grantFolders(session, approval) : [];
+    // Only the folders the card showed are granted.
+    const folders = decision === "approveForSession" ? (approval.grantPaths ?? []).filter((path) => !previousGrants?.includes(path)) : [];
     if (folders.length) session.agent.grantedPaths = [...(previousGrants ?? []), ...folders];
     // Save a consumed request before handing it off, without claiming delivery.
     approval.status = "unconfirmed";
@@ -1870,78 +1906,133 @@ export class WorkspaceRuntime {
   }
 
   /**
-   * Folders an approval shows that the task cannot write yet: requested write paths or the folders of edited files.
-   * A command's working directory is not granted, since a command can be escalated for reasons other than writing there.
+   * Folders "Allow for this task" would let later turns write: requested write paths, or the folders of edited files.
+   * A folder taken from a single file never widens to the home folder or the filesystem root. A command's working
+   * directory is not granted, since a command can be escalated for reasons other than writing there.
    */
-  private grantFolders(session: AgentSession, approval: PermissionApproval) {
+  private grantFolders(session: AgentSession, view: Omit<PermissionApproval, "status">) {
     const writable = this.directTaskWriteRoots(session);
-    const inside = (path: string) => writable.some((root) => {
+    const contains = (root: string, path: string) => {
       const offset = relative(root, path);
       return offset === "" || (offset !== ".." && !offset.startsWith(".." + sep) && !isAbsolute(offset));
-    });
+    };
+    const tooBroad = (folder: string) => folder === dirname(folder) || contains(folder, homedir());
     const candidates = [
-      ...(approval.writePaths ?? []),
-      ...(approval.files ?? []).map((file) => dirname(file)),
+      ...(view.writePaths ?? []),
+      ...(view.files ?? []).map((file) => dirname(file)).filter((folder) => !tooBroad(folder)),
     ];
     const folders: string[] = [];
     for (const path of candidates) {
-      if (isAbsolute(path) && !inside(path) && !folders.includes(path)) folders.push(path);
+      if (isAbsolute(path) && !writable.some((root) => contains(root, path)) && !folders.includes(path)) folders.push(path);
     }
     return folders;
   }
 
-  /** Remembers the repositories' branch tips so later readings can report commits and pushes made since. */
-  private watchGitActivity(session: AgentSession) {
-    const refs = new Map<string, RefState>();
-    const worktrees = new Map<string, Set<string>>();
+  /** Other tasks running a turn in a repository this task works in. */
+  private concurrentTasks(session: AgentSession) {
+    const mine = session.agent.directTask?.projectIds ?? [];
+    return [...this.sessions.values()].filter((other) => other !== session && other.run && this.isActive(other) &&
+      other.agent.directTask?.projectIds.some((id) => mine.includes(id)));
+  }
+
+  private concurrencyContext(neighbours: AgentSession[]) {
+    if (!neighbours.length) return {};
+    return {
+      orchestra_concurrent_tasks: {
+        kind: "untrusted", name: "orchestra_concurrent_tasks",
+        value: JSON.stringify({
+          instruction: "Other tasks are working in the same repositories right now. Make your changes only in your own linked worktree, and do not edit, commit in, or switch branches in the local checkout until they finish.",
+          tasks: neighbours.map(({ agent }) => ({ name: agent.name, repositories: agent.directTask!.projectIds })),
+        }),
+      },
+    };
+  }
+
+  /**
+   * Reads the repositories at turn start: branch tips and worktrees to compare against later, each repository's
+   * Git directory for the sandbox, and on the task's first turn a snapshot of the local checkout to diff against.
+   */
+  private async watchGitActivity(session: AgentSession) {
+    // A previous turn's last reading must not see this turn's changes as its own.
+    await session.gitChain;
+    const watch: GitWatch = { refs: new Map(), worktrees: new Map() };
     const { agent } = session;
-    for (const projectId of agent.directTask?.projectIds ?? []) {
+    await Promise.all((agent.directTask?.projectIds ?? []).map(async (projectId) => {
       const repository = this.projectById(projectId).path;
-      const state = readRefState(repository);
-      if (state) refs.set(projectId, state);
-      const linked = listLinkedWorktrees(repository);
-      if (linked) worktrees.set(projectId, new Set(linked.map(({ path }) => path)));
-      const head = agent.checkoutBases?.some((entry) => entry.projectId === projectId) ? undefined : headRevision(repository);
-      if (head) agent.checkoutBases = [...(agent.checkoutBases ?? []), { projectId, base: head }];
-    }
-    session.gitRefs = refs;
-    session.gitWorktrees = worktrees;
+      if (!this.gitDirectories.has(repository)) this.gitDirectories.set(repository, await gitCommonDirectory(repository));
+      const [refs, worktrees] = await Promise.all([readRefState(repository), listWorktrees(repository)]);
+      if (refs) watch.refs.set(projectId, refs);
+      if (worktrees) watch.worktrees.set(projectId, new Set(worktrees.filter(({ main }) => !main).map(({ path }) => path)));
+      if (agent.checkoutBases?.some((entry) => entry.projectId === projectId)) return;
+      const base = await snapshotCheckout(repository, taskStartRef(agent.id));
+      if (base && !agent.checkoutBases?.some((entry) => entry.projectId === projectId)) {
+        agent.checkoutBases = [...(agent.checkoutBases ?? []), { projectId, base }];
+      }
+    }));
+    session.gitWatch = watch;
   }
 
-  /** Records linked worktrees created since the turn started, so the changes panel can show them. */
-  private recordTaskWorktrees(session: AgentSession) {
-    let found = false;
-    for (const [projectId, known] of session.gitWorktrees ?? []) {
+  /** Reads the repositories shortly after a command finishes, once for a burst of commands. */
+  private scheduleGitCheck(session: AgentSession) {
+    const watch = session.gitWatch;
+    if (!watch) return;
+    clearTimeout(watch.timer);
+    watch.timer = setTimeout(() => {
+      watch.timer = undefined;
+      if (session.gitWatch === watch) this.queueGitCheck(session, watch);
+    }, gitCheckDelayMs);
+    watch.timer.unref?.();
+  }
+
+  private queueGitCheck(session: AgentSession, watch: GitWatch) {
+    const check = (session.gitChain ?? Promise.resolve()).then(() => this.checkGitActivity(session, watch)).catch(() => {});
+    session.gitChain = check;
+    this.gitChecks.add(check);
+    void check.finally(() => this.gitChecks.delete(check));
+  }
+
+  /**
+   * Records worktrees the task created and reports its commits and pushes. A worktree belongs to the first task that
+   * sees it appear while no other task works in that repository. A change Orchestra cannot attribute is left out
+   * rather than shown in the wrong task.
+   */
+  private async checkGitActivity(session: AgentSession, watch: GitWatch) {
+    if (this.sessions.get(session.agent.id) !== session || this.closed) return;
+    // Read live: other tasks' readings run concurrently and may claim a worktree while this one waits for Git.
+    const ownerOf = (path: string) => [...this.sessions.values()].find((other) =>
+      other.agent.taskWorktrees?.some((entry) => entry.path === path));
+    let changed = false;
+    for (const projectId of new Set([...watch.refs.keys(), ...watch.worktrees.keys()])) {
       const repository = this.projectById(projectId).path;
+      const shared = this.concurrentTasks(session).length > 0;
+      const [worktrees, after] = await Promise.all([listWorktrees(repository), readRefState(repository)]);
+      const known = watch.worktrees.get(projectId);
       const from = session.agent.checkoutBases?.find((entry) => entry.projectId === projectId)?.base;
-      for (const { path, head, branch } of listLinkedWorktrees(repository) ?? []) {
-        if (known.has(path) || !head) continue;
+      for (const { path, head, branch, main } of worktrees ?? []) {
+        if (main || !known || known.has(path) || !head) continue;
         known.add(path);
-        if (session.agent.taskWorktrees?.some((entry) => entry.path === path)) continue;
-        const base = (from && forkPoint(repository, head, from)) || head;
-        session.agent.taskWorktrees = [...(session.agent.taskWorktrees ?? []),
-          { projectId, path, base, ...(branch ? { branch } : {}) }];
-        found = true;
+        if (ownerOf(path) || shared) continue;
+        const base = (from && await forkPoint(repository, head, from)) || head;
+        if (ownerOf(path)) continue;
+        session.agent.taskWorktrees = [...(session.agent.taskWorktrees ?? []), { projectId, path, base, ...(branch ? { branch } : {}) }];
+        changed = true;
       }
-    }
-    return found;
-  }
-
-  /** Reports new commits and pushed branches in the task's repositories since the last reading. */
-  private reportGitActivity(session: AgentSession) {
-    let reported = this.recordTaskWorktrees(session);
-    if (!session.gitRefs?.size) return reported;
-    for (const [projectId, before] of session.gitRefs) {
-      const repository = this.projectById(projectId).path;
-      const after = readRefState(repository);
-      if (!after) continue;
-      for (const note of describeGitActivity(repository, projectId, before, after)) {
-        session.agent.messages.push(message("system", note, "git"));
-        reported = true;
+      const before = watch.refs.get(projectId);
+      if (!before || !after) continue;
+      const checkedOut = new Map((worktrees ?? []).filter(({ branch }) => branch).map((entry) => [entry.branch!, entry]));
+      // A branch in a linked worktree belongs to the task that owns the worktree, and to no task if none does.
+      // A branch in the local checkout, or in none, belongs to this task unless another task works here too.
+      const ownsBranch = (branch: string) => {
+        const entry = checkedOut.get(branch);
+        return entry && !entry.main ? ownerOf(entry.path) === session : !shared;
+      };
+      for (const note of await describeGitActivity(repository, projectId, before, after, ownsBranch)) {
+        session.agent.messages.push(message("system", note.text, "git"));
+        changed = true;
       }
-      session.gitRefs.set(projectId, after);
+      watch.refs.set(projectId, after);
     }
-    return reported;
+    if (changed && this.sessions.get(session.agent.id) === session) this.publish();
   }
 
   private expireCommandApprovals(run?: Run) {

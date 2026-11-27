@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { WorkspaceRuntime } from "../src/workspace-runtime.ts";
@@ -135,6 +135,9 @@ test("native Codex permission requests become one-time decisions in the task cha
   git(api.path, "-c", "user.name=Agent", "-c", "user.email=agent@example.com", "commit", "--allow-empty", "-m", "Agent commit");
   internal.onEvent({ method: "item/completed", params: { threadId: task.threadId, turnId: task.run.turn.id,
     item: { id: "commit-1", type: "commandExecution", command: "git commit", status: "completed", exitCode: 0 } } });
+  // Readings wait briefly so one covers a burst of commands, then run in the background.
+  await new Promise((resolve) => setTimeout(resolve, 400));
+  await Promise.all([...internal.gitChecks]);
   const gitNotes = () => runtime.snapshot().agents.find(({ id }) => id === agentId)!.messages.filter(({ kind }) => kind === "git");
   assert.equal(gitNotes().length, 1);
   assert.match(gitNotes()[0].text, /^Committed 1 commit on `[^`]+` in api: `[0-9a-f]{7}` Agent commit$/);
@@ -161,12 +164,23 @@ test("native Codex permission requests become one-time decisions in the task cha
   assert.equal(fileApproval.commandApproval?.kind, "fileChange");
   assert.deepEqual(fileApproval.commandApproval?.files, [join(other.path, "notes.md")]);
   assert.deepEqual(fileApproval.commandApproval?.choices, ["approve", "approveForSession", "decline"]);
+  assert.deepEqual(fileApproval.commandApproval?.grantPaths, [other.path], "the card names the folder Allow for this task grants");
   await resolve(fileApproval.id, "approveForSession");
   assert.deepEqual(replies.get("file-approval"), [{ decision: "acceptForSession" }]);
   assert.equal(getApprovals().at(-1)?.commandApproval?.status, "approved-for-session");
   assert.deepEqual(task.agent.grantedPaths, [other.path], "allowing for the task grants the edited folder");
   assert.ok(internal.directTaskTurnScope(task).sandboxPolicy.writableRoots.includes(other.path), "later turns can write the folder");
   assert.deepEqual(internal.sessions.get(unrelatedId).agent.grantedPaths, undefined, "grants stay with their task");
+  for (const [itemId, file] of [["home-file", join(homedir(), ".bashrc")], ["root-file", "/notes.md"]]) {
+    internal.onEvent({ method: "item/started", params: { threadId: task.threadId, turnId: task.run.turn.id,
+      item: { id: itemId, type: "fileChange", changes: [{ path: file, kind: { type: "update" }, diff: "" }] } } });
+    await internal.onRequest({ id: itemId, method: "item/fileChange/requestApproval", params: {
+      threadId: task.threadId, turnId: task.run.turn.id, itemId, reason: "Edit one file." } });
+    const broad = getApprovals().at(-1)!;
+    assert.equal(broad.commandApproval?.grantPaths, undefined, `a single file never grants ${dirname(file)}`);
+    await resolve(broad.id, "approveForSession");
+    assert.deepEqual(task.agent.grantedPaths, [other.path]);
+  }
 
   const requested = { fileSystem: { write: [other.path], read: null }, network: null };
   await internal.onRequest({ id: "permission-request", method: "item/permissions/requestApproval", params: {
@@ -425,4 +439,62 @@ test("direct tasks observe only their native children and recover their history 
   assert.equal(restored?.parentId, parentId);
   assert.equal(restored?.messages.filter(({ text }) => text.includes("ORBIT-42")).length, 1);
   assert(restored?.messages.some(({ text }) => text === "Recovered a later note."));
+});
+
+test("tasks sharing a repository are warned, and Git changes no single task made are left out", async (t) => {
+  const fixture = crossRepoFixture(t);
+  if (!fixture) return;
+  const { runtime, internal, projects, requests, complete } = fixture;
+  const [api] = projects;
+  const first = String(await runtime.command({ type: "createTask", name: "First", projectIds: ["api"] }));
+  const second = String(await runtime.command({ type: "createTask", name: "Second", projectIds: ["api", "ui"] }));
+  const agent = (id: string) => runtime.snapshot().agents.find((entry) => entry.id === id)!;
+  const settle = async () => {
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    await Promise.all([...internal.gitChecks]);
+  };
+  const commandDone = (id: string) => internal.onEvent({ method: "item/completed", params: {
+    threadId: internal.sessions.get(id).threadId, turnId: internal.sessions.get(id).run.turn.id,
+    item: { id: `command-${Math.random()}`, type: "commandExecution", status: "completed", exitCode: 0 } } });
+  const commit = (cwd: string, text: string) =>
+    git(cwd, "-c", "user.name=Agent", "-c", "user.email=agent@example.com", "commit", "--allow-empty", "-qm", text);
+
+  await runtime.command({ type: "send", agentId: first, text: "Work on the API." });
+  assert.equal(requests.findLast(({ method }) => method === "turn/start")?.params.additionalContext.orchestra_concurrent_tasks, undefined);
+  await runtime.command({ type: "send", agentId: second, text: "Work on the API too." });
+  const warning = agent(second).messages.findLast(({ kind }) => kind === "warning");
+  assert.match(warning?.text ?? "", /^First is also working in api\./);
+  const context = JSON.parse(requests.findLast(({ method }) => method === "turn/start")?.params.additionalContext.orchestra_concurrent_tasks.value);
+  assert.match(context.instruction, /only in your own linked worktree/);
+  assert.deepEqual(context.tasks, [{ name: "First", repositories: ["api"] }]);
+
+  // While both run, a new worktree or a commit in the shared checkout could be either task's.
+  const unclear = join(api.path, ".worktrees", "unclear");
+  git(api.path, "worktree", "add", "-q", "-b", "unclear", unclear);
+  commit(api.path, "Unclear commit");
+  commandDone(first);
+  commandDone(second);
+  await settle();
+  for (const id of [first, second]) {
+    assert.equal(agent(id).taskWorktrees, undefined);
+    assert.deepEqual(agent(id).messages.filter(({ kind }) => kind === "git"), []);
+  }
+
+  complete(internal.sessions.get(second));
+  await settle();
+  const own = join(api.path, ".worktrees", "first");
+  git(api.path, "worktree", "add", "-q", "-b", "first-branch", own);
+  commandDone(first);
+  await settle();
+  assert.deepEqual(agent(first).taskWorktrees?.map(({ path, branch }) => [path, branch]), [[own, "first-branch"]]);
+  commit(own, "Own commit");
+  commit(unclear, "Still unclear");
+  commandDone(first);
+  await settle();
+  assert.deepEqual(agent(first).messages.filter(({ kind }) => kind === "git").map(({ text }) => text.replace(/`[0-9a-f]{7}`/, "`sha`")), [
+    "Created branch `first-branch` in api at `sha` Unclear commit",
+    "Committed 1 commit on `first-branch` in api: `sha` Own commit",
+  ]);
+  assert.deepEqual(agent(second).messages.filter(({ kind }) => kind === "git"), []);
+  complete(internal.sessions.get(first));
 });

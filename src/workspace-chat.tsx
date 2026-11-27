@@ -93,7 +93,7 @@ function isBlankReply(message: WorkspaceMessage) {
 }
 
 function approvalWarning(approval: PermissionApproval) {
-  const folders = approval.kind === "fileChange" || approval.kind === "permissions" ? ", and later turns of this task can write these folders" : "";
+  const folders = approval.grantPaths?.length ? ", and later turns of this task can write the folders listed under Allow for this task" : "";
   const session = approval.choices?.includes("approveForSession")
     ? ` Allow for this task also covers similar requests until Orchestra restarts${folders}.` : "";
   if (approval.kind === "fileChange") return "Approving lets the agent apply these file changes outside its current write access." + session;
@@ -138,6 +138,7 @@ function CommandApprovalCard({ approval, requestId, blocked, onResolve }: {
         {approval.writePaths && <div><dt>Write access</dt><dd><PathList paths={approval.writePaths} /></dd></div>}
         {approval.readPaths && <div><dt>Read access</dt><dd><PathList paths={approval.readPaths} /></dd></div>}
         {approval.network && <div><dt>Network</dt><dd>{approval.network}</dd></div>}
+        {approval.grantPaths && approval.status === "pending" && <div><dt>Allow for this task</dt><dd><PathList paths={approval.grantPaths} /></dd></div>}
         {approval.cwd && <div><dt>Working directory</dt><dd><code>{approval.cwd}</code></dd></div>}
         {approval.reason && <div><dt>Reason</dt><dd>{approval.reason}</dd></div>}
       </dl>

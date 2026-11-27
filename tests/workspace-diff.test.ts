@@ -328,12 +328,15 @@ test("the runtime reports a task's checkouts and the worktrees it creates as dif
   const agentId = await runtime.command({ type: "createTask", name: "Edit", projectIds: ["api", "ui"] }) as string;
   assert.deepEqual(runtime.diffSources(agentId), []);
   const task = internal.sessions.get(agentId);
+  // An edit that was already in the checkout before the task's first turn is not the task's change.
+  writeFileSync(join(ui.path, "index.mjs"), "export default 'already there';\n");
   await runtime.command({ type: "send", agentId, text: "Plan the edit." });
   const sources = runtime.diffSources(agentId);
   assert.ok(Array.isArray(sources));
-  assert.deepEqual(sources.map(({ projectId, mode, base }) => [projectId, mode, base]),
-    [["api", "checkout", api.base], ["ui", "checkout", ui.base]],
-    "the local checkouts the task runs in are listed with their commit at the first turn");
+  assert.deepEqual(sources.map(({ projectId, mode }) => [projectId, mode]), [["api", "checkout"], ["ui", "checkout"]],
+    "the local checkouts the task runs in are listed");
+  assert.equal(sources[0].base, api.base, "a clean checkout is diffed from its commit");
+  assert.notEqual(sources[1].base, ui.base, "a checkout with edits is diffed from a snapshot of them");
   assert.equal(sources[0].path, api.path);
 
   writeFileSync(join(api.path, "index.mjs"), "export default 'api';\n");
@@ -350,6 +353,7 @@ test("the runtime reports a task's checkouts and the worktrees it creates as dif
   git(ui.path, "worktree", "add", "-b", "feature", own);
   writeFileSync(join(own, "index.mjs"), "export default 'feature';\n");
   internal.onEvent({ method: "turn/completed", params: { threadId: task.threadId, turn: { id: task.run.turn.id, status: "completed" } } });
+  await Promise.all([...internal.gitChecks]);
   assert.deepEqual(runtime.snapshot().agents.find(({ id }) => id === agentId)?.taskWorktrees,
     [{ projectId: "ui", path: own, base: ui.base, branch: "feature" }]);
   const withOwn = runtime.diffSources(agentId);
