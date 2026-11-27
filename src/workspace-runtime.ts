@@ -1444,13 +1444,7 @@ export class WorkspaceRuntime {
         if (submitted) delete submitted.state;
         for (const item of turn.items ?? []) {
           if (item.type !== "agentMessage" || typeof item.text !== "string") continue;
-          const existing = session.agent.messages.find((entry) => entry.providerItemId === item.id);
-          if (existing) {
-            existing.text = item.text;
-            delete existing.state;
-          } else {
-            session.agent.messages.push({ ...message("assistant", item.text, undefined, null), providerItemId: item.id });
-          }
+          this.recordNativeReply(session, item.id, item.text, null);
         }
         session.agent.messages.push(message("system", `${this.engineName} confirmed that the interrupted turn completed.`, "success"));
       }
@@ -1780,11 +1774,7 @@ export class WorkspaceRuntime {
     delete session.agent.awaitingSubagents;
     delete session.agent.reconnecting;
     if (session.agent.canCancel !== undefined) session.agent.canCancel = false;
-    for (const entry of session.stream.values()) {
-      if (completed) delete entry.state;
-      else entry.state = cancelled ? "cancelled" : "failed";
-    }
-    session.stream.clear();
+    this.settleStream(session, completed ? undefined : cancelled ? "cancelled" : "failed");
     session.agent.status = completed ? "done" : cancelled ? "idle" : "error";
     if (directTaskRun && implementationRoots) {
       completed = this.finishDirectTask(session, implementationRoots, directTaskRun.check,
@@ -1862,6 +1852,12 @@ export class WorkspaceRuntime {
 
   private recordNativeReply(session: AgentSession, itemId: string | undefined, text: string, createdAt?: number | null) {
     const existing = itemId && session.agent.messages.find((entry) => entry.providerItemId === itemId);
+    // A provider can complete a reply item with no text, for example before a tool call; it is not a message.
+    if (!text.trim()) {
+      if (existing) this.dropMessage(session, existing);
+      if (itemId) session.stream.delete(itemId);
+      return;
+    }
     if (existing) {
       existing.text = text;
       delete existing.state;
@@ -1869,6 +1865,21 @@ export class WorkspaceRuntime {
     } else {
       session.agent.messages.push({ ...message("assistant", text, undefined, createdAt), providerItemId: itemId });
     }
+  }
+
+  private dropMessage(session: AgentSession, entry: WorkspaceMessage) {
+    const index = session.agent.messages.indexOf(entry);
+    if (index >= 0) session.agent.messages.splice(index, 1);
+  }
+
+  /** Ends streamed replies with the turn; one that never received visible text is dropped. */
+  private settleStream(session: AgentSession, state: WorkspaceMessage["state"]) {
+    for (const entry of session.stream.values()) {
+      if (!entry.text.trim()) this.dropMessage(session, entry);
+      else if (state) entry.state = state;
+      else delete entry.state;
+    }
+    session.stream.clear();
   }
 
   private registerNativeChild(parent: AgentSession, threadId: string, name?: string | null, model?: string | null, role?: string | null) {
@@ -1923,11 +1934,7 @@ export class WorkspaceRuntime {
       session.agent.status = method === "turn/started" ? "working"
         : params.turn?.status === "completed" ? "done" : params.turn?.status === "interrupted" ? "idle" : "error";
       if (method === "turn/completed") {
-        for (const entry of session.stream.values()) {
-          if (session.agent.status === "done") delete entry.state;
-          else entry.state = "failed";
-        }
-        session.stream.clear();
+        this.settleStream(session, session.agent.status === "done" ? undefined : "failed");
         this.releaseSettledCheckouts();
       }
       this.publish();
@@ -2077,7 +2084,10 @@ export class WorkspaceRuntime {
       const { id, text } = params.item as typeof params.item & { id?: string };
       if (typeof text !== "string") return;
       const entry = id ? session.stream.get(id) : undefined;
-      if (entry) {
+      if (!text.trim()) {
+        if (entry) this.dropMessage(session, entry);
+        if (id) session.stream.delete(id);
+      } else if (entry) {
         entry.text = text;
         delete entry.state;
         session.stream.delete(id!);

@@ -373,3 +373,22 @@ test("archive and deletion persist across a saved workspace reload", async () =>
     rmSync(directory, { recursive: true, force: true });
   }
 });
+
+test("agent replies without visible text are not kept as messages", async () => {
+  const { runtime, internal, pm } = fixture();
+  try {
+    const prompt = { id: "prompt", role: "user", text: "Look into it" };
+    pm.agent.messages.push(prompt);
+    pm.run = { message: prompt, turn: { id: "turn-1", status: "inProgress" } };
+    const event = (method: string, params: Record<string, unknown>) =>
+      internal.onEvent({ method, params: { threadId: pm.threadId, turnId: "turn-1", ...params } });
+    event("item/agentMessage/delta", { itemId: "blank", delta: "\n\n" });
+    event("item/completed", { item: { type: "agentMessage", id: "blank", text: " \n" } });
+    event("item/completed", { item: { type: "agentMessage", id: "empty", text: "" } });
+    event("item/agentMessage/delta", { itemId: "unfinished", delta: "  " });
+    event("item/agentMessage/delta", { itemId: "reply", delta: "Found it." });
+    event("turn/completed", { turn: { id: "turn-1", status: "completed" } });
+    const replies = runtime.snapshot().agents.find(({ id }) => id === "pm")!.messages.filter(({ role }) => role === "assistant");
+    assert.deepEqual(replies.map(({ text }) => text), ["Found it."]);
+  } finally { await runtime.close(); }
+});

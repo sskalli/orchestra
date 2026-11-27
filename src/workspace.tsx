@@ -132,7 +132,7 @@ function flightLogEvents(agents: Agent[]): InboxEvent[] {
         needsInput: source ? needsUserInput(source) : false };
     });
     const [status, tone] = inboxStatus[root.status];
-    const message = root.messages.findLast((entry) => entry.role !== "user" && !entry.state);
+    const message = root.messages.findLast((entry) => entry.role !== "user" && !entry.state && Boolean(entry.text.trim()));
     return [{ id: root.id, agentName, status, tone,
       text: message?.text ?? root.goal ?? "Open the conversation for details.",
       agentId: root.id, messageId: message?.id }];
