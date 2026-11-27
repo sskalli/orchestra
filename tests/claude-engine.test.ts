@@ -421,6 +421,28 @@ test("the Claude engine answers model/list from the Agent SDK without sending a 
   await server.close();
 });
 
+test("a failed Claude model list is remembered briefly instead of asking Claude Code again", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "orchestra-claude-models-"));
+  let probes = 0;
+  const query = () => {
+    probes += 1;
+    return { supportedModels: async () => { throw new Error("not signed in"); }, close() {} } as any;
+  };
+  const store = workspaceStore(root, join(root, "state"), "engine:claude");
+  const runtime = new WorkspaceRuntime({ cwd: root, engine: "claude", store,
+    createServer: () => new ClaudeAppServer(store.claudeJournalPath, query as any) });
+  t.after(async () => {
+    await runtime.close();
+    rmSync(root, { recursive: true, force: true });
+  });
+  await runtime.start();
+  const [first, second] = await Promise.all([runtime.listModels(), runtime.listModels()]);
+  assert.match(first.error ?? "", /not signed in/);
+  assert.equal(first, second);
+  await runtime.listModels();
+  assert.equal(probes, 1);
+});
+
 test("Codex workspaces keep naming Codex in their messages", () => {
   const runtime = new WorkspaceRuntime({ cwd: tmpdir(), demo: true });
   assert.equal((runtime as any).engineName, "Codex");

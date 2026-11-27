@@ -8,30 +8,45 @@ import "./workspace-model-picker.css";
 
 export type ModelChange = { model?: string | null; effort?: string | null };
 
-const unavailable: ModelCatalog = { models: [], error: "Orchestra could not list models." };
-let catalogRequest: Promise<ModelCatalog> | undefined;
+type LoadedCatalog = ModelCatalog & { loadedAt: number };
 
-/** Loads the provider's model list once per page; a failed or empty list is fetched again on the next request. */
-function loadCatalog(retry = false) {
-  if (!catalogRequest || retry) {
-    const request: Promise<ModelCatalog> = fetch("/api/models")
-      .then((response) => response.ok ? response.json() as Promise<ModelCatalog> : unavailable)
-      .catch(() => unavailable)
-      .then((catalog) => {
-        const models = Array.isArray(catalog?.models) ? catalog.models : [];
-        if ((catalog?.error || !models.length) && catalogRequest === request) catalogRequest = undefined;
-        return { models, ...(catalog?.error ? { error: catalog.error } : {}) };
-      });
-    catalogRequest = request;
-  }
+const unavailable: ModelCatalog = { models: [], error: "Orchestra could not list models." };
+/** How long a list, or a failure to list, is used before opening the menu fetches it again. */
+const catalogMs = 5 * 60_000;
+const failedCatalogMs = 10_000;
+let catalogRequest: Promise<LoadedCatalog> | undefined;
+let loadedCatalog: LoadedCatalog | undefined;
+
+function stale(catalog: LoadedCatalog | undefined) {
+  if (!catalog) return true;
+  const failed = Boolean(catalog.error) || !catalog.models.length;
+  return Date.now() - catalog.loadedAt > (failed ? failedCatalogMs : catalogMs);
+}
+
+/** Loads the provider's model list for the page, shared by every picker; `force` asks again at once. */
+function loadCatalog(force = false) {
+  if (!force && !stale(loadedCatalog)) return Promise.resolve(loadedCatalog!);
+  catalogRequest ??= fetch("/api/models")
+    .then((response) => response.ok ? response.json() as Promise<ModelCatalog> : unavailable)
+    .catch(() => unavailable)
+    .then((catalog) => {
+      loadedCatalog = {
+        models: Array.isArray(catalog?.models) ? catalog.models : [],
+        ...(catalog?.error ? { error: catalog.error } : {}),
+        ...(catalog?.note ? { note: catalog.note } : {}),
+        loadedAt: Date.now(),
+      };
+      return loadedCatalog;
+    })
+    .finally(() => { catalogRequest = undefined; });
   return catalogRequest;
 }
 
 function useModelCatalog() {
-  const [catalog, setCatalog] = useState<ModelCatalog>();
+  const [catalog, setCatalog] = useState<LoadedCatalog | undefined>(loadedCatalog);
   const mounted = useRef(true);
-  const reload = useCallback((retry = false) => {
-    void loadCatalog(retry).then((next) => { if (mounted.current) setCatalog(next); });
+  const reload = useCallback((force = false) => {
+    void loadCatalog(force).then((next) => { if (mounted.current) setCatalog(next); });
   }, []);
   useEffect(() => {
     mounted.current = true;
@@ -65,6 +80,7 @@ export function ModelPicker({ settings, onChange, disabled, busy, placement = "a
   const button = useRef<HTMLButtonElement>(null);
   const menu = useRef<HTMLDivElement>(null);
   const menuId = useId();
+  const busyNoteId = useId();
 
   const listed = catalog?.models ?? [];
   const { modelId, option, effort } = currentModelChoice(settings, listed);
@@ -81,7 +97,7 @@ export function ModelPicker({ settings, onChange, disabled, busy, placement = "a
 
   useEffect(() => {
     if (!open) return;
-    if (!catalog || catalog.error || !catalog.models.length) reload(Boolean(catalog));
+    if (stale(catalog)) reload();
     const dismissOutside = (event: Event) => {
       if (event.target instanceof Node && !root.current?.contains(event.target) && !menu.current?.contains(event.target)) setOpen(false);
     };
@@ -128,6 +144,7 @@ export function ModelPicker({ settings, onChange, disabled, busy, placement = "a
 
   async function apply(change: ModelChange) {
     close();
+    // The pill stays enabled and focused while the choice is saved.
     setSaving(true);
     setError("");
     try {
@@ -143,8 +160,10 @@ export function ModelPicker({ settings, onChange, disabled, busy, placement = "a
   function chooseModel(next: ModelOption) {
     if (next === selected) return close();
     const requested = settings?.requestedEffort;
-    // Return to the model's default effort when the new model does not offer the chosen one.
-    void apply({ model: next.id || null, ...(requested && !next.efforts.includes(requested) ? { effort: null } : {}) });
+    // Return to the model's default effort when the new model does not offer the chosen one. Codex keeps the
+    // thread's previous effort when none is sent, so the default is named when the list gives one.
+    void apply({ model: next.id || null,
+      ...(requested && !next.efforts.includes(requested) ? { effort: next.defaultEffort ?? null } : {}) });
   }
 
   function chooseEffort(next: string) {
@@ -162,7 +181,7 @@ export function ModelPicker({ settings, onChange, disabled, busy, placement = "a
       return;
     }
     if (event.key === "Tab") {
-      event.preventDefault();
+      // Focus returns to the pill, and the browser then moves it on as usual.
       close();
       return;
     }
@@ -177,7 +196,7 @@ export function ModelPicker({ settings, onChange, disabled, busy, placement = "a
   }
 
   return <div ref={root} className={`chat-model-picker chat-model-picker--${placement}${className ? ` ${className}` : ""}`} onKeyDown={onKeyDown}>
-    <button ref={button} type="button" className="chat-model-picker-button" disabled={disabled || saving}
+    <button ref={button} type="button" className="chat-model-picker-button" disabled={disabled} aria-busy={saving || undefined}
       aria-haspopup="menu" aria-expanded={open} aria-controls={menuId}
       aria-label={`Model and reasoning effort: ${label}`} title={`Model and reasoning effort: ${label}`}
       onClick={toggle}
@@ -192,12 +211,14 @@ export function ModelPicker({ settings, onChange, disabled, busy, placement = "a
     </button>
     {appliesNextTurn && <span className="chat-model-picker-note" role="status">Applies next turn</span>}
     {error && <span className="chat-model-picker-error" role="alert" title={error}>{error}</span>}
-    {open && createPortal(<div ref={menu} id={menuId} className="chat-model-picker-menu" role="menu" aria-label="Model and reasoning effort" style={menuStyle}>
+    {open && createPortal(<div ref={menu} id={menuId} className="chat-model-picker-menu" role="menu" aria-label="Model and reasoning effort" style={menuStyle}
+      aria-describedby={busy ? busyNoteId : undefined}>
       {!catalog ? <p className="chat-model-picker-status">Loading models…</p> : <>
         {catalog.error && <p className="chat-model-picker-status">
           {catalog.error}{" "}
           <button type="button" className="chat-model-picker-retry" onClick={() => reload(true)}>Retry</button>
         </p>}
+        {catalog.note && <p className="chat-model-picker-status">{catalog.note}</p>}
         {models.length > 0 && <div role="group" aria-label="Model">
           <p className="chat-model-picker-heading" aria-hidden="true">Model</p>
           {models.map((entry) => <button key={entry.id || "default"} type="button" role="menuitemradio"
@@ -214,7 +235,7 @@ export function ModelPicker({ settings, onChange, disabled, busy, placement = "a
             <span>{entry}{entry === selected?.defaultEffort ? " (default)" : ""}</span>
           </button>)}
         </div>}
-        {busy && <p className="chat-model-picker-status">Changes apply from the next turn.</p>}
+        {busy && <p id={busyNoteId} className="chat-model-picker-status">Changes apply from the next turn.</p>}
       </>}
     </div>, document.body)}
   </div>;

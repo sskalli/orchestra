@@ -11,8 +11,9 @@ import { ClaudeAppServer, claudeProviderId } from "./claude-app-server.ts";
 import type { Event, Id, Thread, Turn } from "./app-server.ts";
 import { createFeatureWorktree, removeFeatureWorktree } from "./workspace-worktree.ts";
 import { fingerprintCandidate, fingerprintCheckout, fingerprintMemberSnapshots, hasWorktreeChanges, pinApprovedCandidate, pinDirectCandidates, validateCandidateWorktree, type IntegrationMember } from "./workspace-integration.ts";
-import { chooseModelSettings, modelOptions, recordReportedModel, selectModelSettings, turnModelParams } from "./workspace-models.ts";
+import { chooseModelSettings, modelOptions, recordReportedModel, selectModelSettings, turnModelParams, validateEffort, withDefaultEffort } from "./workspace-models.ts";
 import type { ModelCatalog, ModelSettings, ProviderModel, ReportedModel } from "./workspace-models.ts";
+import { knownEfforts } from "./workspace-models.ts";
 import type { SavedSession, workspaceStore } from "./workspace-store.ts";
 import { checkoutBaseline, createRequestedWorktree, removeRequestedWorktree, resolveWriteTargets, validateRequestedWorktree } from "./workspace-write-scope.ts";
 import type { WriteTarget } from "./workspace-write-scope.ts";
@@ -151,6 +152,9 @@ const maxSkillCatalogs = 16;
 /** How long a Codex turn waits for an unloaded skill list before sending "/name" as plain text. */
 const skillLookupTimeoutMs = 5_000;
 const workspaceThreadConfig = { "features.multi_agent": true, "features.multi_agent_v2": true };
+const modelCatalogMs = 10 * 60_000;
+const modelCatalogFailureMs = 10_000;
+const knownEffort = (effort: string) => knownEfforts.includes(effort);
 const demoModelCatalog: ModelCatalog = { models: [
   { id: "gpt-5.5", label: "GPT-5.5", efforts: ["low", "medium", "high", "xhigh"], defaultEffort: "medium", isDefault: true },
   { id: "gpt-5.5-mini", label: "GPT-5.5 mini", efforts: ["low", "medium", "high"], defaultEffort: "medium" },
@@ -282,7 +286,9 @@ function approvalSummary(kind: NonNullable<PermissionApproval["kind"]>) {
 export class WorkspaceRuntime {
   private readonly state: WorkspaceSnapshot;
   private readonly demo: boolean;
-  private modelCatalog?: ModelCatalog;
+  /** The provider's model list, kept for a while; failures are kept briefly so repeated requests do not pile up. */
+  private modelCatalog?: { catalog: ModelCatalog; expiresAt: number };
+  private modelCatalogRequest?: Promise<ModelCatalog>;
   private readonly providerId: string;
   private readonly projects: WorkspaceProject[];
   private readonly store?: ReturnType<typeof workspaceStore>;
@@ -339,6 +345,8 @@ export class WorkspaceRuntime {
   }
 
   private setProvider(state: WorkspaceSnapshot["provider"]["state"], detail?: string) {
+    // The model list is fetched again once the provider is back.
+    if (state !== "ready") delete this.modelCatalog;
     this.state.provider = { name: this.state.provider.name, state, message: detail };
   }
 
@@ -546,7 +554,7 @@ export class WorkspaceRuntime {
     }
     if (!this.isActive(session)) throw new Error("Restore this archived conversation before messaging it.");
     if (command.type === "setModel") {
-      this.setModel(session, command);
+      await this.setModel(session, command);
       return;
     }
     if (command.type === "resolveCommandApproval") {
@@ -669,10 +677,22 @@ export class WorkspaceRuntime {
     this.publish(false);
   }
 
-  private setModel({ agent }: AgentSession, change: { model?: string | null; effort?: string | null }) {
+  /** Applies a model or effort choice; on Codex a cleared effort becomes the new model's default. */
+  private async chooseModel(settings: ModelSettings, change: { model?: string | null; effort?: string | null }) {
+    const needsCatalog = (typeof change.effort === "string" && !knownEffort(change.effort)) ||
+      (this.engine !== "claude" && (change.model !== undefined || change.effort === null));
+    const catalog = needsCatalog ? await this.listModels() : undefined;
+    validateEffort(change.effort, catalog);
+    const next = chooseModelSettings(settings, change);
+    return this.engine === "claude" ? next : withDefaultEffort(next, catalog);
+  }
+
+  private async setModel({ agent }: AgentSession, change: { model?: string | null; effort?: string | null }) {
+    if (agent.lifecycleBusy) throw new Error("Wait for the current task action to finish before changing the model.");
+    const next = await this.chooseModel(agent.modelSettings ?? this.selectModelSettings(), change);
     if (agent.lifecycleBusy) throw new Error("Wait for the current task action to finish before changing the model.");
     const previous = agent.modelSettings;
-    agent.modelSettings = chooseModelSettings(previous ?? this.selectModelSettings(), change);
+    agent.modelSettings = next;
     if (!this.persist()) {
       agent.modelSettings = previous;
       this.publish(false);
@@ -681,26 +701,40 @@ export class WorkspaceRuntime {
     this.publish(false);
   }
 
-  /** Lists the models and reasoning efforts the provider offers, for the picker. Successful lists are cached. */
+  /**
+   * Lists the models and reasoning efforts the provider offers, for the picker. Concurrent requests share one
+   * provider call; a list is kept for ten minutes and a failure for ten seconds.
+   */
   async listModels(): Promise<ModelCatalog> {
     if (this.demo) return demoModelCatalog;
-    if (this.modelCatalog) return this.modelCatalog;
+    if (this.modelCatalog && Date.now() < this.modelCatalog.expiresAt) return this.modelCatalog.catalog;
     if (!this.server || !this.available) return { models: [], error: `${this.engineName} is not connected.` };
-    try {
-      const models: ProviderModel[] = [];
-      let cursor: string | null | undefined;
-      for (let page = 0; page < 10; page += 1) {
-        const response = await this.server.call<{ data?: ProviderModel[]; nextCursor?: string | null }>("model/list",
-          { includeHidden: false, ...(cursor ? { cursor } : {}) });
-        models.push(...(Array.isArray(response?.data) ? response.data : []));
-        cursor = response?.nextCursor;
-        if (!cursor) break;
+    const server = this.server;
+    this.modelCatalogRequest ??= (async () => {
+      let catalog: ModelCatalog;
+      let keepMs = modelCatalogMs;
+      // Codex 0.166 ignores modelProvider here and lists its own catalog; newer versions may scope the list.
+      const customProvider = this.engine !== "claude" && this.providerId !== "openai";
+      try {
+        const models: ProviderModel[] = [];
+        let cursor: string | null | undefined;
+        for (let page = 0; page < 10; page += 1) {
+          const response = await server.call<{ data?: ProviderModel[]; nextCursor?: string | null }>("model/list",
+            { includeHidden: false, ...(customProvider ? { modelProvider: this.providerId } : {}), ...(cursor ? { cursor } : {}) });
+          models.push(...(Array.isArray(response?.data) ? response.data : []));
+          cursor = response?.nextCursor;
+          if (!cursor) break;
+        }
+        catalog = { models: modelOptions(models),
+          ...(customProvider ? { note: `Codex may list models that ${this.providerId} does not offer.` } : {}) };
+      } catch (error) {
+        catalog = { models: [], error: `${this.engineName} did not list its models: ${errorText(error)}` };
+        keepMs = modelCatalogFailureMs;
       }
-      this.modelCatalog = { models: modelOptions(models) };
-      return this.modelCatalog;
-    } catch (error) {
-      return { models: [], error: `${this.engineName} did not list its models: ${errorText(error)}` };
-    }
+      if (this.server === server && this.available) this.modelCatalog = { catalog, expiresAt: Date.now() + keepMs };
+      return catalog;
+    })().finally(() => { this.modelCatalogRequest = undefined; });
+    return this.modelCatalogRequest;
   }
 
   private async createDirectTask(name: string, projectIds: string[], choice: { model?: string | null; effort?: string | null } = {}) {
@@ -715,12 +749,12 @@ export class WorkspaceRuntime {
     if ([...this.sessions.values()].filter((entry) => this.isActive(entry)).length >= 30) {
       throw new Error("The workspace has reached its 30-session limit.");
     }
+    const modelSettings = choice.model !== undefined || choice.effort !== undefined
+      ? await this.chooseModel(this.selectModelSettings(), choice) : undefined;
     const session = this.createAgent(randomUUID(), title, "worker");
     session.agent.projectId = projectIds[0];
     session.agent.directTask = { projectIds: [...projectIds], phase: "planning" };
-    if (choice.model !== undefined || choice.effort !== undefined) {
-      session.agent.modelSettings = chooseModelSettings(this.selectModelSettings(), choice);
-    }
+    if (modelSettings) session.agent.modelSettings = modelSettings;
     try {
       await this.attachThread(session);
       if (this.storageFailed) throw new Error("Orchestra could not save the new task.");

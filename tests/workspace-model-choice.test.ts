@@ -64,6 +64,42 @@ test("a task's model and effort choice applies from the next Codex turn and surv
   assert.equal(turns()[2].model, "fixture-default");
   assert.equal(turns()[2].effort, "low");
 
+  // Codex keeps the thread's effort when a turn sends none, so a cleared effort becomes the new model's default.
+  await runtime.command({ type: "setModel", agentId: taskId, effort: "high" });
+  await runtime.command({ type: "setModel", agentId: taskId, model: "fixture-mini", effort: null });
+  assert.equal(agent(taskId).modelSettings?.requestedEffort, "low");
+  await runtime.command({ type: "setModel", agentId: taskId, model: "fixture-default" });
+  assert.equal(agent(taskId).modelSettings?.requestedEffort, "low", "a chosen effort stays");
+  await runtime.command({ type: "setModel", agentId: taskId, effort: null });
+  assert.equal(agent(taskId).modelSettings?.requestedEffort, "high");
+  await assert.rejects(runtime.command({ type: "setModel", agentId: taskId, effort: "turbo" }), /supported reasoning effort/);
+  assert.equal(agent(taskId).modelSettings?.requestedEffort, "high");
+  await assert.rejects(runtime.command({ type: "createTask", name: "Bad", projectIds: [], effort: "turbo" }), /supported reasoning effort/);
+  assert.equal(runtime.snapshot().agents.length, 1, "a rejected choice opens no task");
+
   await runtime.command({ type: "archive", agentId: taskId });
   await assert.rejects(runtime.command({ type: "setModel", agentId: taskId, model: "fixture-mini" }), /Restore/);
+});
+
+test("custom Codex providers ask for their own model list, share one request and keep the list", async (t) => {
+  const project = mkdtempSync(join(tmpdir(), "orchestra-model-provider-"));
+  const tracePath = join(project, "trace.jsonl");
+  const savedTrace = process.env.ORCHESTRA_TEST_TRACE;
+  process.env.ORCHESTRA_TEST_TRACE = tracePath;
+  const runtime = new WorkspaceRuntime({ cwd: project, modelProvider: "company", store: workspaceStore(project, join(project, "state"), "company") });
+  t.after(async () => {
+    await runtime.close();
+    if (savedTrace === undefined) delete process.env.ORCHESTRA_TEST_TRACE;
+    else process.env.ORCHESTRA_TEST_TRACE = savedTrace;
+    rmSync(project, { recursive: true, force: true });
+  });
+  await runtime.start();
+  const [first, second] = await Promise.all([runtime.listModels(), runtime.listModels()]);
+  assert.equal(first, second);
+  assert.match(first.note ?? "", /company/);
+  await runtime.listModels();
+  const calls = readFileSync(tracePath, "utf8").trim().split("\n").map((line) => JSON.parse(line))
+    .filter(({ method }) => method === "model/list");
+  assert.equal(calls.length, 2, "one paged request serves every caller");
+  assert.ok(calls.every(({ params }) => params.modelProvider === "company"));
 });

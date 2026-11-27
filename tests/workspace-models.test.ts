@@ -56,3 +56,17 @@ test("provider model lists become picker options, and the current choice resolve
     { modelId: "custom", option: undefined, effort: "high" });
   assert.equal(currentModelChoice(undefined, [{ id: "m", label: "M", efforts: ["low"], defaultEffort: "low", isDefault: true }]).effort, "low");
 });
+
+test("efforts are checked against known levels and the provider list, and Codex gets a model's default effort", async () => {
+  const { validateEffort, withDefaultEffort } = await import("../src/workspace-models.ts");
+  const catalog = { models: [{ id: "m", label: "M", aliases: ["m-full"], efforts: ["low", "ultra"], defaultEffort: "low" }] };
+  for (const effort of [undefined, null, "minimal", "xhigh", "ultra"]) assert.doesNotThrow(() => validateEffort(effort, catalog));
+  assert.throws(() => validateEffort("ultra", undefined), /supported reasoning effort/);
+  assert.throws(() => validateEffort("turbo", catalog), /supported reasoning effort/);
+  assert.deepEqual(withDefaultEffort({ requestedModel: "m-full", source: "override" }, catalog),
+    { requestedModel: "m-full", requestedEffort: "low", source: "override" });
+  const chosen = { requestedModel: "m", requestedEffort: "ultra", source: "override" as const };
+  assert.equal(withDefaultEffort(chosen, catalog), chosen);
+  const unlisted = { requestedModel: "other", source: "override" as const };
+  assert.equal(withDefaultEffort(unlisted, catalog), unlisted);
+});

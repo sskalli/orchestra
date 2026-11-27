@@ -21,7 +21,9 @@ export type ModelOption = {
   defaultEffort?: string;
   isDefault?: boolean;
 };
-export type ModelCatalog = { models: ModelOption[]; error?: string };
+export type ModelCatalog = { models: ModelOption[]; error?: string;
+  /** A caveat shown with the list, such as a custom provider the list may not describe. */
+  note?: string };
 
 /** A model as listed by `model/list` in the App Server protocol; the Claude engine answers with the same shape. */
 export type ProviderModel = {
@@ -79,6 +81,27 @@ export function chooseModelSettings(settings: ModelSettings, change: { model?: s
   }
   next.source = next.requestedModel ? "override" : "provider-default";
   return next;
+}
+
+/** Reasoning efforts Orchestra accepts without a provider listing them. */
+export const knownEfforts = ["none", "minimal", "low", "medium", "high", "xhigh", "max"];
+
+/** Rejects an effort that neither Orchestra nor the provider's model list knows. */
+export function validateEffort(effort: string | null | undefined, catalog: ModelCatalog | undefined) {
+  if (typeof effort !== "string" || knownEfforts.includes(effort)) return;
+  if (catalog?.models.some((model) => model.efforts.includes(effort))) return;
+  throw new Error(`Choose a supported reasoning effort instead of ${effort}.`);
+}
+
+/**
+ * Codex keeps a thread's current effort when a turn sends none, so a cleared effort becomes the chosen
+ * model's default. Without a listed default the effort stays unset.
+ */
+export function withDefaultEffort(settings: ModelSettings, catalog: ModelCatalog | undefined): ModelSettings {
+  if (settings.requestedEffort || !settings.requestedModel) return settings;
+  const model = settings.requestedModel;
+  const option = catalog?.models.find((entry) => entry.id === model || entry.aliases?.includes(model));
+  return option?.defaultEffort ? { ...settings, requestedEffort: option.defaultEffort } : settings;
 }
 
 /** The model and effort to send with a turn; null keeps the provider's default choice. */
