@@ -18,6 +18,8 @@ import { ModelPicker } from "./workspace-model-picker.tsx";
 import { DiffPanel, DiffToggle, DiffViewSwitch, useDiffPanel } from "./workspace-diff-panel.tsx";
 import type { AgentSignal, WorkspaceRuntime } from "./workspace-runtime.ts";
 import { createTask, send } from "./workspace-commands.ts";
+import { filterAgentsByProject, isProjectChecked, normalizeProjectFilter, projectFilterLabel, toggleProject, workspaceFilter } from "./workspace-project-filter.ts";
+import type { ProjectFilter } from "./workspace-project-filter.ts";
 import "./workspace.css";
 
 type Snapshot = ReturnType<WorkspaceRuntime["snapshot"]>;
@@ -211,6 +213,14 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
   const [focus, setFocus] = useState<{ id?: string; count: number }>({ count: 0 });
   const [chooser, setChooser] = useState<{ agentId: string }>();
   const [projectDetails, setProjectDetails] = useState(false);
+  const projectIds = snapshot.projects.map(({ id }) => id);
+  const [savedProjectFilter, setSavedProjectFilter] = useState(preferences.readProjectFilter);
+  // Checked against the current projects on every render, so removed projects drop out of a saved filter.
+  const projectFilter = normalizeProjectFilter(savedProjectFilter, projectIds);
+  function changeProjectFilter(next: ProjectFilter) {
+    setSavedProjectFilter(next);
+    preferences.writeProjectFilter(next);
+  }
   const [archiveOpen, setArchiveOpen] = useState(false);
   const [newTaskOpen, setNewTaskOpen] = useState(false);
   const chatOpen = newTaskOpen || agents.some((agent) => agent.id === selectedId);
@@ -439,7 +449,7 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
     });
   }
 
-  const canvasAgents = agents.filter((agent) => !agent.archivedAt).map((agent) => ({
+  const canvasAgents = filterAgentsByProject(agents.filter((agent) => !agent.archivedAt), projectFilter).map((agent) => ({
     ...agent,
     projectLabel: snapshot.projects.length > 1
       ? agent.directTask?.projectIds.join(", ") || agent.projectId
@@ -579,9 +589,18 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
             event.currentTarget.querySelector("button")?.focus();
           }
         }}>
-          <button className="sw-project-button" type="button" aria-expanded={projectDetails} aria-controls="workspace-project-list" onClick={() => setProjectDetails(!projectDetails)}><Folder /><span>{projectName}</span><span className="sw-chevron" aria-hidden="true" /></button>
+          <button className="sw-project-button" type="button" aria-expanded={projectDetails} aria-controls="workspace-project-list" onClick={() => setProjectDetails(!projectDetails)}><Folder /><span>{projectFilterLabel(projectFilter, projectName)}</span><span className="sw-chevron" aria-hidden="true" /></button>
           {projectDetails && <div id="workspace-project-list" className="sw-project-details">
-            {snapshot.projects.map((entry) => <div key={entry.id}><strong>{entry.id}</strong><span>{entry.path}</span></div>)}
+            <button type="button" className="sw-project-workspace" aria-pressed={projectFilter.mode === "workspace"}
+              onClick={() => changeProjectFilter(workspaceFilter)}><strong>Workspace</strong><span>Show every task</span></button>
+            <fieldset>
+              <legend>Show tasks in</legend>
+              {snapshot.projects.map((entry) => <label key={entry.id}>
+                <input type="checkbox" checked={isProjectChecked(projectFilter, entry.id)}
+                  onChange={(event) => changeProjectFilter(toggleProject(projectFilter, entry.id, event.target.checked, projectIds))} />
+                <span><strong>{entry.id}</strong><span>{entry.path}</span></span>
+              </label>)}
+            </fieldset>
           </div>}
         </div>
         <div className={`sw-provider sw-provider--${connected ? provider.state : "connecting"}`} role="status"><span aria-hidden="true" />{connected ? providerLabel(provider) : "Reconnecting"}</div>
@@ -620,7 +639,10 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
             </button>}
           </div>
           <WorkspaceCanvas agents={canvasAgents} signals={signals} selectedId={selectedId} onSelect={select} onStatus={handleStatus}
-            chatWindowRef={chatWindowRef} emptyMessage={blocked ? blockedReason : undefined} initialCamera={savedCamera} onCameraChange={preferences.writeCamera}
+            chatWindowRef={chatWindowRef} emptyMessage={blocked ? blockedReason
+              : projectFilter.mode === "projects" && agents.some((agent) => !agent.archivedAt)
+                ? projectFilter.projectIds.length ? "No tasks in the selected projects." : "Select a project to show its tasks."
+                : undefined} initialCamera={savedCamera} onCameraChange={preferences.writeCamera}
             initialTaskPositions={savedNodePositions} onTaskPositionsChange={(positions) =>
               preferences.writeNodePositions(nodePositions(positions, agentIds))} />
           {archiveOpen && <section className="sw-archive-list" aria-label="Archived agents" onKeyDown={(event) => {
