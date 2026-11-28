@@ -1,4 +1,4 @@
-// What the Claude engine lets a task do without asking, and how it explains the requests it does pass on.
+// What a task may do without asking, and how the Claude engine explains the requests it does pass on.
 import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";

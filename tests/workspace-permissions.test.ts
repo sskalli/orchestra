@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { explainApproval, remoteHost, toolCacheFolders } from "../src/claude-permissions.ts";
+import { explainApproval, remoteHost, toolCacheFolders } from "../src/workspace-permissions.ts";
 
 test("Git remote URLs give the host a repository task may reach", () => {
   assert.equal(remoteHost("https://github.com/team/app.git"), "github.com");

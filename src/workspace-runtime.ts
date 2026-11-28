@@ -5,6 +5,7 @@ import { basename, dirname, isAbsolute, relative, resolve, sep } from "node:path
 import { homedir, tmpdir } from "node:os";
 import { AppServer, codexCommand, safeError, type ProviderServer } from "./app-server.ts";
 import { ClaudeAppServer, claudeProviderId } from "./claude-app-server.ts";
+import { toolCacheFolders } from "./workspace-permissions.ts";
 import type { Event, Id, Thread, Turn } from "./app-server.ts";
 import { deleteRef, describeGitActivity, forkPoint, gitCommonDirectory, listWorktrees, readRefState, snapshotCheckout } from "./workspace-git-activity.ts";
 import type { RefState } from "./workspace-git-activity.ts";
@@ -1309,7 +1310,11 @@ export class WorkspaceRuntime {
       cwd: roots[0] ?? tmpdir(),
       ...(roots.length ? { runtimeWorkspaceRoots: roots } : { environments: [] }),
       sandboxPolicy: writable.length
-        ? { type: "workspaceWrite", writableRoots: writable, networkAccess: false, excludeTmpdirEnvVar: false, excludeSlashTmp: false }
+        // Codex can only turn the network fully on or off, so repository tasks get it on; Claude ignores this flag and
+        // allows only the repositories' Git remotes and package registries. Codex also writes the tool caches, which
+        // Claude adds to its own sandbox without making them folders its file tools may edit.
+        ? { type: "workspaceWrite", writableRoots: this.engine === "codex" ? [...new Set([...writable, ...toolCacheFolders()])] : writable,
+          networkAccess: true, excludeTmpdirEnvVar: false, excludeSlashTmp: false }
         : { type: "readOnly", networkAccess: false },
     };
   }
@@ -1647,6 +1652,17 @@ export class WorkspaceRuntime {
     this.publish();
   }
 
+  /** The task a subagent works for, through any subagents in between. */
+  private taskOf(session: AgentSession) {
+    let owner: AgentSession | undefined = session;
+    const visited = new Set<string>();
+    while (owner?.agent.nativeChild && owner.agent.parentId && !visited.has(owner.agent.id)) {
+      visited.add(owner.agent.id);
+      owner = this.sessions.get(owner.agent.parentId);
+    }
+    return owner?.agent.directTask ? owner : undefined;
+  }
+
   private onNativeEvent(session: AgentSession, method: string, params: Event["params"]) {
     if (session.agent.archivedAt) return;
     if (method === "turn/started" || method === "turn/completed" || method === "thread/tokenUsage/updated") {
@@ -1675,6 +1691,15 @@ export class WorkspaceRuntime {
       return;
     }
     const item = params.item;
+    if (method === "item/started" && item?.type === "fileChange" && item.id && Array.isArray(item.changes)) {
+      // A subagent's file change is approved on its task's card, which must list the files.
+      const run = this.taskOf(session)?.run;
+      const files = item.changes.map((change) => change?.path);
+      if (run && files.length <= 200 && files.every((path) => typeof path === "string")) {
+        (run.fileChanges ??= new Map()).set(item.id, files as string[]);
+      }
+      return;
+    }
     if (method === "item/agentMessage/delta" && params.itemId) {
       const { delta } = params as typeof params & { delta?: string };
       if (typeof delta !== "string") return;
@@ -1689,6 +1714,10 @@ export class WorkspaceRuntime {
     } else if (method === "item/completed" && item?.type === "agentMessage" && typeof item.text === "string") {
       this.recordNativeReply(session, item.id, item.text);
       this.publish();
+    } else if (method === "item/completed" && item?.type === "commandExecution") {
+      // A subagent's command may have committed or added a worktree for its task.
+      const task = this.taskOf(session);
+      if (task) this.scheduleGitCheck(task);
     }
   }
 
@@ -1698,8 +1727,9 @@ export class WorkspaceRuntime {
       return;
     }
     const session = params.threadId ? this.threadSessions.get(params.threadId) : undefined;
-    if (method === "serverRequest/resolved" && session?.run && params.requestId !== undefined) {
-      const approval = session.run.commandApprovals?.get(params.requestId)?.message.commandApproval;
+    const approvalRun = session?.agent.nativeChild ? this.taskOf(session)?.run : session?.run;
+    if (method === "serverRequest/resolved" && approvalRun && params.requestId !== undefined) {
+      const approval = approvalRun.commandApprovals?.get(params.requestId)?.message.commandApproval;
       if (approval?.status === "pending") {
         approval.status = "expired";
         this.publish();
@@ -1887,19 +1917,23 @@ export class WorkspaceRuntime {
     return undefined;
   }
 
-  private receiveApproval(id: Id, method: string, session: AgentSession | undefined, params: Event["params"]) {
+  private receiveApproval(id: Id, method: string, asker: AgentSession | undefined, params: Event["params"]) {
+    // A subagent's request is shown on its task's card, naming the subagent, while that task's turn runs.
+    const child = asker?.agent.nativeChild ? asker : undefined;
+    const session = child ? this.taskOf(child) : asker;
     const run = session?.run;
     if (run?.commandApprovals?.has(id)) return;
-    const offer = this.approvalOffer(method, params, run);
+    const offer = this.approvalOffer(method, child ? { ...params, requestedBy: params.requestedBy ?? child.agent.name } : params, run);
     const decline = offer?.responses.decline ?? (method === "item/permissions/requestApproval"
       ? { permissions: {}, scope: "turn" }
       : method === "item/commandExecution/requestApproval" ? commandDecline(params).response : { decision: "decline" });
-    if (!offer || !session?.agent.directTask || !this.isActive(session) || !run?.turn || run.turn.id !== params.turnId ||
+    if (!offer || !session?.agent.directTask || !this.isActive(session) || !run?.turn || (!child && run.turn.id !== params.turnId) ||
         run.interrupting || !params.itemId || this.storageFailed || !this.available) {
       this.server!.reply(id, decline);
-      if (session && this.isActive(session) && (session.agent.directTask || session.agent.nativeChild)) {
-        session.agent.messages.push(message("system", session.agent.nativeChild
-          ? "Orchestra declined a permission request from this subagent. Ask the parent task to request access."
+      const notice = child ?? session;
+      if (notice && this.isActive(notice) && (notice.agent.directTask || notice.agent.nativeChild)) {
+        notice.agent.messages.push(message("system", child
+          ? "Orchestra declined a permission request from this subagent because its task is not running a turn that can show it."
           : "Orchestra declined a permission request it could not show for review.", "warning"));
         this.publish();
       }

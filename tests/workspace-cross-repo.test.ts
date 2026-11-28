@@ -522,3 +522,57 @@ test("a reply sent while the agent is working can resolve the question it answer
   assert.equal(runtime.snapshot().agents.find(({ id }) => id === agentId)!.messages.some(({ productQuestion }) => productQuestion?.status === "pending"), false);
   complete(task);
 });
+
+test("a Codex repository task has network and tool caches, and its subagents ask on the task's card", async (t) => {
+  const fixture = crossRepoFixture(t);
+  if (!fixture) return;
+  const { runtime, internal, projects, requests, complete } = fixture;
+  const [api] = projects;
+  const agentId = String(await runtime.command({ type: "createTask", name: "API work", projectIds: ["api"] }));
+  const task = internal.sessions.get(agentId);
+  await runtime.command({ type: "send", agentId, text: "Install the dependencies in a subagent." });
+  const policy = requests.findLast(({ method }) => method === "turn/start")?.params.sandboxPolicy;
+  assert.equal(policy.type, "workspaceWrite");
+  assert.equal(policy.networkAccess, true, "git fetch, push and package installs work without asking");
+  assert.ok(policy.writableRoots.includes(api.path));
+  const npmCache = join(homedir(), ".npm");
+  if (existsSync(npmCache)) assert.ok(policy.writableRoots.includes(npmCache), "package manager caches are writable");
+
+  const replies = new Map<string, unknown>();
+  const originalReply = internal.server.reply;
+  internal.server.reply = (id: string, result: unknown) => { replies.set(id, result); originalReply(id, result); };
+  internal.onEvent({ method: "item/started", params: { threadId: task.threadId, turnId: task.run.turn.id, item: {
+    type: "subAgentActivity", id: "installer-started", agentThreadId: "installer-thread", agentNickname: "Installer", kind: "started" } } });
+  const card = () => runtime.snapshot().agents.find(({ id }) => id === agentId)!.messages.filter(({ commandApproval }) => commandApproval);
+
+  await internal.onRequest({ id: "child-command", method: "item/commandExecution/requestApproval", params: {
+    threadId: "installer-thread", turnId: "installer-turn", itemId: "child-command",
+    command: "npm ci", cwd: api.path, reason: "Install outside the sandbox.", availableDecisions: ["accept", "decline"] } });
+  const command = card().at(-1)!;
+  assert.equal(command.commandApproval?.status, "pending");
+  assert.equal(command.commandApproval?.requestedBy, "Installer");
+  assert.equal(command.commandApproval?.command, "npm ci");
+  assert.equal(replies.has("child-command"), false, "the request waits for the user");
+  await runtime.command({ type: "resolveCommandApproval", agentId, requestId: command.id, decision: "approve" });
+  assert.deepEqual(replies.get("child-command"), { decision: "accept" });
+
+  // A subagent's file change lists its files on the task's card.
+  internal.onEvent({ method: "item/started", params: { threadId: "installer-thread", turnId: "installer-turn",
+    item: { id: "child-patch", type: "fileChange", changes: [{ path: join(api.path, "package.json"), kind: { type: "update" }, diff: "" }] } } });
+  await internal.onRequest({ id: "child-file", method: "item/fileChange/requestApproval", params: {
+    threadId: "installer-thread", turnId: "installer-turn", itemId: "child-patch" } });
+  const file = card().at(-1)!;
+  assert.deepEqual(file.commandApproval?.files, [join(api.path, "package.json")]);
+  assert.equal(file.commandApproval?.requestedBy, "Installer");
+  // Codex withdrawing the subagent's request expires the card.
+  internal.onEvent({ method: "serverRequest/resolved", params: { threadId: "installer-thread", requestId: "child-file" } });
+  assert.equal(card().at(-1)?.commandApproval?.status, "expired");
+
+  complete(task);
+  // Once the task's turn has ended, a subagent's request is declined with a note in the subagent's chat.
+  await internal.onRequest({ id: "late", method: "item/commandExecution/requestApproval", params: {
+    threadId: "installer-thread", turnId: "installer-turn", itemId: "late", command: "npm ci", cwd: api.path, availableDecisions: ["accept", "decline"] } });
+  assert.deepEqual(replies.get("late"), { decision: "decline" });
+  const installer = runtime.snapshot().agents.find(({ nativeChild }) => nativeChild)!;
+  assert.match(installer.messages.at(-1)!.text, /declined a permission request from this subagent/);
+});

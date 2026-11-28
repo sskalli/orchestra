@@ -7,7 +7,7 @@ import { createSdkMcpServer, getSessionMessages, query as claudeQuery, tool } fr
 import type { CanUseTool, EffortLevel, HookCallback, ModelInfo, Options, PermissionResult, PermissionUpdate, Query, SDKMessage, SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
 import type { Event, Id, ProviderServer } from "./app-server.ts";
-import { allowedHosts, explainApproval, toolCacheFolders } from "./claude-permissions.ts";
+import { allowedHosts, explainApproval, toolCacheFolders } from "./workspace-permissions.ts";
 
 export const claudeProviderId = "claude-code";
 const toolServerName = "orchestra";
