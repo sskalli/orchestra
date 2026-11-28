@@ -3,7 +3,7 @@
 import { randomUUID } from "node:crypto";
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
-import { createSdkMcpServer, query as claudeQuery, tool } from "@anthropic-ai/claude-agent-sdk";
+import { createSdkMcpServer, getSessionMessages, query as claudeQuery, tool } from "@anthropic-ai/claude-agent-sdk";
 import type { CanUseTool, EffortLevel, HookCallback, ModelInfo, Options, PermissionResult, PermissionUpdate, Query, SDKMessage, SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
 import type { Event, Id, ProviderServer } from "./app-server.ts";
@@ -25,8 +25,13 @@ type JournalItem = { id: string; type: "agentMessage"; text: string };
 type JournalTurn = { id: string; status: TurnStatus; error?: { message: string }; items: JournalItem[] };
 type Tokens = { totalTokens: number; inputTokens: number; cachedInputTokens: number; outputTokens: number;
   cacheWriteInputTokens: number; reasoningOutputTokens: number };
+/**
+ * A thread is one Claude Code session, whose ID is the thread ID unless a rewind to the first prompt started a new one.
+ * After a rewind, `resumeAt` is the last kept session entry: the next query resumes there, dropping what followed.
+ */
 type JournalThread = { id: string; started: boolean; parentThreadId?: string; parentTurnId?: string; nickname?: string; role?: string;
-  turns: JournalTurn[]; total?: Tokens };
+  turns: JournalTurn[]; total?: Tokens; sessionId?: string; resumeAt?: string };
+type SessionMessages = (sessionId: string) => Promise<{ uuid: string }[]>;
 type ToolSpec = { name: string; description: string; inputSchema: JsonSchema };
 type JsonSchema = { type?: string; enum?: string[]; items?: JsonSchema; properties?: Record<string, JsonSchema>; required?: string[] };
 type ThreadConfig = { cwd: string; roots: string[]; instructions: string; tools: ToolSpec[]; model?: string; effort?: EffortLevel };
@@ -162,11 +167,15 @@ export class ClaudeAppServer implements ProviderServer {
   private readonly journalPath?: string;
   private readonly query: QueryFunction;
   private readonly wakeDelayMs: number;
+  private readonly sessionMessages: SessionMessages;
 
-  constructor(journalPath?: string, query: QueryFunction = claudeQuery, options: { wakeDelayMs?: number } = {}) {
+  constructor(journalPath?: string, query: QueryFunction = claudeQuery,
+    options: { wakeDelayMs?: number; sessionMessages?: SessionMessages } = {}) {
     this.journalPath = journalPath;
     this.query = query;
     this.wakeDelayMs = options.wakeDelayMs ?? defaultWakeDelayMs;
+    this.sessionMessages = options.sessionMessages ??
+      ((sessionId) => getSessionMessages(sessionId, { includeSystemMessages: true }));
     this.load();
   }
 
@@ -246,6 +255,7 @@ export class ClaudeAppServer implements ProviderServer {
       case "thread/start": return this.startThread(params) as T;
       case "thread/resume": return this.resumeThread(params) as T;
       case "thread/read": return this.readThread(params.threadId) as T;
+      case "thread/revert": return this.revertThread(params) as T;
       case "turn/start": return this.startTurn(params) as T;
       case "turn/steer": return this.steer(params) as T;
       case "turn/interrupt": return this.interrupt(params) as T;
@@ -358,6 +368,39 @@ export class ClaudeAppServer implements ProviderServer {
       status: { type: running ? "active" : "idle" }, turns: thread.turns } };
   }
 
+  /**
+   * Drops the turn that `beforeTurnId` started and every later turn from the conversation Claude resumes. A turn's ID
+   * is the UUID of its prompt in the Claude Code session, so the next query resumes at the session entry before it.
+   * Only the conversation is rewound; files the dropped turns changed stay as they are.
+   */
+  private async revertThread(params: any) {
+    const thread = this.threads.get(params.threadId);
+    if (!thread || thread.parentThreadId) throw new Error("Claude has no saved session for this task.");
+    if (this.runs.has(thread.id)) throw new Error("Stop the running Claude turn before editing a message.");
+    const prompt = typeof params.beforeTurnId === "string" ? params.beforeTurnId : "";
+    let entries: { uuid: string }[];
+    try {
+      entries = thread.started ? await this.sessionMessages(thread.sessionId ?? thread.id) : [];
+    } catch (error) {
+      throw new Error(`Claude's saved session could not be read. ${error instanceof Error ? error.message : String(error)}`);
+    }
+    const index = entries.findIndex(({ uuid }) => uuid === prompt);
+    if (index < 0) throw new Error("Claude's saved session does not contain this message, so it cannot be edited.");
+    if (this.runs.has(thread.id)) throw new Error("Stop the running Claude turn before editing a message.");
+    if (index === 0) {
+      // Nothing before the first prompt is kept, so the next turn opens a new Claude Code session.
+      thread.sessionId = randomUUID();
+      thread.started = false;
+      delete thread.resumeAt;
+    } else {
+      thread.resumeAt = entries[index - 1].uuid;
+    }
+    const kept = thread.turns.findIndex(({ id }) => id === prompt);
+    if (kept >= 0) thread.turns = thread.turns.slice(0, kept);
+    this.save();
+    return { thread: { id: thread.id, turns: [] }, turnsBackwardsCursor: null, itemsBackwardsCursor: null };
+  }
+
   private userMessage(text: string, priority?: "now"): SDKUserMessage {
     return { type: "user", uuid: randomUUID(), parent_tool_use_id: null,
       message: { role: "user", content: text }, ...(priority ? { priority } : {}) } as SDKUserMessage;
@@ -403,12 +446,14 @@ export class ClaudeAppServer implements ProviderServer {
     const first = this.userMessage(this.promptText(params));
     input.push(first);
     const abort = new AbortController();
-    const turn: JournalTurn = { id: randomUUID(), status: "inProgress", items: [] };
+    // The prompt's session UUID names the turn, so a later rewind can find where the turn began.
+    const turn: JournalTurn = { id: first.uuid!, status: "inProgress", items: [] };
     const env = this.claudeEnvironment();
+    const session = thread.sessionId ?? thread.id;
     const options: Options = {
       cwd,
       additionalDirectories: [...new Set([...roots, ...writable])].filter((root) => root !== cwd),
-      ...(thread.started ? { resume: thread.id } : { sessionId: thread.id }),
+      ...(thread.started ? { resume: session, ...(thread.resumeAt ? { resumeSessionAt: thread.resumeAt } : {}) } : { sessionId: session }),
       systemPrompt: { type: "preset", preset: "claude_code", append: config.instructions + backgroundSubagentInstructions },
       ...(config.model ? { model: config.model } : {}),
       ...(config.effort ? { effort: config.effort } : {}),
@@ -573,8 +618,10 @@ export class ClaudeAppServer implements ProviderServer {
     }
     if (message.type === "system" && message.subtype === "init") {
       if (Array.isArray(message.terminal_slash_commands)) this.terminalCommands = new Set(message.terminal_slash_commands);
-      if (!thread.started) {
+      // Once the session has loaded, new entries follow the rewind point, so later queries resume normally.
+      if (!thread.started || thread.resumeAt) {
         thread.started = true;
+        delete thread.resumeAt;
         this.save();
       }
       return;

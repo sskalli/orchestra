@@ -546,6 +546,8 @@ function WorkspaceView({ snapshot, connected, mode, signals }: { snapshot: Snaps
       }}
       onSend={(value) => submit("send", value)}
       onSteer={(value) => submit("steer", value)}
+      onEditMessage={agent.directTask && !agent.nativeChild
+        ? (messageId, text) => send({ type: "editMessage", agentId: agent.id, messageId, text }) : undefined}
       onCancel={() => send({ type: "cancel", agentId: agent.id })}
       onResumeQueue={() => send({ type: "resumeQueue", agentId: agent.id })}
       onClose={() => closeAgent(true)}

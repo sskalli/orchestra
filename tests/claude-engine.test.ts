@@ -44,7 +44,8 @@ async function until<T>(read: () => T | undefined | false, label: string) {
   }
 }
 
-async function claudeWorkspace(t: TestContext, scripts: Script[], serverOptions: { wakeDelayMs?: number } = {}) {
+async function claudeWorkspace(t: TestContext, scripts: Script[],
+  serverOptions: ConstructorParameters<typeof ClaudeAppServer>[2] = {}) {
   const root = mkdtempSync(join(tmpdir(), "orchestra-claude-"));
   const fake = fakeClaude(scripts);
   const store = workspaceStore(root, join(root, "state"), "engine:claude");
@@ -94,6 +95,50 @@ test("Claude turns stream replies, report usage, and resume the same Claude sess
   await until(() => agent(agentId).messages.some(({ text }) => text === "Again") && agent(agentId).status === "done", "the second turn");
   assert.equal(fake.turns[1].options.resume, firstTurn.options.sessionId);
   assert.equal(fake.turns[1].options.sessionId, undefined);
+});
+
+test("editing a sent message resumes Claude at the session entry before its prompt", async (t) => {
+  // Stands in for the saved Claude Code session: each prompt followed by the reply it got.
+  const session: { uuid: string }[] = [];
+  const answer = (text: string): Script => async function* (io) {
+    const prompt = await io.nextUser();
+    session.push({ uuid: prompt.uuid }, { uuid: `reply-${prompt.uuid}` });
+    yield { type: "system", subtype: "init", model: "claude-opus-5-5" };
+    yield* reply(`m-${prompt.uuid}`, text);
+    yield result([prompt.uuid]);
+  };
+  const { runtime, fake, agent } = await claudeWorkspace(t,
+    [answer("One"), answer("Two"), answer("Two again"), answer("After"), answer("Fresh")],
+    { sessionMessages: async () => session });
+  const agentId = String(await runtime.command({ type: "createTask", name: "Edits", projectIds: [] }));
+  const done = (count: number) => until(() => agent(agentId).status === "done" && fake.turns.length === count &&
+    agent(agentId).messages.filter(({ role }) => role === "assistant").length, `turn ${count}`);
+  await runtime.command({ type: "send", agentId, text: "First" });
+  await done(1);
+  await runtime.command({ type: "send", agentId, text: "Second" });
+  await done(2);
+  const threadId = fake.turns[0].options.sessionId;
+  const second = agent(agentId).messages.find(({ text }) => text === "Second")!;
+  assert.equal(second.turnId, session[2].uuid, "a Claude turn is named after its prompt's session UUID");
+
+  await runtime.command({ type: "editMessage", agentId, messageId: second.id, text: "Second, edited" });
+  await done(3);
+  assert.equal(fake.turns[2].options.resume, threadId);
+  assert.equal(fake.turns[2].options.resumeSessionAt, session[1].uuid, "the next query drops the edited prompt and what followed");
+  assert.deepEqual(agent(agentId).messages.map(({ text }) => text), ["First", "One", "Second, edited", "Two again"]);
+
+  await runtime.command({ type: "send", agentId, text: "Later" });
+  await done(4);
+  assert.equal(fake.turns[3].options.resume, threadId);
+  assert.equal(fake.turns[3].options.resumeSessionAt, undefined, "later queries resume the session normally");
+
+  const first = agent(agentId).messages.find(({ text }) => text === "First")!;
+  await runtime.command({ type: "editMessage", agentId, messageId: first.id, text: "Start over" });
+  await done(5);
+  assert.equal(fake.turns[4].options.resume, undefined);
+  assert.equal(typeof fake.turns[4].options.sessionId, "string");
+  assert.notEqual(fake.turns[4].options.sessionId, threadId, "rewinding to the first prompt opens a new Claude Code session");
+  assert.deepEqual(agent(agentId).messages.map(({ text }) => text), ["Start over", "Fresh"]);
 });
 
 test("Claude permission prompts become approval cards and return the user's decision", async (t) => {

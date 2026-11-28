@@ -602,3 +602,22 @@
 
 .chat-composer-box textarea::placeholder { color: var(--text-muted); }
 .workspace-chat .chat-icon-button:disabled { color: var(--text-muted); }
+.chat-message-actions .chat-icon-button[aria-disabled="true"] { color: var(--text-muted); cursor: not-allowed; }
+
+/* Editing a sent message in place. */
+.chat-message-editor { display: grid; gap: 8px; }
+.chat-message-editor textarea {
+  width: 100%;
+  min-height: 3.2em;
+  padding: 6px 8px;
+  resize: vertical;
+  border: 1px solid var(--sw-line);
+  border-radius: 6px;
+  background: var(--panel-header-bg);
+  color: var(--text-primary);
+  font: inherit;
+  line-height: 1.5;
+}
+.chat-message-editor textarea:focus-visible { outline: 1px solid #b3b3b3; outline-offset: 1px; }
+.chat-message-editor-note { margin: 0; color: var(--text-secondary); font-size: .68rem; }
+.chat-message-editor-actions { display: flex; justify-content: flex-end; gap: 6px; }
