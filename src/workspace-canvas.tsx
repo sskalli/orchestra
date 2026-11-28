@@ -607,13 +607,16 @@ export function WorkspaceCanvas({
           const statusAgent = statusPriority.map((level) => members.find((member) => member.status === level))
             .find((member) => member !== undefined) ?? agent;
           const status = taskRoot || revealed.has(agent.id) ? statuses[statusAgent.status] : undefined;
-          const statusLabel = status?.label ?? statuses[statusAgent.status]?.label ?? "Idle";
+          // A task whose own reply is done but whose background agents still run says so instead of "Working".
+          const waiting = statusAgent.status === "working" && agent.awaitingSubagents
+            ? `Waiting for ${agent.awaitingSubagents} subagent${agent.awaitingSubagents === 1 ? "" : "s"}` : undefined;
+          const statusLabel = waiting ?? status?.label ?? statuses[statusAgent.status]?.label ?? "Idle";
           const { color, displayName, roleLabel } = agentAppearance(agent, taskRoot);
           const selected = agent.id === selectedId;
           const showChildStatusIcon = Boolean(status) && selectedRevealed.has(agent.id) && !highlighted.has(agent.id);
-          const describedRole = agent.goal ?? agent.duty ?? agent.activity ?? statuses[statusAgent.status]?.label ?? "Idle";
+          const describedRole = agent.goal ?? agent.duty ?? agent.activity ?? waiting ?? statuses[statusAgent.status]?.label ?? "Idle";
           const accessibleName = `${displayName}${agent.projectLabel ? `, project ${agent.projectLabel}` : ""}`;
-          const label = `${accessibleName}, ${agent.activity ?? statuses[statusAgent.status]?.label ?? "Idle"}`;
+          const label = `${accessibleName}, ${agent.activity ?? waiting ?? statuses[statusAgent.status]?.label ?? "Idle"}`;
           return (
             <div
               key={agent.id}
@@ -660,6 +663,7 @@ export function WorkspaceCanvas({
                       type="button"
                       className={`swarm-team-status-icon status-${statusAgent.status}`}
                       aria-label={`${accessibleName}: ${statusLabel}`}
+                      title={statusLabel}
                       onClick={() => onStatus(taskRoot &&
                         (statusAgent.status === "error" || statusAgent.status === "attention") ? agent.id : statusAgent.id)}
                       onFocus={(event) => {

@@ -7,6 +7,7 @@ import { createSdkMcpServer, getSessionMessages, query as claudeQuery, tool } fr
 import type { CanUseTool, EffortLevel, HookCallback, ModelInfo, Options, PermissionResult, PermissionUpdate, Query, SDKMessage, SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
 import type { Event, Id, ProviderServer } from "./app-server.ts";
+import { allowedHosts, explainApproval, toolCacheFolders } from "./claude-permissions.ts";
 
 export const claudeProviderId = "claude-code";
 const toolServerName = "orchestra";
@@ -58,6 +59,12 @@ type Run = {
   finished: boolean;
   /** Claude ended its response while background subagents still run; the query stays open so they keep running. */
   waiting: boolean;
+  /** The turn may write its repositories (a repository task), not a read-only general chat. */
+  writeTurn: boolean;
+  /** The folder each tool call runs in, by tool use ID, as Claude Code reports it to hooks. */
+  toolFolders: Map<string, string>;
+  /** Background agents' descriptions, by Claude Code's agent ID. */
+  agentNames: Map<string, string>;
   wakeTimer?: ReturnType<typeof setTimeout>;
 };
 type QueryFunction = (params: { prompt: AsyncIterable<SDKUserMessage>; options?: Options }) => Query;
@@ -460,6 +467,20 @@ export class ClaudeAppServer implements ProviderServer {
     const turn: JournalTurn = { id: first.uuid!, status: "inProgress", items: [] };
     const env = this.claudeEnvironment();
     const session = thread.sessionId ?? thread.id;
+    let run: Run | undefined;
+    // Records the folder a command runs in, for its approval card.
+    const recordFolder: HookCallback = async (hook, toolUseId) => {
+      if (run && toolUseId && typeof hook.cwd === "string") run.toolFolders.set(toolUseId, hook.cwd);
+      return { continue: true };
+    };
+    // A finished command may have committed, pushed or added a worktree, so Orchestra checks Git during the turn.
+    const commandFinished: HookCallback = async (_hook, toolUseId) => {
+      if (run && !run.finished) {
+        if (toolUseId) run.toolFolders.delete(toolUseId);
+        this.emit("item/completed", { threadId: run.threadId, turnId: run.turn.id, item: { id: toolUseId ?? randomUUID(), type: "commandExecution" } });
+      }
+      return { continue: true };
+    };
     const options: Options = {
       cwd,
       additionalDirectories: [...new Set([...roots, ...writable])].filter((root) => root !== cwd),
@@ -475,20 +496,30 @@ export class ClaudeAppServer implements ProviderServer {
       includePartialMessages: true,
       // Load the user's Claude Code settings and CLAUDE.md, as the terminal does; the hook keeps planning turns from editing.
       settingSources: ["user", "project", "local"],
-      ...(implementation ? {} : { hooks: { PreToolUse: [{ matcher: [...writeTools].join("|"), hooks: [askBeforeEdits] }] } }),
-      sandbox: { enabled: true, failIfUnavailable: true, autoAllowBashIfSandboxed: implementation, allowUnsandboxedCommands: true },
+      hooks: {
+        PreToolUse: [{ matcher: "Bash", hooks: [recordFolder] },
+          ...(implementation ? [] : [{ matcher: [...writeTools].join("|"), hooks: [askBeforeEdits] }])],
+        PostToolUse: [{ matcher: "Bash", hooks: [commandFinished] }],
+        PostToolUseFailure: [{ matcher: "Bash", hooks: [commandFinished] }],
+      },
+      sandbox: {
+        enabled: true, failIfUnavailable: true, autoAllowBashIfSandboxed: implementation, allowUnsandboxedCommands: true,
+        // Repository tasks may reach their Git remotes and package registries, and write tool caches such as ~/.npm.
+        ...(implementation ? { network: { allowedDomains: allowedHosts(roots) }, filesystem: { allowWrite: toolCacheFolders() } } : {}),
+      },
       ...(process.env.CLAUDE_BIN ? { pathToClaudeCodeExecutable: process.env.CLAUDE_BIN } : {}),
       abortController: abort,
       env,
       stderr: (data) => { stderr = (stderr + data).slice(-2000); },
     };
     let stderr = "";
-    const run: Run = {
+    const active: Run = run = {
       threadId: thread.id, turn, query: this.query({ prompt: input, options }), input, abort,
       unanswered: new Set([first.uuid!]), interrupted: false, streamItems: new Map(), blockItems: new Map(),
       children: new Map(), requests: new Set(), finished: false, waiting: false,
+      writeTurn: implementation, toolFolders: new Map(), agentNames: new Map(),
     };
-    this.runs.set(thread.id, run);
+    this.runs.set(thread.id, active);
     thread.turns = [...thread.turns.slice(-7), turn];
     const kept = new Set(thread.turns.map(({ id }) => id));
     for (const child of this.threads.values()) {
@@ -496,7 +527,7 @@ export class ClaudeAppServer implements ProviderServer {
     }
     this.save();
     this.emit("turn/started", { threadId: thread.id, turn: { id: turn.id, rootTurnId: turn.id, status: "inProgress" } });
-    void this.consume(run).catch((error) => this.finishTurn(run, "failed", claudeErrorText(undefined, stderr.trim() || String(error?.message ?? error))));
+    void this.consume(active).catch((error) => this.finishTurn(active, "failed", claudeErrorText(undefined, stderr.trim() || String(error?.message ?? error))));
     return { turn: { id: turn.id, rootTurnId: turn.id, status: "inProgress" } };
   }
 
@@ -530,12 +561,18 @@ export class ClaudeAppServer implements ProviderServer {
           this.readableRoots.some((root) => insideRoot(root, resolve(readPath)))) {
         return { behavior: "allow", updatedInput: input };
       }
-      if (options.agentID) return { behavior: "deny", message: "Subagents cannot request access. Report what is needed so the parent task can ask the user." };
+      // A repository task may write its repositories, and the sandbox keeps a command to those folders and its allowed
+      // hosts, so a sandboxed command runs even when Claude Code cannot analyse it (variables, loops, inline scripts).
+      if (toolName === "Bash" && run.writeTurn && input.dangerouslyDisableSandbox !== true) return { behavior: "allow", updatedInput: input };
       const grants = sessionGrants(options.suggestions);
       const decisions = ["accept", ...(grants.length ? ["acceptForSession"] : []), "decline"];
       const itemId = randomUUID();
       const base = { threadId, turnId: run.turn.id, itemId, startedAtMs: Date.now() };
-      const reason = options.decisionReason ?? (options.blockedPath ? `Access outside the allowed directories: ${options.blockedPath}` : undefined);
+      // A background agent's request goes to the task's own approval card, naming the agent.
+      const requestedBy = options.agentID ? run.agentNames.get(options.agentID) ?? "" : undefined;
+      const { summary, reason, host } = explainApproval({ toolName, input, writeTurn: run.writeTurn,
+        decisionReason: options.decisionReason, blockedPath: options.blockedPath, title: options.title,
+        description: options.description, requestedBy });
       let method: string;
       let params: Event["params"];
       if (writeTools.has(toolName)) {
@@ -543,14 +580,17 @@ export class ClaudeAppServer implements ProviderServer {
         this.emit("item/started", { threadId, turnId: run.turn.id,
           item: { id: itemId, type: "fileChange", changes: path ? [{ path }] : [] } });
         method = "item/fileChange/requestApproval";
-        params = { ...base, reason, availableDecisions: decisions };
+        params = { ...base, summary, reason, ...(requestedBy !== undefined ? { requestedBy: requestedBy || "Background agent" } : {}), availableDecisions: decisions };
       } else {
-        const command = toolName === "Bash" && typeof input.command === "string" ? input.command
+        const command = host ? `Connect to ${host}` : toolName === "Bash" && typeof input.command === "string" ? input.command
+          : toolName === "WebFetch" && typeof input.url === "string" ? `Fetch ${input.url}`
+          : toolName === "WebSearch" && typeof input.query === "string" ? `Search the web for ${input.query}`
           : `${toolName} ${JSON.stringify(input)}`;
-        const description = typeof input.description === "string" ? input.description : undefined;
         method = "item/commandExecution/requestApproval";
-        params = { ...base, command, cwd: this.configs.get(threadId)?.cwd, reason: reason ?? description,
-          availableDecisions: decisions };
+        // The folder the command runs in, which the agent may have changed to one of its worktrees.
+        const cwd = run.toolFolders.get(options.toolUseID) ?? this.configs.get(threadId)?.cwd;
+        params = { ...base, command, cwd, summary, reason, ...(requestedBy !== undefined ? { requestedBy: requestedBy || "Background agent" } : {}),
+          ...(host ? { networkApprovalContext: { host } } : {}), availableDecisions: decisions };
       }
       let response: { decision?: unknown };
       try {
@@ -643,6 +683,7 @@ export class ClaudeAppServer implements ProviderServer {
     }
     if (message.type === "system" && message.subtype === "task_started" && message.tool_use_id &&
         (message.subagent_type || /agent/i.test(message.task_type ?? ""))) {
+      if (message.task_id && message.description) run.agentNames.set(message.task_id, message.description);
       if (run.children.has(message.tool_use_id)) return;
       const child: JournalThread = { id: randomUUID(), started: true, parentThreadId: run.threadId, parentTurnId: run.turn.id,
         nickname: message.description, role: message.subagent_type, turns: [] };

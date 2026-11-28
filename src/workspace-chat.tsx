@@ -101,7 +101,12 @@ function approvalWarning(approval: PermissionApproval) {
     ? ` Allow for this task also covers similar requests until Orchestra restarts${folders}.` : "";
   if (approval.kind === "fileChange") return "Approving lets the agent apply these file changes outside its current write access." + session;
   if (approval.kind === "permissions") return "Approving extends the agent’s sandbox with the access listed below." + session;
-  return "Approving runs this command outside the sandbox with your local account’s access." + session;
+  if (approval.network && approval.summary) return `Approving lets this task’s commands reach ${approval.network}.` + session;
+  // Codex asks about commands only when they need to leave the sandbox; Claude says so in its headline.
+  if (!approval.summary || /outside the sandbox/.test(approval.summary)) {
+    return "Approving runs this command outside the sandbox with your local account’s access." + session;
+  }
+  return "Approving lets the agent run this command." + session;
 }
 
 function PathList({ paths }: { paths: string[] }) {
@@ -136,14 +141,15 @@ function CommandApprovalCard({ approval, requestId, blocked, onResolve }: {
     <div className="chat-command-approval">
       {approval.status === "pending" && <p className="chat-command-approval-warning">{approvalWarning(approval)}</p>}
       <dl>
-        {approval.command && <div><dt>Command</dt><dd><code>{approval.command}</code></dd></div>}
+        {approval.reason && <div><dt>Why you’re asked</dt><dd>{approval.reason}</dd></div>}
+        {approval.requestedBy && <div><dt>Asked by</dt><dd>{approval.requestedBy}</dd></div>}
+        {approval.command && !(approval.network && approval.summary) && <div><dt>Command</dt><dd><code>{approval.command}</code></dd></div>}
         {approval.files && <div><dt>Files</dt><dd><PathList paths={approval.files} /></dd></div>}
         {approval.writePaths && <div><dt>Write access</dt><dd><PathList paths={approval.writePaths} /></dd></div>}
         {approval.readPaths && <div><dt>Read access</dt><dd><PathList paths={approval.readPaths} /></dd></div>}
         {approval.network && <div><dt>Network</dt><dd>{approval.network}</dd></div>}
         {approval.grantPaths && approval.status === "pending" && <div><dt>Allow for this task</dt><dd><PathList paths={approval.grantPaths} /></dd></div>}
-        {approval.cwd && <div><dt>Working directory</dt><dd><code>{approval.cwd}</code></dd></div>}
-        {approval.reason && <div><dt>Reason</dt><dd>{approval.reason}</dd></div>}
+        {approval.cwd && !(approval.network && approval.summary) && <div><dt>Runs in</dt><dd><code>{approval.cwd}</code></dd></div>}
       </dl>
       {approval.status === "pending" && onResolve && (
         <>

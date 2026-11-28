@@ -64,13 +64,19 @@ test("Claude reads attachments without asking, but nothing else nearby", async (
   const root = join(base, "claude");
   const server = new ClaudeAppServer(undefined, (() => { throw new Error("unused"); }) as any, { readableRoots: [root] });
   const handler = (server as any).permissionHandler("thread-1");
-  (server as any).runs.set("thread-1", { finished: false, turn: { id: "turn-1" }, requests: new Set() });
+  (server as any).runs.set("thread-1", { finished: false, turn: { id: "turn-1" }, requests: new Set(),
+    writeTurn: false, toolFolders: new Map(), agentNames: new Map() });
+  // Anything not allowed outright goes to the user, who declines here.
+  const asked: string[] = [];
+  (server as any).request = async (method: string) => { asked.push(method); return { decision: "decline" }; };
   const signal = new AbortController().signal;
   const read = { file_path: join(root, "id", "notes.md") };
   assert.deepEqual(await handler("Read", read, { signal }), { behavior: "allow", updatedInput: read });
   assert.equal((await handler("Grep", { pattern: "x", path: root }, { signal })).behavior, "allow");
+  assert.deepEqual(asked, []);
   assert.equal((await handler("Read", { file_path: join(root, "..", "secret") }, { signal, agentID: "a" })).behavior, "deny");
   assert.equal((await handler("Write", { file_path: join(root, "id", "notes.md") }, { signal, agentID: "a" })).behavior, "deny");
+  assert.deepEqual(asked, ["item/commandExecution/requestApproval", "item/fileChange/requestApproval"]);
 });
 
 test("the attachments endpoint stores a file from the workspace page and returns its path", async (t) => {

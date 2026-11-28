@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -45,12 +46,18 @@ async function until<T>(read: () => T | undefined | false, label: string) {
 }
 
 async function claudeWorkspace(t: TestContext, scripts: Script[],
-  serverOptions: ConstructorParameters<typeof ClaudeAppServer>[2] = {}) {
+  serverOptions: ConstructorParameters<typeof ClaudeAppServer>[2] = {}, repository = false) {
   const root = mkdtempSync(join(tmpdir(), "orchestra-claude-"));
+  // A repository task needs a configured Git repository; its remote's host is allowed without asking.
+  if (repository) {
+    execFileSync("git", ["init", "-q", root]);
+    execFileSync("git", ["-C", root, "remote", "add", "origin", "git@git.example.org:team/app.git"]);
+  }
   const fake = fakeClaude(scripts);
   const store = workspaceStore(root, join(root, "state"), "engine:claude");
   let server!: ClaudeAppServer;
   const runtime = new WorkspaceRuntime({ cwd: root, engine: "claude", store,
+    ...(repository ? { projects: [{ id: "app", path: root }] } : {}),
     createServer: () => (server = new ClaudeAppServer(store.claudeJournalPath, fake.query as any, serverOptions)) });
   t.after(async () => {
     await runtime.close();
@@ -152,13 +159,18 @@ test("Claude permission prompts become approval cards and return the user's deci
     async function* (io) {
       const first = await io.nextUser();
       const signal = new AbortController().signal;
+      yield { type: "system", subtype: "task_started", task_id: "agent-1", tool_use_id: "tool-9", description: "Clean the build", subagent_type: "general-purpose" };
       bashDecision = await io.options.canUseTool("Bash", { command: "npm test", description: "Run the tests" }, { signal, suggestions });
       writeDecision = await io.options.canUseTool("Write", { file_path: "/elsewhere/notes.md", content: "x" },
         { signal, blockedPath: "/elsewhere/notes.md" });
       subagentDecision = await io.options.canUseTool("Bash", { command: "rm -rf build" }, { signal, agentID: "agent-1" });
-      assert.deepEqual(io.options.hooks.PreToolUse[0].matcher.split("|").sort(), ["Edit", "MultiEdit", "NotebookEdit", "Write"]);
-      const hook = await io.options.hooks.PreToolUse[0].hooks[0]({}, "tool-1", { signal });
+      const edits = io.options.hooks.PreToolUse.find(({ matcher }: { matcher: string }) => matcher.includes("Write"));
+      assert.deepEqual(edits.matcher.split("|").sort(), ["Edit", "MultiEdit", "NotebookEdit", "Write"]);
+      const hook = await edits.hooks[0]({}, "tool-1", { signal });
       assert.equal(hook.hookSpecificOutput.permissionDecision, "ask");
+      assert.equal(io.options.sandbox.autoAllowBashIfSandboxed, false, "a general chat asks before commands");
+      assert.equal(io.options.sandbox.filesystem, undefined, "a general chat gets no extra writable folders");
+      yield { type: "system", subtype: "task_notification", task_id: "agent-1", tool_use_id: "tool-9", status: "completed", summary: "Done" };
       yield result([first.uuid]);
     },
   ]);
@@ -166,20 +178,76 @@ test("Claude permission prompts become approval cards and return the user's deci
   await runtime.command({ type: "send", agentId, text: "Run the tests" });
   const approvals = () => agent(agentId).messages.filter(({ commandApproval }) => commandApproval?.status === "pending");
   const command = await until(() => approvals()[0], "the command approval");
+  assert.equal(command.text, "Permission requested to run a command.", "a sandboxed command is not called an escape from the sandbox");
   assert.equal(command.commandApproval?.command, "npm test");
-  assert.equal(command.commandApproval?.reason, "Run the tests");
+  assert.match(command.commandApproval?.reason ?? "", /^This chat has no write access/);
+  assert.match(command.commandApproval?.reason ?? "", /describes it as “Run the tests”/);
   assert.deepEqual(command.commandApproval?.choices, ["approve", "approveForSession", "decline"]);
   await runtime.command({ type: "resolveCommandApproval", agentId, requestId: command.id, decision: "approveForSession" });
   const file = await until(() => approvals()[0], "the file approval");
   assert.equal(file.commandApproval?.kind, "fileChange");
   assert.deepEqual(file.commandApproval?.files, ["/elsewhere/notes.md"]);
+  assert.match(file.commandApproval?.reason ?? "", /outside this task's folders/);
   assert.deepEqual(file.commandApproval?.choices, ["approve", "decline"]);
   await runtime.command({ type: "resolveCommandApproval", agentId, requestId: file.id, decision: "decline" });
+  // A background agent's request reaches the task's card instead of being refused outright.
+  const forwarded = await until(() => approvals()[0], "the subagent's approval");
+  assert.equal(forwarded.commandApproval?.requestedBy, "Clean the build");
+  assert.match(forwarded.commandApproval?.reason ?? "", /^Asked by the background agent “Clean the build”\./);
+  await runtime.command({ type: "resolveCommandApproval", agentId, requestId: forwarded.id, decision: "decline" });
   await until(() => agent(agentId).status === "done", "the turn");
   assert.deepEqual(bashDecision, { behavior: "allow", updatedInput: { command: "npm test", description: "Run the tests" },
     updatedPermissions: [{ ...rule, destination: "session" }] });
   assert.equal(writeDecision.behavior, "deny");
-  assert.equal(subagentDecision.behavior, "deny");
+  assert.deepEqual(subagentDecision, { behavior: "deny", message: "The user declined this request." });
+  assert.equal(agent(agentId).messages.filter(({ commandApproval }) => commandApproval).length, 3);
+});
+
+test("a repository task runs sandboxed commands without asking and explains what it does ask", async (t) => {
+  const decisions: any[] = [];
+  let options: any;
+  const { runtime, agent, root } = await claudeWorkspace(t, [
+    async function* (io) {
+      const first = await io.nextUser();
+      options = io.options;
+      const signal = new AbortController().signal;
+      // Commands Claude Code cannot analyse still run when they stay in the sandbox.
+      decisions.push(await io.options.canUseTool("Bash", { command: "for b in a b; do git log $b; done" },
+        { signal, toolUseID: "t1", decisionReason: "A variable in this command can't be checked before it runs" }));
+      decisions.push(await io.options.canUseTool("Bash", { command: "python3 - <<'EOF'\nprint(1)\nEOF" },
+        { signal, toolUseID: "t2", agentID: "worker", decisionReason: "Contains brace with quote character (expansion obfuscation)" }));
+      // The folder a command runs in comes from Claude Code's hook, not the task's starting folder.
+      const record = io.options.hooks.PreToolUse.find(({ matcher }: { matcher: string }) => matcher === "Bash").hooks[0];
+      await record({ cwd: join(root, ".worktrees", "feature") }, "t3", { signal });
+      decisions.push(await io.options.canUseTool("Bash", { command: "npx prisma generate", dangerouslyDisableSandbox: true,
+        description: "Generate the client" }, { signal, toolUseID: "t3" }));
+      decisions.push(await io.options.canUseTool("SandboxNetworkAccess", { host: "www.example.com" }, { signal, toolUseID: "t4" }));
+      // A finished command makes Orchestra look for Git activity during the turn.
+      await io.options.hooks.PostToolUse[0].hooks[0]({}, "t1", { signal });
+      yield result([first.uuid]);
+    },
+  ], {}, true);
+  const agentId = String(await runtime.command({ type: "createTask", name: "Repo work", projectIds: ["app"] }));
+  await runtime.command({ type: "send", agentId, text: "Do the work" });
+  const approvals = () => agent(agentId).messages.filter(({ commandApproval }) => commandApproval?.status === "pending");
+  const outside = await until(() => approvals()[0], "the unsandboxed command");
+  assert.equal(outside.text, "Permission requested to run a command outside the sandbox.");
+  assert.equal(outside.commandApproval?.cwd, join(root, ".worktrees", "feature"));
+  assert.match(outside.commandApproval?.reason ?? "", /without the sandbox/);
+  assert.match(outside.commandApproval?.reason ?? "", /“Generate the client”/);
+  await runtime.command({ type: "resolveCommandApproval", agentId, requestId: outside.id, decision: "decline" });
+  const network = await until(() => approvals()[0], "the network request");
+  assert.equal(network.text, "Permission requested to connect to www.example.com.");
+  assert.equal(network.commandApproval?.network, "www.example.com");
+  assert.equal(network.commandApproval?.command, "Connect to www.example.com");
+  await runtime.command({ type: "resolveCommandApproval", agentId, requestId: network.id, decision: "approve" });
+  await until(() => agent(agentId).status === "done", "the turn");
+  assert.deepEqual(decisions.map(({ behavior }) => behavior), ["allow", "allow", "deny", "allow"]);
+  assert.equal(options.permissionMode, "acceptEdits");
+  assert.equal(options.sandbox.autoAllowBashIfSandboxed, true);
+  assert.ok(options.sandbox.network.allowedDomains.includes("registry.npmjs.org"), "package registries need no approval");
+  assert.ok(options.sandbox.network.allowedDomains.includes("git.example.org"), "the repository's Git remote needs no approval");
+  assert.ok(Array.isArray(options.sandbox.filesystem.allowWrite), "tool caches are writable in repository tasks");
   assert.equal(agent(agentId).messages.filter(({ commandApproval }) => commandApproval).length, 2);
 });
 

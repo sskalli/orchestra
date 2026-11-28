@@ -42,6 +42,10 @@ export type ApprovalChoice = "approve" | "approveForSession" | "decline";
 export type PermissionApproval = {
   status: "pending" | "approved" | "approved-for-session" | "declined" | "expired" | "unconfirmed";
   kind?: "command" | "fileChange" | "permissions";
+  /** The engine's one-line headline for the request, used instead of the generic one for its kind. */
+  summary?: string;
+  /** The background agent that asked on the task's behalf. */
+  requestedBy?: string;
   command?: string;
   cwd?: string;
   reason?: string;
@@ -1825,6 +1829,11 @@ export class WorkspaceRuntime {
 
   private approvalOffer(method: string, params: Event["params"], run: Run | undefined): ApprovalOffer | undefined {
     const reason = typeof params.reason === "string" && params.reason.trim() ? params.reason.trim().slice(0, 2400) : undefined;
+    const label = (value: unknown, limit: number) =>
+      typeof value === "string" && value.trim() && !unsafeDisplayText.test(value) ? value.trim().slice(0, limit) : undefined;
+    const summary = label(params.summary, 200);
+    const requestedBy = label(params.requestedBy, 200);
+    const described = { ...(summary ? { summary } : {}), ...(requestedBy ? { requestedBy } : {}) };
     const cwd = typeof params.cwd === "string" && isAbsolute(params.cwd) ? params.cwd : undefined;
     if (method === "item/commandExecution/requestApproval") {
       const { command } = params;
@@ -1842,7 +1851,7 @@ export class WorkspaceRuntime {
       const network = networkHost(params.networkApprovalContext) ??
         (extra.network ? "Network access" : undefined);
       return { responses, view: {
-        kind: "command", command, cwd, reason, ...extra.paths, ...(network ? { network } : {}),
+        kind: "command", ...described, command, cwd, reason, ...extra.paths, ...(network ? { network } : {}),
         ...(decline.stopsTurn ? { declineStopsTurn: true } : {}),
       } };
     }
@@ -1856,7 +1865,7 @@ export class WorkspaceRuntime {
       return {
         responses: { approve: { decision: "accept" }, decline: { decision: "decline" },
           ...(offered.includes("acceptForSession") ? { approveForSession: { decision: "acceptForSession" } } : {}) },
-        view: { kind: "fileChange", reason, ...(files?.length ? { files } : {}), ...(grantRoot ? { writePaths: [grantRoot] } : {}) },
+        view: { kind: "fileChange", ...described, reason, ...(files?.length ? { files } : {}), ...(grantRoot ? { writePaths: [grantRoot] } : {}) },
       };
     }
     if (method === "item/permissions/requestApproval") {
@@ -1899,7 +1908,7 @@ export class WorkspaceRuntime {
     const choices = (["approve", "approveForSession", "decline"] as const).filter((choice) => offer.responses[choice]);
     const grantPaths = choices.includes("approveForSession") ? this.grantFolders(session, offer.view) : [];
     const request: WorkspaceMessage = {
-      ...message("system", approvalSummary(offer.view.kind!), "action"),
+      ...message("system", offer.view.summary ?? approvalSummary(offer.view.kind!), "action"),
       commandApproval: { status: "pending", ...offer.view, ...(grantPaths.length ? { grantPaths } : {}), choices },
     };
     (run.commandApprovals ??= new Map()).set(id, { message: request, responses: offer.responses });
