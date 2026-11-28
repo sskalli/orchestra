@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { UnknownCommandOutcome } from "./workspace-commands.ts";
 import { messageLengthProblem } from "./workspace-chat-recovery.ts";
-import { useComposerAssist } from "./workspace-composer.tsx";
+import { applyTextEdit, useComposerAssist } from "./workspace-composer.tsx";
+import { continueList } from "./workspace-composer-text.ts";
 import { ModelPicker } from "./workspace-model-picker.tsx";
 import type { ModelChange } from "./workspace-model-picker.tsx";
 import { chooseModelSettings } from "./workspace-models.ts";
@@ -16,6 +17,8 @@ type NewSessionComposerProps = {
   onSend: (agentId: string, text: string) => Promise<void>;
   onStarted: (agentId: string) => void;
 };
+
+const startShortcut = `${/Mac|iPhone|iPad/.test(globalThis.navigator?.platform ?? "") ? "⌘" : "Ctrl"}+Enter`;
 
 export function NewSessionComposer({ open, blocked, projects, onCancel, onCreate, onSend, onStarted }: NewSessionComposerProps) {
   const prompt = useRef<HTMLTextAreaElement>(null);
@@ -93,12 +96,22 @@ export function NewSessionComposer({ open, blocked, projects, onCancel, onCreate
     </header>
     <form onSubmit={(event) => { event.preventDefault(); void submit(); }}>
       <label className="new-session-field">First message
-        <textarea ref={prompt} rows={6} placeholder="What would you like to work on?" enterKeyHint="send" {...assist.inputProps}
+        <textarea ref={prompt} rows={6} placeholder="What would you like to work on?" enterKeyHint="enter" {...assist.inputProps}
           value={text} onChange={(event) => setText(event.target.value)} disabled={pending} required
           onBlur={assist.onBlur} onKeyDown={(event) => {
-            if (assist.handleKey(event) || event.key !== "Enter" || event.shiftKey) return;
+            if (assist.handleKey(event) || event.key !== "Enter") return;
+            // Enter adds a line (continuing a list item); Ctrl or Cmd+Enter starts the session.
+            if (event.ctrlKey || event.metaKey) {
+              event.preventDefault();
+              void submit();
+              return;
+            }
+            if (event.shiftKey || event.altKey) return;
+            const { value, selectionStart, selectionEnd } = event.currentTarget;
+            const edit = continueList(value, selectionStart, selectionEnd);
+            if (!edit) return;
             event.preventDefault();
-            void submit();
+            applyTextEdit(event.currentTarget, edit);
           }} />
       </label>
       {assist.menu}
@@ -126,7 +139,8 @@ export function NewSessionComposer({ open, blocked, projects, onCancel, onCreate
       {error && <p className="new-session-error" role="alert">{error}</p>}
       <footer>
         <button type="button" onClick={cancel} disabled={pending}>Cancel</button>
-        <button type="submit" disabled={blocked || pending || unknownOutcome || !text.trim()}>
+        <button type="submit" disabled={blocked || pending || unknownOutcome || !text.trim()}
+          title={startShortcut}>
           {pending ? "Sending…" : createdId ? "Retry message" : "Start session"}
         </button>
       </footer>
