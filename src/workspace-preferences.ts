@@ -1,5 +1,6 @@
 import { readFlightLog } from "./workspace-flight-log.ts";
 import type { FlightLog } from "./workspace-flight-log.ts";
+import type { ProjectFilter } from "./workspace-project-filter.ts";
 
 export type Camera = { x: number; y: number; scale: number };
 export type PanelSizes = { left?: number; right?: number; leftHeight?: number; mobileLeft?: number; mobileLeftWidth?: number };
@@ -116,5 +117,8 @@ export function workspacePreferences(projectPath: string, mode: "demo" | "codex"
       return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : undefined;
     },
     writeDiffWidth: (width: number) => { write("diff-width", width); },
+    /** The map's project filter; check it against the current projects with normalizeProjectFilter. */
+    readProjectFilter: () => read("project-filter"),
+    writeProjectFilter: (filter: ProjectFilter) => { write("project-filter", filter); },
   };
 }
