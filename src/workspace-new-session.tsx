@@ -3,6 +3,7 @@ import { UnknownCommandOutcome } from "./workspace-commands.ts";
 import { messageLengthProblem } from "./workspace-chat-recovery.ts";
 import { applyTextEdit, useComposerAssist } from "./workspace-composer.tsx";
 import { continueList } from "./workspace-composer-text.ts";
+import { useFileDrop } from "./workspace-file-drop.tsx";
 import { ModelPicker } from "./workspace-model-picker.tsx";
 import type { ModelChange } from "./workspace-model-picker.tsx";
 import { chooseModelSettings } from "./workspace-models.ts";
@@ -31,6 +32,7 @@ export function NewSessionComposer({ open, blocked, projects, onCancel, onCreate
   const [error, setError] = useState("");
   const [unknownOutcome, setUnknownOutcome] = useState(false);
   const assist = useComposerAssist({ textarea: prompt, anchor: prompt, value: text, projectIds, disabled: pending || !open });
+  const drop = useFileDrop({ textarea: prompt, disabled: pending || !open, onError: setError });
 
   useEffect(() => {
     if (open) prompt.current?.focus();
@@ -95,7 +97,7 @@ export function NewSessionComposer({ open, blocked, projects, onCancel, onCreate
       <button type="button" className="chat-icon-button" aria-label="Close new session" onClick={cancel} disabled={pending}>×</button>
     </header>
     <form onSubmit={(event) => { event.preventDefault(); void submit(); }}>
-      <label className="new-session-field">First message
+      <label className="new-session-field" {...drop.dropProps}>First message
         <textarea ref={prompt} rows={6} placeholder="What would you like to work on?" enterKeyHint="enter" {...assist.inputProps}
           value={text} onChange={(event) => setText(event.target.value)} disabled={pending} required
           onBlur={assist.onBlur} onKeyDown={(event) => {
@@ -115,6 +117,7 @@ export function NewSessionComposer({ open, blocked, projects, onCancel, onCreate
           }} />
       </label>
       {assist.menu}
+      {drop.uploading > 0 && <p role="status">Attaching {drop.uploading} file{drop.uploading === 1 ? "" : "s"}…</p>}
       <label className="new-session-field">Session name <span>(optional)</span>
         <input value={name} placeholder="Uses the first line of your message" maxLength={60}
           onChange={(event) => setName(event.target.value)} disabled={pending || Boolean(createdId)} />

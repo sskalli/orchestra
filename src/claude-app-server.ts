@@ -2,7 +2,7 @@
 // A thread is one Claude Code session; a turn is one query over a streamed input that also carries steering messages.
 import { randomUUID } from "node:crypto";
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
-import { dirname } from "node:path";
+import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import { createSdkMcpServer, query as claudeQuery, tool } from "@anthropic-ai/claude-agent-sdk";
 import type { CanUseTool, EffortLevel, HookCallback, ModelInfo, Options, PermissionResult, PermissionUpdate, Query, SDKMessage, SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
@@ -19,6 +19,13 @@ function claudeModel(model: unknown) {
 }
 
 const writeTools = new Set(["Edit", "Write", "MultiEdit", "NotebookEdit"]);
+/** Tools that only read files, with the input field naming the file or folder they read. */
+const readTools: Readonly<Record<string, string>> = { Read: "file_path", Glob: "path", Grep: "path" };
+
+function insideRoot(root: string, path: string) {
+  const offset = relative(root, path);
+  return offset === "" || (offset !== ".." && !offset.startsWith(`..${sep}`) && !isAbsolute(offset));
+}
 
 type TurnStatus = "inProgress" | "completed" | "failed" | "interrupted";
 type JournalItem = { id: string; type: "agentMessage"; text: string };
@@ -162,11 +169,14 @@ export class ClaudeAppServer implements ProviderServer {
   private readonly journalPath?: string;
   private readonly query: QueryFunction;
   private readonly wakeDelayMs: number;
+  /** Folders every turn may read without asking, such as files dropped into the composer. */
+  private readonly readableRoots: string[];
 
-  constructor(journalPath?: string, query: QueryFunction = claudeQuery, options: { wakeDelayMs?: number } = {}) {
+  constructor(journalPath?: string, query: QueryFunction = claudeQuery, options: { wakeDelayMs?: number; readableRoots?: string[] } = {}) {
     this.journalPath = journalPath;
     this.query = query;
     this.wakeDelayMs = options.wakeDelayMs ?? defaultWakeDelayMs;
+    this.readableRoots = (options.readableRoots ?? []).filter(isAbsolute).map((root) => resolve(root));
     this.load();
   }
 
@@ -470,6 +480,11 @@ export class ClaudeAppServer implements ProviderServer {
       const run = this.runs.get(threadId);
       if (!run || run.finished) return { behavior: "deny", message: "The turn has ended." };
       if (toolName.startsWith(`mcp__${toolServerName}__`) && options.mcpServer?.source === "sdk") return { behavior: "allow", updatedInput: input };
+      const readPath = Object.hasOwn(readTools, toolName) ? input[readTools[toolName]] : undefined;
+      if (typeof readPath === "string" && isAbsolute(readPath) && !readPath.includes("\0") &&
+          this.readableRoots.some((root) => insideRoot(root, resolve(readPath)))) {
+        return { behavior: "allow", updatedInput: input };
+      }
       if (options.agentID) return { behavior: "deny", message: "Subagents cannot request access. Report what is needed so the parent task can ask the user." };
       const grants = sessionGrants(options.suggestions);
       const decisions = ["accept", ...(grants.length ? ["acceptForSession"] : []), "decline"];

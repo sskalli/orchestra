@@ -7,6 +7,7 @@ import { LuArrowUp, LuEllipsis, LuSquare } from "react-icons/lu";
 import { CopyButton } from "./copy-button.tsx";
 import { ChatMarkdown, InlineCodeCopy } from "./workspace-markdown.tsx";
 import { useComposerAssist } from "./workspace-composer.tsx";
+import { useFileDrop } from "./workspace-file-drop.tsx";
 import type { ApprovalChoice, PermissionApproval, SystemMessageKind, WorkspaceAgent, WorkspaceMessage } from "./workspace-runtime.ts";
 import { messageLengthProblem, OrderedSends, restoredDraft, retryableMessageId } from "./workspace-chat-recovery.ts";
 
@@ -326,6 +327,7 @@ function Conversation({
   const readyToSend = !blocked && Boolean(draft.trim());
   const assist = useComposerAssist({ textarea: composerInput, anchor: composerBox, value: draft,
     projectIds: repositoryScope?.map(({ id }) => id) ?? [], disabled: Boolean(agent.lifecycleBusy) });
+  const drop = useFileDrop({ textarea: composerInput, disabled: blocked || Boolean(agent.lifecycleBusy), onError: setError });
   const hasFocusMessage = agent.messages.some((message) => message.id === focusMessageId);
   const shownInConversation = (detail: string) => agent.messages.some((message) =>
     message.role === "system" && Boolean(message.text) && (message.text.includes(detail) || detail.includes(message.text)));
@@ -780,7 +782,8 @@ function Conversation({
               if (failed) void retry(failed.id, failed.text);
             }}>{retrying ? "Trying again…" : "Try again"}</button>}</p> : null}
         {error && !shownInConversation(error) ? <p className="chat-error" role="alert">{error}</p> : null}
-        <div ref={composerBox} className="chat-composer-box">
+        {drop.uploading > 0 && <p className="chat-disabled" role="status">Attaching {drop.uploading} file{drop.uploading === 1 ? "" : "s"}…</p>}
+        <div ref={composerBox} className="chat-composer-box" {...drop.dropProps}>
           <div className="chat-composer-input">
             <span className="chat-input-prompt" aria-hidden="true">&gt;</span>
             <textarea ref={composerInput} aria-label={`Message ${recipient}`} enterKeyHint="send" {...assist.inputProps}
