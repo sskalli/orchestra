@@ -10,7 +10,7 @@ Top-level tasks have large nodes. Native children appear on successive rings as 
 
 ## Task sessions
 
-A session can handle a general conversation, a read-only investigation, or work across one or more repositories. Keep planning, user decisions, changes, and follow-up in the same task chat. The session can delegate through its engine's subagents and report results from its children. Child chats are available for inspection.
+A session can handle a general conversation, a read-only investigation, or work across one or more repositories. Keep planning, user decisions, changes, and follow-up in the same task chat. The session can delegate through its engine's subagents and report results from its children. Child chats are available for inspection. While the task is idle, the user can edit a message they sent: the conversation rewinds to before it, and the agent answers the edited message. Files on disk are not reverted.
 
 A task can read and write its selected repositories from the start. The agent applies a worktree workflow itself: a linked worktree and branch per change, with commits there and no pull requests. Show each commit, new branch, push, and published branch the task made in its chat, and leave out what Orchestra cannot attribute to it. Access outside the selected repositories needs the user's approval, and one approval can cover a folder for the rest of the task instead of each command.
 

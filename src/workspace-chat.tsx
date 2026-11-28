@@ -3,7 +3,7 @@ import { needsUserInput } from "./workspace-status.ts";
 import { agentAppearance } from "./workspace-agent-appearance.ts";
 import { memo, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { FormEvent, KeyboardEvent, PointerEvent, ReactNode } from "react";
-import { LuArrowUp, LuEllipsis, LuSquare } from "react-icons/lu";
+import { LuArrowUp, LuEllipsis, LuPencil, LuSquare } from "react-icons/lu";
 import { CopyButton } from "./copy-button.tsx";
 import { ChatMarkdown, InlineCodeCopy } from "./workspace-markdown.tsx";
 import { useComposerAssist } from "./workspace-composer.tsx";
@@ -34,6 +34,8 @@ type ChatProps = {
   onDraftRestore?: (unsent: string[]) => void;
   onSend: (text: string) => Promise<void> | void;
   onSteer?: (text: string) => Promise<void> | void;
+  /** Rewinds the conversation to before a sent message and sends the edited text in its place. */
+  onEditMessage?: (messageId: string, text: string) => Promise<void>;
   onCancel?: () => Promise<void>;
   onResolveCommandApproval?: ResolveCommandApproval;
   /** Clears a pending product question by hand. */
@@ -162,23 +164,71 @@ function CommandApprovalCard({ approval, requestId, blocked, onResolve }: {
 // Snapshots replace every message object, so unchanged text skips Markdown parsing, which is slow for long pastes.
 const MessageMarkdown = memo(ChatMarkdown);
 
-function MessageActions({ message, onRetry, retrying, retryDisabled }: {
+function MessageActions({ message, onRetry, retrying, retryDisabled, onEdit, editDisabledReason }: {
   message: WorkspaceMessage; onRetry?: () => void; retrying?: boolean; retryDisabled?: boolean;
+  onEdit?: () => void; editDisabledReason?: string;
 }) {
   const time = message.createdAt === undefined ? undefined : new Date(message.createdAt);
+  const editLabel = editDisabledReason ?? "Edit message";
   return (
     <footer className={`chat-message-actions${onRetry ? " chat-message-actions--retry" : ""}`}>
       {onRetry && <button type="button" className="chat-steer" disabled={retryDisabled || retrying}
         onClick={onRetry}>{retrying ? "Retrying…" : "Retry"}</button>}
       {time && Number.isFinite(time.getTime()) &&
         <time dateTime={time.toISOString()} title={time.toLocaleString()}>{messageTime.format(time)}</time>}
+      {onEdit && <button type="button" className="chat-icon-button" aria-label={editLabel} title={editLabel}
+        aria-disabled={Boolean(editDisabledReason)} onClick={() => { if (!editDisabledReason) onEdit(); }}>
+        <LuPencil aria-hidden="true" />
+      </button>}
       <CopyButton text={message.commandApproval?.command ?? message.text} label="Copy message" />
     </footer>
   );
 }
 
+/** Edits a sent message in place. Enter sends, Shift+Enter adds a line, and Escape cancels. */
+function MessageEditor({ value, saving, error, onChange, onSave, onCancel }: {
+  value: string; saving?: boolean; error?: string;
+  onChange: (text: string) => void; onSave: () => void; onCancel: () => void;
+}) {
+  const input = useRef<HTMLTextAreaElement>(null);
+  useLayoutEffect(() => {
+    const element = input.current;
+    if (!element) return;
+    element.focus({ preventScroll: true });
+    element.setSelectionRange(element.value.length, element.value.length);
+  }, []);
+  return (
+    <div className="chat-message-editor">
+      <textarea ref={input} aria-label="Edit message" value={value} readOnly={saving}
+        rows={Math.min(12, Math.max(2, value.split("\n").length))}
+        onChange={(event) => onChange(event.target.value)}
+        onKeyDown={(event) => {
+          if (event.nativeEvent.isComposing) return;
+          if (event.key === "Escape") {
+            event.preventDefault();
+            event.stopPropagation();
+            if (!saving) onCancel();
+          } else if (event.key === "Enter" && !event.shiftKey) {
+            event.preventDefault();
+            onSave();
+          }
+        }} />
+      <p className="chat-message-editor-note">
+        Sending rewinds the conversation to this message: it and everything after it are removed, and the agent answers the edited message. Files on disk are not reverted.
+      </p>
+      {error && <p className="chat-error" role="alert">{error}</p>}
+      <div className="chat-message-editor-actions">
+        <button type="button" className="chat-steer" disabled={saving} onClick={onCancel}>Cancel</button>
+        <button type="button" className="chat-steer" disabled={saving || !value.trim()} onClick={onSave}>
+          {saving ? "Sending…" : "Send edit"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function Conversation({
-  agent, projectLabel, repositoryScope, modelLabel, usageLabel, draft: initialDraft, composerHeight, onComposerHeightChange, onDraftInput, onDraftChange, onDraftRestore, onSend, onSteer, onCancel, onResumeQueue, onClose,
+  agent, projectLabel, repositoryScope, modelLabel, usageLabel, draft: initialDraft, composerHeight, onComposerHeightChange, onDraftInput, onDraftChange, onDraftRestore, onSend, onSteer, onEditMessage, onCancel, onResumeQueue, onClose,
   disabled, disabledReason, providerNotice, focusMessageId, focusRequest, onOpenAgent, onLifecycle, onRename, onResolveCommandApproval, onResolveProductQuestion, modelPicker, headerActions,
 }: ChatProps) {
   const transcript = useRef<HTMLDivElement>(null);
@@ -553,6 +603,30 @@ function Conversation({
     }
   }, [onSend, retryDisabled]);
 
+  const [editing, setEditing] = useState<{ id: string; text: string; saving?: boolean; error?: string }>();
+  const editDisabledReason = sending || retrying || agent.status === "working" || agent.canCancel || agent.queueDepth > 0
+    ? "Wait for the agent to finish and the queue to empty before editing" : undefined;
+
+  const saveEdit = useCallback(async () => {
+    if (!editing || editing.saving || !onEditMessage) return;
+    const text = editing.text.trim();
+    if (!text) return;
+    const tooLong = messageLengthProblem(text);
+    if (tooLong) {
+      setEditing({ ...editing, error: tooLong });
+      return;
+    }
+    setEditing({ ...editing, saving: true, error: undefined });
+    try {
+      await onEditMessage(editing.id, text);
+      pinToBottom.current = true;
+      if (mounted.current) setEditing(undefined);
+    } catch (failure) {
+      if (mounted.current) setEditing((current) => current && { ...current, saving: false,
+        error: failure instanceof Error ? failure.message : "The message could not be edited." });
+    }
+  }, [editing, onEditMessage]);
+
   function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!showWorkingIndicator) void send(onSend);
@@ -629,7 +703,11 @@ function Conversation({
                   {message.state === "failed" ? <span className="chat-message-state chat-message-state--failed">Failed</span> : null}
                   {message.state === "cancelled" ? <span className="chat-message-state">Stopped</span> : null}
                 </div>
-                {commandApproval ? (
+                {editing?.id === message.id ? (
+                  <MessageEditor value={editing.text} saving={editing.saving} error={editing.error}
+                    onChange={(text) => setEditing((current) => current && { ...current, text, error: undefined })}
+                    onSave={() => void saveEdit()} onCancel={() => setEditing(undefined)} />
+                ) : commandApproval ? (
                   <CommandApprovalCard approval={commandApproval} requestId={message.id} blocked={blocked}
                     onResolve={onResolveCommandApproval} />
                 ) : <div className="chat-markdown">
@@ -646,10 +724,14 @@ function Conversation({
                 )}
               </div>
               <MessageActions message={message} retrying={retrying} retryDisabled={retryDisabled}
-                onRetry={message.id === retryId ? () => void retry(message.id, message.text) : undefined} />
+                onRetry={message.id === retryId ? () => void retry(message.id, message.text) : undefined}
+                editDisabledReason={editDisabledReason}
+                onEdit={onEditMessage && !blocked && !editing && message.role === "user" && message.turnId
+                  ? () => setEditing({ id: message.id, text: message.text }) : undefined} />
             </article>
           );
-        }), [retry, retryDisabled, retryId, retrying, agent.id, agent.messages, archived, blocked, hiddenMessages, onResolveCommandApproval, onResolveProductQuestion, resolveQuestion, resolvingQuestion]);
+        }), [retry, retryDisabled, retryId, retrying, agent.id, agent.messages, archived, blocked, hiddenMessages, onResolveCommandApproval, onResolveProductQuestion, resolveQuestion, resolvingQuestion,
+          editing, editDisabledReason, onEditMessage, saveEdit]);
 
   const headerStatus = archived ? "Archived" : agent.lifecycleBusy ? "Updating…" : statusLabels[agent.status];
   const headerTone = archived || agent.lifecycleBusy ? "idle" : agent.status;

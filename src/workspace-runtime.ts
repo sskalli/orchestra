@@ -29,6 +29,8 @@ export type WorkspaceMessage = {
   createdAt?: number;
   kind?: SystemMessageKind;
   providerItemId?: string;
+  /** The provider turn this user message started; such a message can be edited, which rewinds the conversation to before it. */
+  turnId?: string;
   state?: "queued" | "streaming" | "failed" | "cancelled";
   /** A question the user resolved by hand is "resolved", without a linked answer. */
   productQuestion?: { status: "pending" | "resolved" } | { status: "answered"; answerMessageId: string };
@@ -103,6 +105,7 @@ export type WorkspaceCommand =
   | { type: "resolveProductQuestion"; agentId: string; questionId: string }
   | { type: "resolveCommandApproval"; agentId: string; requestId: string; decision: ApprovalChoice }
   | { type: "send" | "steer"; agentId: string; text: string }
+  | { type: "editMessage"; agentId: string; messageId: string; text: string }
   | { type: "resumeQueue" | "cancel" | "restore" | "delete"; agentId: string }
   | { type: "rename"; agentId: string; name: string }
   | { type: "archive"; agentId: string; stopRunning?: boolean };
@@ -129,6 +132,8 @@ type AgentSession = {
   run?: Run;
   recovery?: SavedSession["run"];
   opening?: boolean;
+  /** An edited message is rewinding the provider's thread; nothing else may start a turn meanwhile. */
+  rewinding?: boolean;
   queue: WorkspaceMessage[];
   stream: Map<string, WorkspaceMessage>;
   /** What Orchestra last read from the task's repositories during the current turn. */
@@ -600,6 +605,7 @@ export class WorkspaceRuntime {
       await this.interrupt(session);
       return;
     }
+    if (session.rewinding) throw new Error("Wait for the edited message to be sent.");
     if (!this.available || session.agent.unavailableReason) {
       throw new Error(session.agent.unavailableReason ?? this.state.provider.message ?? "The provider is unavailable.");
     }
@@ -610,7 +616,7 @@ export class WorkspaceRuntime {
       this.drain(session);
       return;
     }
-    if (command.type !== "send" && command.type !== "steer" && command.type !== "answerProductQuestion") {
+    if (command.type !== "send" && command.type !== "steer" && command.type !== "answerProductQuestion" && command.type !== "editMessage") {
       throw new Error("Unknown workspace command.");
     }
     const text = typeof command.text === "string" ? command.text.trim() : "";
@@ -619,6 +625,10 @@ export class WorkspaceRuntime {
       ? session.agent.messages.find(({ id }) => id === command.questionId) : undefined;
     const tooLong = messageLengthProblem(text, question ? messageLength(this.answerPrefix(question.text)) : 0);
     if (tooLong) throw new Error(tooLong);
+    if (command.type === "editMessage") {
+      await this.editMessage(session, command.messageId, text);
+      return;
+    }
     if (command.type === "steer") {
       await this.steer(session, text);
       return;
@@ -656,6 +666,42 @@ export class WorkspaceRuntime {
       session.queue.push(answer);
     }
     if (!this.drain(session)) this.update(session);
+  }
+
+  /**
+   * Rewinds the conversation to just before a user message that started a turn, then sends the edited text as a new
+   * turn. The provider drops that turn and every later one from the thread; files on disk are not reverted.
+   */
+  private async editMessage(session: AgentSession, messageId: string, text: string) {
+    const original = session.agent.messages.find(({ id }) => id === messageId);
+    if (!session.agent.directTask || original?.role !== "user" || !original.turnId) {
+      throw new Error("Only a message you sent that started a turn can be edited.");
+    }
+    if (session.run || session.queue.length || session.opening) {
+      throw new Error("Wait for the current turn and queued messages to finish before editing a message.");
+    }
+    session.rewinding = true;
+    try {
+      if (!this.demo) await this.server!.call("thread/revert", { threadId: session.threadId, beforeTurnId: original.turnId });
+    } catch (error) {
+      throw new Error(`${this.engineName} could not rewind the conversation, so nothing changed. ${errorText(error)}`);
+    } finally {
+      session.rewinding = false;
+    }
+    const messages = session.agent.messages;
+    const index = messages.indexOf(original);
+    if (index < 0 || !this.isActive(session)) throw new Error("This conversation changed while the message was being edited.");
+    const removed = new Set(messages.splice(index).map(({ id }) => id));
+    // A question whose answer was removed is open again; the edited message may answer it.
+    for (const entry of messages) {
+      if (entry.productQuestion?.status === "answered" && removed.has(entry.productQuestion.answerMessageId)) {
+        entry.productQuestion = { status: "pending" };
+      }
+    }
+    session.agent.status = "idle";
+    const next = message("user", text);
+    messages.push(next);
+    await this.enqueue(session, next);
   }
 
   /** A turn kept open only for background subagents takes new messages now instead of queueing them behind the subagents. */
@@ -1357,6 +1403,7 @@ export class WorkspaceRuntime {
       return;
     }
     if (this.demo) {
+      next.turnId = randomUUID();
       this.scheduleDemo(session, run);
       return;
     }
@@ -1381,6 +1428,7 @@ export class WorkspaceRuntime {
         additionalContext: { ...this.pendingQuestionContext(session, next), ...this.concurrencyContext(neighbours) },
       });
       session.freshThread = false;
+      next.turnId ??= turn.id;
       if (session.threadId) this.trackTurn(session, session.threadId, turn.id, next);
       if (session.run === run) {
         run.turn ??= turn;
@@ -1713,6 +1761,7 @@ export class WorkspaceRuntime {
     if (method === "turn/started" && params.turn && !session.run.turn) {
       session.freshThread = false;
       session.run.turn = params.turn;
+      session.run.message.turnId ??= params.turn.id;
       this.update(session);
     }
     if (method === "turn/completed" && params.turn && (!session.run.turn || params.turn.id === session.run.turn.id)) {
