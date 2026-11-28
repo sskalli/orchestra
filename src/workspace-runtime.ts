@@ -495,7 +495,7 @@ export class WorkspaceRuntime {
       this.usageIssue = "Usage tracking is unavailable because its local records could not be read.";
     }
     const server: ProviderServer = this.createServer?.() ?? (this.engine === "claude"
-      ? new ClaudeAppServer(this.store?.claudeJournalPath)
+      ? new ClaudeAppServer(this.store?.claudeJournalPath, undefined, { readableRoots: this.store ? [this.store.attachmentsPath] : [] })
       : new AppServer(this.state.project.path));
     this.server = server;
     server.onEvent = (event) => this.onEvent(event);

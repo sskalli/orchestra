@@ -442,6 +442,8 @@
 .workspace-chat .chat-send-button:not(:disabled):hover { background: var(--control-highlight); }
 
 .chat-composer-box:focus-within { border-color: var(--text-muted); }
+/* Files dragged over the composer. */
+.chat-composer-box[data-dropping] { border-color: var(--text-muted); border-style: dashed; }
 
 .chat-composer-box textarea {
   width: 100%;

@@ -27,6 +27,8 @@
 }
 
 .new-session textarea { resize: vertical; min-height: 7rem; }
+/* Files dragged over the first message. */
+.new-session-field[data-dropping] textarea { border-style: dashed; border-color: var(--sw-muted); }
 .new-session fieldset { margin: 0; padding: 8px 10px 10px; }
 .new-session fieldset label { display: flex; align-items: center; gap: 6px; overflow-wrap: anywhere; }
 .new-session fieldset p { margin: 0 0 8px; overflow-wrap: anywhere; }

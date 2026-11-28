@@ -1,6 +1,7 @@
 import { createServer, type IncomingMessage } from "node:http";
 import { readFile } from "node:fs/promises";
-import { extname, resolve } from "node:path";
+import { tmpdir } from "node:os";
+import { extname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { WorkspaceRuntime } from "./workspace-runtime.ts";
 import { safeError } from "./app-server.ts";
@@ -10,6 +11,7 @@ import { messageCharacterLimit } from "./workspace-chat-recovery.ts";
 import { modelChoice } from "./workspace-models.ts";
 import { parseWorkspaceArgs } from "./workspace-options.ts";
 import { loadLocalImage } from "./workspace-images.ts";
+import { AttachmentTooLarge, readAttachmentBody, saveAttachment } from "./workspace-attachments.ts";
 import { defaultProject, resolveProjects, workspaceIdentity } from "./workspace-projects.ts";
 
 const { live, projectPath, projects: specifiedProjects, provider: modelProvider, engine } = parseWorkspaceArgs(process.argv.slice(2));
@@ -28,6 +30,10 @@ let host = `127.0.0.1:${port}`;
 let origin = `http://${host}`;
 const dist = fileURLToPath(new URL("../dist/", import.meta.url));
 let runtime: WorkspaceRuntime;
+// Provider IDs cannot contain ":", so Claude state never shares a file with a Codex provider.
+const store = live ? workspaceStore(identity, undefined, engine === "claude" ? "engine:claude" : modelProvider) : undefined;
+// Demo workspaces keep no state, so their dropped files go to a temporary folder.
+const attachmentsRoot = store?.attachmentsPath ?? join(tmpdir(), "orchestra-demo-attachments");
 // Concurrent requests for the same task's changes share one Git computation.
 const sharedDiff = diffScheduler((key) => taskDiff(JSON.parse(key)));
 
@@ -209,6 +215,24 @@ const server = createServer(async (request, response) => {
     }
     return;
   }
+  if (request.method === "POST" && path === "/api/attachments") {
+    // Only the workspace page may upload; the file is stored for the agent to read and never served back.
+    if (request.headers.origin !== origin || request.headers["content-type"] !== "application/octet-stream") {
+      response.writeHead(403).end();
+      return;
+    }
+    const name = new URL(request.url ?? "", origin).searchParams.get("name") ?? "";
+    try {
+      const body = await readAttachmentBody(request);
+      const stored = await saveAttachment(attachmentsRoot, name, body);
+      response.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({ path: stored }));
+    } catch (error) {
+      const tooLarge = error instanceof AttachmentTooLarge;
+      response.writeHead(tooLarge ? 413 : 500, { "Content-Type": "application/json", ...(tooLarge ? { Connection: "close" } : {}) })
+        .end(JSON.stringify({ error: tooLarge ? error.message : "Orchestra could not store the file." }));
+    }
+    return;
+  }
   if (request.method === "GET" && (path === "/" || /^\/assets\/[\w.-]+\.(js|css|svg)$/.test(path ?? ""))) {
     const filename = path === "/" ? "index.html" : path!.slice(1);
     const contentType = { ".html": "text/html", ".js": "text/javascript", ".css": "text/css", ".svg": "image/svg+xml" }[extname(filename)] ?? "application/octet-stream";
@@ -235,8 +259,7 @@ server.on("listening", () => {
     demo: !live,
     modelProvider,
     engine,
-    // Provider IDs cannot contain ":", so Claude state never shares a file with a Codex provider.
-    store: live ? workspaceStore(identity, undefined, engine === "claude" ? "engine:claude" : modelProvider) : undefined,
+    store,
   });
   const mode = !live ? "demo" : engine === "claude" ? "Claude" : modelProvider === "openai" ? "Codex" : `Codex: ${modelProvider}`;
   console.log(`Orchestra (${mode}) is available at ${origin}`);

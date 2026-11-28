@@ -18,4 +18,4 @@ On a task's first turn Orchestra snapshots each local checkout's tracked content
 
 ## Local state
 
-Persist direct task history and enough queue and thread information to resume after restart. Track model settings and usage separately from workspace state. Browser preferences hold drafts and camera positions. Isolate live workspaces by their repository identity and Codex provider.
+Persist direct task history and enough queue and thread information to resume after restart. Files dropped on a composer are uploaded to the local server, stored privately in their own folder under the workspace state's attachments directory, and inserted into the draft as absolute paths; they are never served back. Codex sandboxes already read them, and the Claude engine lets read-only tools open them without a prompt. Track model settings and usage separately from workspace state. Browser preferences hold drafts and camera positions. Isolate live workspaces by their repository identity and Codex provider.
